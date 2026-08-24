@@ -39,6 +39,7 @@ import { estimateImageTransmitSeconds, parseImageEnvelope } from '../utils/image
 import {
   aeicApproxBitstreamBytes,
   aeicAspectRatio,
+  parseAeicBinaryRef,
   parseAeicChunk,
   type AeicChunk,
 } from '../utils/aeicEnvelope';
@@ -155,7 +156,7 @@ function ImageMessage({ message, content }: { message: Message; content: string 
  * Chunk 0 carries the metadata byte and owns the bubble; a later chunk renders
  * as a small chip so the conversation does not show a wall of basE91.
  */
-function AeicImageMessage({ message, chunk }: { message: Message; chunk: AeicChunk }) {
+function AeicImageMessage({ message, chunk }: { message: Message; chunk?: AeicChunk }) {
   const [session, setSession] = useState<AeicSessionStatus | null>(null);
   const [state, setState] = useState<'idle' | 'loading' | 'decoded' | 'unavailable'>('idle');
   const [detail, setDetail] = useState<string | null>(null);
@@ -235,9 +236,13 @@ function AeicImageMessage({ message, chunk }: { message: Message; chunk: AeicChu
   }, [session]);
 
   const contentUrl = session ? api.aeicContentUrl(session.session_key) : null;
-  const ratio = aeicAspectRatio(session?.aspect_code ?? chunk.aspectCode);
-  const approxBytes = session?.bitstream_bytes || aeicApproxBitstreamBytes(chunk.payloadChars);
-  const square = session?.square_size ?? chunk.squareSize ?? 512;
+  const ratio = aeicAspectRatio(session?.aspect_code ?? chunk?.aspectCode ?? null);
+  const approxBytes =
+    session?.bitstream_bytes || (chunk ? aeicApproxBitstreamBytes(chunk.payloadChars) : 0);
+  const square = session?.square_size ?? chunk?.squareSize ?? 512;
+  // A binary-transport image has no chunk to count; its packet count is a
+  // property of the GRP_DATA stream the server already reassembled.
+  const parts = chunk?.total ?? session?.total_chunks ?? 1;
 
   return (
     <div className="w-48 max-w-full">
@@ -284,7 +289,7 @@ function AeicImageMessage({ message, chunk }: { message: Message; chunk: AeicChu
         </button>
       )}
       <div className="mt-1 text-[0.6875rem] text-muted-foreground">
-        {square}px AI · {approxBytes} B · {chunk.total} msg{chunk.total === 1 ? '' : 's'}
+        {square}px AI · {approxBytes} B · {parts} msg{parts === 1 ? '' : 's'}
       </div>
       {fullscreen && contentUrl && (
         <div
@@ -1449,6 +1454,9 @@ export function MessageList({
             // AEIC images ride as `aei1:` text; parsed once here so the bubble
             // dispatch below does not re-parse it per branch.
             const aeicChunk = parseAeicChunk(content);
+            // An image received as binary GRP_DATA: no text crossed the air,
+            // so the server left a marker for this bubble to hang off.
+            const aeicBinaryRef = parseAeicBinaryRef(content);
             const directSenderName =
               msg.type === 'PRIV' && isRoomServer ? msg.sender_name || null : null;
             const channelSenderName = msg.type === 'CHAN' ? msg.sender_name || sender : null;
@@ -1659,6 +1667,8 @@ export function MessageList({
                     <div className="break-words whitespace-pre-wrap">
                       {parseImageEnvelope(content) ? (
                         <ImageMessage message={msg} content={content} />
+                      ) : aeicBinaryRef ? (
+                        <AeicImageMessage message={msg} />
                       ) : aeicChunk ? (
                         aeicChunk.index === 0 ? (
                           <AeicImageMessage message={msg} chunk={aeicChunk} />

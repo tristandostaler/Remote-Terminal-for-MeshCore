@@ -49,9 +49,11 @@ from app.imaging.aeic.text_transport import (
     encode_chunks,
 )
 from app.imaging.aeic.transport import (
+    AeicChannelDataUnsupported,
     AeicSendResult,
     AeicTarget,
     AeicTransport,
+    TextChunkTransport,
     select_transport,
 )
 
@@ -277,8 +279,25 @@ class AeicService:
             square_size=SQUARE_SIZE,
             aspect_code=aspect_code_for(width, height),
         )
-        chosen = transport or select_transport()
-        result = await chosen.send(bitstream, metadata, target, session_id=session_id)
+        # The binary transport structurally needs a radio to talk to, so a target
+        # without one (a bot in test mode, for instance) is never a candidate for
+        # it -- preferring it there would fail with an unrecoverable error rather
+        # than the recoverable one the fallback below handles.
+        chosen = transport or select_transport(
+            target.conversation_type, prefer_binary=target.radio_manager is not None
+        )
+        try:
+            result = await chosen.send(bitstream, metadata, target, session_id=session_id)
+        except AeicChannelDataUnsupported as exc:
+            # The radio rejected the FIRST blob, so nothing is on air and this is
+            # safe to retry another way. Only this exception is recoverable; a
+            # failure later in the blob run leaves part of the image transmitted
+            # and must not be resent.
+            if transport is not None or target.emit_text is None:
+                raise
+            logger.info("Falling back to the aei1: text transport: %s", exc)
+            chosen = TextChunkTransport()
+            result = await chosen.send(bitstream, metadata, target, session_id=None)
         storage_key = await self._record_outgoing(result, metadata, target, bitstream)
         return replace(result, storage_key=storage_key), bitstream, metadata
 
