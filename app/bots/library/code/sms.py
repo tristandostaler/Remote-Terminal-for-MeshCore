@@ -53,7 +53,7 @@ BOT_META = {
     "name": "SMS",
     "category": "Communication",
     "description": "VoIP.ms or Twilio SMS with direct RemoteTerm callback and channel/DM conversation routing",
-    "version": "1.6.0",
+    "version": "1.7.0",
     "admin_only": True,
     "settings_schema": [
         {

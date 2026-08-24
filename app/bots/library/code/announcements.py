@@ -7,7 +7,7 @@ BOT_META = {
     "name": "announcements",
     "category": "Admin",
     "description": "Admin-only: announce <#channel|here> <text>",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "admin_only": True,
     "settings_schema": [
         {

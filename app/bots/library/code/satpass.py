@@ -14,7 +14,7 @@ BOT_META = {
     "name": "satpass",
     "category": "Solar",
     "description": "Next visible satellite pass (N2YO, key required)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "cooldown_seconds": 5,
     "settings_schema": [
         {

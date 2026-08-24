@@ -13,7 +13,7 @@ BOT_META = {
     "name": "neighbors",
     "category": "Mesh",
     "description": "Lists zero-hop neighbors (nodes heard directly)",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "cooldown_seconds": 60,
 }
 

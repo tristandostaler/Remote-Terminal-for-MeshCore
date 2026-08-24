@@ -11,7 +11,7 @@ BOT_META = {
     "name": "aqi",
     "category": "Weather",
     "description": "Air quality: US AQI and PM2.5 (Open-Meteo)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "cooldown_seconds": 3,
     "settings_schema": [
         {

@@ -23,7 +23,7 @@ BOT_META = {
     "name": "solar",
     "category": "Solar",
     "description": "Space weather: solar indices, HF band conditions, aurora outlook",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "cooldown_seconds": 5,
 }
 

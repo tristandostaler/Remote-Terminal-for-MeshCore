@@ -20,7 +20,7 @@ BOT_META = {
     "name": "ping",
     "category": "Basic",
     "description": "Liveness check with signal report: hops, path, region, clock offset",
-    "version": "1.2.0",
+    "version": "1.3.0",
 }
 
 # Below this the two clocks are close enough that reporting the delta is noise.

@@ -15,7 +15,7 @@ BOT_META = {
     "name": "earthquake",
     "category": "Alerts",
     "description": "USGS quake alerts for an area; 'quake' shows the latest",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "settings_schema": [
         {
             "key": "min_magnitude",

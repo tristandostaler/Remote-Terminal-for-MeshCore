@@ -11,7 +11,7 @@ BOT_META = {
     "name": "rain",
     "category": "Weather",
     "description": "Next-2h rain nowcast (Open-Meteo 15-min data)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "cooldown_seconds": 3,
     "settings_schema": [
         {

@@ -20,7 +20,7 @@ BOT_META = {
     "name": "fun",
     "category": "Fun",
     "description": "Jokes, dad jokes, cat facts, fun facts, fortunes, Magic 8-Ball",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "settings_schema": [
         {
             "key": "joke_enabled",

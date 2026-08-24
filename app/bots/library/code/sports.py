@@ -19,7 +19,7 @@ BOT_META = {
     "name": "sports",
     "category": "Sports",
     "description": "Live and final scores from ESPN (NFL, NBA, MLB, NHL, MLS, World Cup)",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "settings_schema": [
         {
             "key": "league",

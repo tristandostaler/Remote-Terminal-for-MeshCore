@@ -7,7 +7,7 @@ BOT_META = {
     "name": "version",
     "category": "Basic",
     "description": "Shows the app and bot library versions",
-    "version": "1.0.0",
+    "version": "1.1.0",
 }
 
 

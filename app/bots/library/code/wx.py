@@ -17,7 +17,7 @@ BOT_META = {
     "name": "wx",
     "category": "Weather",
     "description": "Forecast + alerts: NWS with Open-Meteo fallback",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "cooldown_seconds": 3,
     "settings_schema": [
         {

@@ -12,7 +12,7 @@ BOT_META = {
     "name": "path",
     "category": "Mesh",
     "description": "Decode a routing path into repeater names",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "settings_schema": [
         {
             "key": "hop_width",

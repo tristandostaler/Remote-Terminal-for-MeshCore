@@ -29,7 +29,7 @@ BOT_META = {
     "name": "hamcall",
     "category": "Utility",
     "description": "Lookup amateur-radio callsigns with a local fallback database",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "settings_schema": [
         {
             "key": "db_path",

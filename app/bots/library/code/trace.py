@@ -12,7 +12,7 @@ BOT_META = {
     "name": "trace",
     "category": "Mesh",
     "description": "Active route trace along a hex path (real trace packet)",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "cooldown_seconds": 30,
     "settings_schema": [
         {
