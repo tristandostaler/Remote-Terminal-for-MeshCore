@@ -389,7 +389,7 @@ class TestLongReplySplitting:
 
         texts = [s["text"] for s in ctx.captured_sends]
         # Last message is the unchanged hint; the list before it is numbered.
-        assert texts[-1] == "Say 'help <command>' for details."
+        assert texts[-1] == "Say 'help <command>' for details — it names every trigger."
         parts = texts[:-1]
         assert len(parts) > 1, "expected the long list to split"
         assert [p.split("/")[0] for p in parts] == [f"({i}" for i in range(1, len(parts) + 1)]
@@ -400,6 +400,86 @@ class TestLongReplySplitting:
         joined = " ".join(p.split(") ", 1)[1] for p in parts)
         for i in range(40):
             assert f"keyword{i:02d}" in joined
+
+
+class TestHelpShowsEveryTrigger:
+    """Both help screens name every word that reaches a bot.
+
+    The list used to print one keyword per bot and ``help <command>`` cut the
+    list at six, so operator-added aliases and the words merged bots absorbed
+    were unreachable unless you already knew them.
+    """
+
+    def _ctx(self, bots, settings=None):
+        entry = get_library_entry("help")
+        assert entry is not None
+        handler = load_bot_code(entry["code"]).collector.keywords[0].handler
+        ctx = BotContext(
+            bot_id="help",
+            bot_name="help",
+            settings=settings or {},
+            state={},
+            is_test=True,
+            loop=asyncio.get_event_loop(),
+            origin_is_dm=True,
+            origin_sender_key="ab" * 32,
+        )
+        ctx.get_enabled_bots = lambda: bots  # type: ignore[method-assign]
+        return handler, ctx
+
+    async def _run(self, bots, text, settings=None):
+        handler, ctx = self._ctx(bots, settings)
+        word, _, rest = text.partition(" ")
+        await handler(
+            ctx,
+            BotMessage(
+                text=text,
+                is_dm=True,
+                sender_key="ab" * 32,
+                keyword=word,
+                args=rest.split() if rest else [],
+            ),
+        )
+        return [s["text"] for s in ctx.captured_sends]
+
+    BOTS = [
+        {"name": "fun", "description": "d", "keywords": ["joke", "jokes", "fortune"]},
+        {"name": "ping", "description": "d", "keywords": ["ping"]},
+    ]
+
+    async def test_list_counts_the_extra_triggers_of_each_command(self):
+        """The default list stays one entry per command, marked with its alias count."""
+        texts = await self._run(self.BOTS, "help")
+        joined = " ".join(texts)
+        assert "joke (+2)" in joined
+        # A command with a single trigger stays bare — no empty parentheses.
+        assert "ping (" not in joined
+        assert "ping" in joined
+        assert texts[-1].endswith("it names every trigger.")
+
+    async def test_list_spells_out_the_aliases_when_the_operator_asks(self):
+        texts = await self._run(self.BOTS, "help", settings={"spell_out_aliases": True})
+        joined = " ".join(texts)
+        assert "joke (jokes/fortune)" in joined
+        assert "ping (" not in joined
+
+    async def test_detail_lists_every_trigger_past_the_old_six(self):
+        keywords = [f"kw{i:02d}" for i in range(9)]
+        texts = await self._run(
+            [{"name": "many", "description": "d", "keywords": keywords}], "help many"
+        )
+        joined = " ".join(texts)
+        assert joined.startswith("many: d — try: ")
+        for keyword in keywords:
+            assert keyword in joined, keyword
+
+    async def test_detail_answers_to_an_alias_and_drops_repeats(self):
+        """UI triggers reach every generic handler, so the raw list repeats words."""
+        texts = await self._run(
+            [{"name": "many", "description": "d", "keywords": ["a", "b", "a"]}], "help b"
+        )
+        joined = " ".join(texts)
+        assert joined.endswith("try: a, b")
 
 
 class TestMailbox:
