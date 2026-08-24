@@ -1,6 +1,12 @@
-"""Dice roller. Seeded from meshcore-bot's dice command.
+"""Dice and random numbers. Seeded from meshcore-bot's dice command.
 
-Usage: ``dice`` (d20), ``dice d6``, ``dice 3d6``, ``dice decade`` (d10+d10).
+``dice`` (d20), ``dice d6``, ``dice 3d6``, ``dice decade`` (d10+d10), and
+``roll [max]`` for a flat 1..N draw (default 100).
+
+Merged from the separate ``roll`` bot (library 1.1.0): both were random-number
+rollers, so they shared a purpose and one enable toggle now covers both. The
+two commands keep their own syntax and output — ``roll`` is not an alias for
+``dice``.
 """
 
 import random
@@ -11,8 +17,8 @@ BOT_META = {
     "key": "dice",
     "name": "dice",
     "category": "Fun",
-    "description": "Dice roller: d20, 2d6, decade",
-    "version": "1.0.0",
+    "description": "Dice roller (d20, 2d6, decade) and flat 1..N rolls",
+    "version": "1.1.0",
     "settings_schema": [
         {
             "key": "max_dice",
@@ -25,6 +31,8 @@ BOT_META = {
     ],
     "settings": {"max_dice": 10},
 }
+
+ROLL_MAX = 10000
 
 
 def _parse_spec(spec):
@@ -67,4 +75,20 @@ async def roll_dice(ctx, msg):
     if count == 1:
         await ctx.reply(f"d{sides}: {rolls[0]}")
     else:
-        await ctx.reply(f"{count}d{sides}: {' + '.join(map(str, rolls))} = {sum(rolls)}")
+        # Many dice overflow one RF frame — split, never truncate.
+        await ctx.reply_split(f"{count}d{sides}: {' + '.join(map(str, rolls))} = {sum(rolls)}")
+
+
+@bot.on_keyword("roll")
+async def roll(ctx, msg):
+    arg = msg.arg_text.strip()
+    max_num = 100
+    if arg:
+        if not arg.isdigit() or not 1 <= int(arg) <= ROLL_MAX:
+            await ctx.reply(f"usage: roll [max] — e.g. roll, roll 20 (max {ROLL_MAX})")
+            return
+        max_num = int(arg)
+    result = random.randint(1, max_num)
+    # @[name] is the mention syntax mesh clients recognize and highlight.
+    who = f"@[{msg.sender_name}]" if msg.sender_name else "Someone"
+    await ctx.reply(f"{who} rolled {result} (1-{max_num})")

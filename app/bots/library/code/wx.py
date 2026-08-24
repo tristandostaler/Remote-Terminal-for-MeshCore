@@ -17,7 +17,7 @@ BOT_META = {
     "name": "wx",
     "category": "Weather",
     "description": "Forecast + alerts: NWS with Open-Meteo fallback",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "cooldown_seconds": 3,
     "settings_schema": [
         {
@@ -56,6 +56,8 @@ _HEADERS = {"User-Agent": "RemoteTerm-MeshCore-bots/1.0", "Accept": "application
 
 
 def _clip(text: str, limit: int = 180) -> str:
+    """One-message clamp. Only the cron post uses it — ``ctx.send`` has no
+    splitting counterpart, and a scheduled forecast should stay one frame."""
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
@@ -130,7 +132,7 @@ async def _forecast_text(ctx, lat: float, lon: float, place: str) -> str | None:
             body = await _open_meteo(ctx, lat, lon, metric)
         except Exception:  # httpx.HTTPError / payload shape surprises
             return None
-    return _clip(f"{place}: {body}")
+    return f"{place}: {body}"
 
 
 async def _alert_lines(ctx, lat: float, lon: float) -> list[str]:
@@ -142,7 +144,7 @@ async def _alert_lines(ctx, lat: float, lon: float) -> list[str]:
         props = feature.get("properties") or {}
         event = props.get("event") or "Weather alert"
         headline = props.get("headline") or ""
-        lines.append(_clip(f"{event}: {headline}" if headline else event, 170))
+        lines.append(f"{event}: {headline}" if headline else event)
     return lines
 
 
@@ -168,13 +170,13 @@ async def wx(ctx, msg):
             await ctx.reply(f"No active alerts for {place}")
             return
         for line in lines:
-            await ctx.reply(line)
+            await ctx.reply_split(line)
         return
     text = await _forecast_text(ctx, lat, lon, place)
     if text is None:
         await ctx.reply(ctx.t("rt.error_upstream"))
         return
-    await ctx.reply(text)
+    await ctx.reply_split(text)
 
 
 @bot.on_cron()
@@ -195,6 +197,6 @@ async def morning_forecast(ctx):
         ctx.log("weather upstreams failed for the scheduled forecast")
         return
     try:
-        await ctx.send(channel, text)
+        await ctx.send(channel, _clip(text))
     except ValueError:
         ctx.log(f"unknown channel {channel!r} for the scheduled forecast")

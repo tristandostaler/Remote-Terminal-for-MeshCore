@@ -51,6 +51,16 @@ operators).
   **disabled by default**; unmodified built-ins refresh on version bumps;
   operator-modified ones are never touched. "Reset to default" restores from
   the shipped file.
+  - **Deleting a library file is not enough to remove a bot.** Seeding never
+    deletes, and keyword dispatch runs *every* enabled bot that matches, so a
+    left-behind row answers alongside whatever replaced it — two replies to one
+    command — and never updates again. Merging or dropping a built-in means
+    adding its key to `MERGED_BOTS` so `retire_merged_bots()` (runs right after
+    seeding, idempotent) folds it in: a pristine row is deleted and its
+    `enabled` flag moves to the survivor; a row the operator edited, gave
+    custom triggers, or configured is kept but disabled, renamed
+    `(retired) …`, and has `builtin_key` cleared. Note `modified` is set only
+    when the *code* changes, so triggers and settings are checked separately.
 
 ## Data model
 

@@ -1,6 +1,6 @@
 ## [Unreleased]
 
-* Feature: Bots workspace — a new top-level view (sidebar › Tools › Bots) merging meshcore-bot's functionality: the full meshcore-bot library as 49 built-in bots (weather, solar, mesh info & tracing, sports, fun, emergency alerts, admin tools…) seeded as editable Python scripts in the database, with per-bot settings panels, scope/limits, an in-app code editor, a sandboxed test console, and per-bot run history
+* Feature: Bots workspace — a new top-level view (sidebar › Tools › Bots) merging meshcore-bot's functionality: the full meshcore-bot library as 40 built-in bots (weather, solar, mesh info & tracing, sports, fun, emergency alerts, admin tools…) seeded as editable Python scripts in the database, with per-bot settings panels, scope/limits, an in-app code editor, a sandboxed test console, and per-bot run history
 * Feature: One bot, many triggers — keyword commands, cron schedules (5-field crontab + @presets, day-of-week 0=Monday), mesh events (new contact), and token-gated inbound webhooks (`POST /api/hooks/{slug}`); new `ctx` API supports cross-channel sends, DMs, persistent state, HTTP, geocoding, and i18n
 * Feature: Scheduler tab — standalone cron messages to any channel with mesh-stat placeholders and optional region scoping
 * Feature: Feeds tab — RSS/JSON-API subscriptions posting new items to channels, with format templates, previews, and an SSRF guard
@@ -8,6 +8,8 @@
 * Feature: Discord and Telegram one-way channel bridges as fanout integrations
 * Feature: Multibyte Rollout panel in Settings › Statistics — node-level multibyte path adoption (contacts and repeaters by direct-route hop width), complementing the packet-level Path Hash Width chart
 * Note: meshcore-bot's channelpause and reload commands are intentionally not ported — the workspace's per-bot enable toggles, the disable-all kill switch, and hot reload on save supersede them
+* Change: Built-in bots no longer hand-roll message splitting — mailbox, help, ping, channels, sports, neighbors, repeater, trace, gwx, dice and wx now send long replies through `ctx.reply_split`, so answers that used to be cut off at ~180 characters go out whole as numbered `(i/n)` parts (and pack more per part on MCMP conversations)
+* Change: Overlapping built-in bots merged, 52 down to 40 — `test` joined `ping` (one liveness check that also reports hops, region and clock offset), `cmd` joined `help`, `roll` joined `dice`, `worldcup`/`worldcup-live` joined `sports`, `hfcond`/`aurora` joined `solar` (they were fetching the same HamQSL document twice), and `joke`, `dadjoke`, `catfact`, `funfact`, `fortunes` and `magic8` became one `fun` bot with a per-source on/off setting. Merged-away bots are retired on the next startup: an enabled one switches its survivor on so the command keeps answering, and one you had edited or configured is kept — disabled and renamed `(retired) …` — instead of being deleted
 * Change: Settings › "MQTT & Automation" is now "Integrations"; legacy fanout Python bots migrate automatically into the Bots workspace (migration 064) and keep their exact behavior via the legacy `def bot(**kwargs)` wrapper
 
 ## [3.17.1] - 2026-07-26
