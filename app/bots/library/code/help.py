@@ -16,13 +16,14 @@ more RF frames on the list; ctx.reply_split numbers them and drops nothing.
 
 from remoteterm import bot
 
-# A handful of bots answer to a vocabulary rather than to alias names: greeter
-# takes 30 greetings, sudo 28 fake shell commands. Those are the bot's subject
-# matter, not other names for the command, and spelling them out costs more
-# airtime than the whole rest of the list. Alias sets that really are alternate
-# names top out around 24 characters ("score/scores/wc/worldcup"), so anything
-# past this width shows its count instead and 'help <command>' spells it out.
+# How much of the list one command's aliases may spend. Alias sets that really
+# are alternate names fit whole ("score/scores/wc/worldcup" is 24), but a few
+# bots answer to a vocabulary instead: greeter takes 30 greetings, sudo 28 fake
+# shell commands. Those words are the bot's subject matter rather than other
+# names for the command, and in full they cost more airtime than the whole rest
+# of the list — so those show a couple of examples and count the remainder.
 ALIAS_INLINE_WIDTH = 40
+ALIAS_EXAMPLES = 2
 
 BOT_META = {
     "key": "help",
@@ -31,6 +32,21 @@ BOT_META = {
     "description": "Command list (help, cmd) and per-command help",
     "version": "1.3.0",
 }
+
+
+def _alias_hint(aliases):
+    """Every alias if they fit, else a couple of examples and ``+n`` for the rest.
+
+    ``hello (hi/hey/+28)`` says what the other 28 look like where a bare count
+    said only that they exist; ``help <command>`` still names every one.
+    """
+    if not aliases:
+        return ""
+    whole = "/".join(aliases)
+    if len(whole) <= ALIAS_INLINE_WIDTH:
+        return whole
+    shown = aliases[:ALIAS_EXAMPLES]
+    return "/".join([*shown, f"+{len(aliases) - len(shown)}"])
 
 
 def _triggers(entry):
@@ -70,9 +86,7 @@ async def show_help(ctx, msg):
             continue
         # Aliases ride in parentheses behind the first keyword, slash-separated
         # so they never read as more commands in the comma-separated list.
-        aliases = "/".join(keywords[1:])
-        if len(aliases) > ALIAS_INLINE_WIDTH:
-            aliases = f"+{len(keywords) - 1}"
+        aliases = _alias_hint(keywords[1:])
         commands.append(f"{keywords[0]} ({aliases})" if aliases else keywords[0])
     commands.sort()
     if not commands:

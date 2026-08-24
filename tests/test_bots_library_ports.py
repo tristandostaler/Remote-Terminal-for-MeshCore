@@ -455,14 +455,13 @@ class TestHelpShowsEveryTrigger:
         assert "ping (" not in joined
         assert "ping" in joined
 
-    async def test_list_counts_a_vocabulary_instead_of_spelling_it_out(self):
+    async def test_list_teases_a_vocabulary_instead_of_spelling_it_out(self):
         """greeter answers 30 greetings and sudo 28 shell jokes — subject matter,
-        not other names for the command. Inline they cost more airtime than the
-        whole rest of the list, so past the width they collapse to a count."""
+        not other names for the command. In full they cost more airtime than the
+        whole rest of the list, so past the width a couple stand for the rest."""
         ns = _load_namespace("help")
-        width = ns["ALIAS_INLINE_WIDTH"]
         vocabulary = ["hello"] + [f"greeting{i:02d}" for i in range(30)]
-        assert len("/".join(vocabulary[1:])) > width
+        assert len("/".join(vocabulary[1:])) > ns["ALIAS_INLINE_WIDTH"]
 
         texts = await self._run(
             [
@@ -472,10 +471,20 @@ class TestHelpShowsEveryTrigger:
             "help",
         )
         joined = " ".join(texts)
-        assert "hello (+30)" in joined
-        assert "greeting00" not in joined
-        # The collapse is per command: a real alias set beside it stays spelled out.
+        # Examples say what the other 28 look like; the count says how many.
+        assert "hello (greeting00/greeting01/+28)" in joined
+        assert "greeting02" not in joined
+        # It is per command: a real alias set beside it stays spelled out whole.
         assert "sports (score/wc)" in joined
+
+    def test_a_teased_alias_set_still_fits_the_width(self):
+        """The examples are a saving, so they must not cost more than the whole."""
+        ns = _load_namespace("help")
+        hint = ns["_alias_hint"]([f"greeting{i:02d}" for i in range(30)])
+        assert hint == "greeting00/greeting01/+28"
+        assert len(hint) <= ns["ALIAS_INLINE_WIDTH"]
+        # No aliases means no parenthetical at all — not an empty one, not "+0".
+        assert ns["_alias_hint"]([]) == ""
 
     async def test_a_collapsed_vocabulary_is_still_spelled_out_on_demand(self):
         """The count is a list-only economy; 'help <command>' never withholds."""
