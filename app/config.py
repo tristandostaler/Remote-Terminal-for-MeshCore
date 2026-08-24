@@ -25,6 +25,23 @@ class Settings(BaseSettings):
     # database so a Home Assistant add-on's mapped /app/data volume keeps it
     # across restarts.
     aeic_model_dir: str = "data/models/aeic"
+    # Master switch for the AEIC neural image codec, read at RUNTIME.
+    #
+    # Tri-state on purpose:
+    #   None  (unset) -- autodetect, the historical behaviour: the codec is usable
+    #                    if onnxruntime and the model bundle happen to be present.
+    #                    Every dev checkout that ran `uv sync --extra aeic` without
+    #                    setting this relies on it, so unset must not mean "off".
+    #   False         -- HARD off, even when the dependency and the 958 MiB bundle
+    #                    are already installed. `run.sh` only consults this to
+    #                    decide whether to *install* the extra, so before this
+    #                    existed, flipping it back to false on a server that had
+    #                    once had it true changed nothing: onnxruntime still
+    #                    imported and the model was still on disk, so images kept
+    #                    being reconstructed.
+    #   True          -- on, subject to the dependency and bundle actually being
+    #                    there; it cannot conjure either.
+    enable_aeic: bool | None = None
     disable_bots: bool = False
     enable_message_poll_fallback: bool = False
     force_channel_slot_reconfigure: bool = False

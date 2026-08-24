@@ -20,6 +20,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
+from app.config import settings
 from app.event_handlers import track_pending_ack
 from app.imaging.aeic.constants import SQUARE_SIZE
 from app.imaging.aeic.ingest import decode_session
@@ -65,6 +66,17 @@ async def start_model_download() -> dict:
     Idempotent while a download is in flight: a second call is a no-op rather
     than a second concurrent fetch of the same 832 MiB file.
     """
+    # Refused when the codec is switched off, rather than spending 958 MiB of
+    # somebody's bandwidth on a model that nothing is allowed to load. The UI
+    # already hides the button in that state; this covers a direct API call.
+    if settings.enable_aeic is False:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The AI image codec is switched off on this server "
+                "(MESHCORE_ENABLE_AEIC=false); refusing to download its model."
+            ),
+        )
     if not aeic_service.start_download():
         logger.info("AEIC model download already in progress; ignoring request")
     return aeic_service.status()

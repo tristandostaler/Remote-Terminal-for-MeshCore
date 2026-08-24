@@ -103,7 +103,13 @@ class AeicService:
 
     def status(self) -> dict:
         bundle = self.bundle()
-        runtime = onnxruntime_available()
+        # An explicit MESHCORE_ENABLE_AEIC=false reports as "no runtime", which is
+        # what the settings panel already renders as "switched off on this server,
+        # set MESHCORE_ENABLE_AEIC=true" -- precisely the right message, and it
+        # was previously unreachable on a server that had the extra installed.
+        # Without this the panel would offer to download 958 MiB for a codec that
+        # unavailable_reason() refuses to run.
+        runtime = onnxruntime_available() and settings.enable_aeic is not False
         return {
             "runtime_available": runtime,
             "supports_encode": runtime and bundle.supports_encode,
@@ -129,7 +135,20 @@ class AeicService:
         }
 
     def unavailable_reason(self, *, for_decode: bool) -> str | None:
-        """A sentence to show the user, or None when the codec is usable."""
+        """A sentence to show the user, or None when the codec is usable.
+
+        The single chokepoint for "can the codec run": both ``_require_ready``
+        (encode and decode) and the settings UI go through here, so the switch
+        below cannot be true in one place and false in another.
+        """
+        if settings.enable_aeic is False:
+            # Checked FIRST and independently of the dependency and the bundle,
+            # which is the whole point: an explicit false has to win even on a
+            # server where both are already installed, and reconstruction is
+            # exactly what keeps working otherwise. `run.sh` reads this variable
+            # only to decide whether to install the extra, so it cannot uninstall
+            # anything when the value flips back.
+            return "The AI image codec is switched off on this server (MESHCORE_ENABLE_AEIC=false)."
         if not onnxruntime_available():
             return (
                 "The AI image codec needs the optional onnxruntime dependency, "
