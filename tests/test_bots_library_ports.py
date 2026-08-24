@@ -440,10 +440,19 @@ class TestMailbox:
         for text in texts:
             assert len(text.encode("utf-8")) <= 155
 
-    async def test_response_budget_setting_still_sizes_the_parts(self, test_db, tmp_path):
+    async def test_bot_owns_no_message_sizing(self, test_db, tmp_path):
+        """Sizing is ctx.reply_split's alone — no budget knob, no size math."""
+        entry = get_library_entry("mailbox")
+        assert entry is not None
+        keys = {field["key"] for field in entry["settings_schema"]}
+        assert "response_budget" not in keys
+        assert "response_budget" not in entry["settings"]
+
         run = await self._mailbox(tmp_path, settings={"response_budget": 60})
-        for text in await run("mbx help"):
-            assert len(text.encode("utf-8")) <= 60
+        texts = await run("mbx help")
+        assert max(len(t.encode("utf-8")) for t in texts) > 60, (
+            "a stale response_budget setting must no longer size the parts"
+        )
 
     async def test_short_reply_is_a_single_unnumbered_message(self, test_db, tmp_path):
         run = await self._mailbox(tmp_path)
@@ -468,6 +477,15 @@ class TestMailbox:
         assert len(texts) == 1, "the probe must not be split"
         assert len(texts[0].encode("utf-8")) == 300
         assert texts[0].startswith("TEST 300B ")
+
+    async def test_size_probe_requires_an_explicit_size(self, test_db, tmp_path):
+        """No frame size is baked in, so a bare `mbx test` asks for N."""
+        run = await self._mailbox(tmp_path)
+        assert "unlocked" in (await run("mbx debug CHANGE-ME-s3cret"))[0]
+
+        texts = await run("mbx test")
+        assert len(texts) == 1
+        assert texts[0] == "Usage: mbx test <bytes> (20-500)"
 
     async def test_stored_message_plays_back_whole(self, test_db, tmp_path):
         run = await self._mailbox(tmp_path)
