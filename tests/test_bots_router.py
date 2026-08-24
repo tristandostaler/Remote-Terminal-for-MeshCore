@@ -212,9 +212,7 @@ class TestEngineSettings:
 
 
 class TestInboundHooks:
-    async def test_generic_webhook_rejects_missing_or_empty_configured_token(
-        self, test_db, client
-    ):
+    async def test_generic_webhook_rejects_missing_or_empty_configured_token(self, test_db, client):
         from app.bots.engine import bot_engine
         from app.repository.bots import BotRepository
 
@@ -265,14 +263,8 @@ class TestInboundHooks:
                 missing = await client.post("/api/hooks/send", json={"message": "x"})
                 assert missing.status_code == 403  # token not configured
 
-                await BotRepository.update(
-                    bot.id,
-                    settings={
-                        "webhook_token": "s3cret",
-                        "provider": "twilio",
-                        "twilio_auth_token": "twilio-secret",
-                    },
-                )
+                # Provider defaults to voipms, whose callback is an unsigned GET.
+                await BotRepository.update(bot.id, settings={"webhook_token": "s3cret"})
                 await bot_engine.reload_bot(bot.id)
 
                 wrong = await client.post(
@@ -290,6 +282,30 @@ class TestInboundHooks:
                 assert sms_get.status_code == 200
                 assert sms_get.text == "ok"
                 assert sms_get.headers["content-type"].startswith("text/plain")
+
+                # Switching to Twilio additionally demands Twilio's HMAC-SHA1
+                # callback signature. Configured as a SEPARATE step because a
+                # twilio-provider hook must reject the unsigned VoIP.ms GET
+                # above -- a single settings blob covering both providers would
+                # be asserting two mutually exclusive configurations at once.
+                await BotRepository.update(
+                    bot.id,
+                    settings={
+                        "webhook_token": "s3cret",
+                        "provider": "twilio",
+                        "twilio_auth_token": "twilio-secret",
+                    },
+                )
+                await bot_engine.reload_bot(bot.id)
+
+                # A valid webhook token is NOT sufficient once Twilio is the
+                # provider: without a signature the callback is refused.
+                unsigned = await client.get(
+                    "/api/hooks/sms",
+                    params={"token": "s3cret", "from": "5145550100", "message": "hello"},
+                )
+                assert unsigned.status_code == 403
+                assert "Twilio signature" in unsigned.json()["detail"]
 
                 twilio_payload = {
                     "From": "+15145550100",
@@ -313,9 +329,13 @@ class TestInboundHooks:
                 assert twilio_post.text.endswith("<Response></Response>")
 
                 # GET support is deliberately limited to the VoIP.ms callback;
-                # existing bot webhooks remain POST-only.
+                # existing bot webhooks remain POST-only. The refusal is a 404
+                # rather than a 405 because the SPA fallback in
+                # `frontend_static.py` registers a catch-all `GET /{path:path}`,
+                # so it -- not the POST-only hook route -- resolves the request.
+                # What matters is that the bot is not run.
                 other_get = await client.get("/api/hooks/send", params={"token": "s3cret"})
-                assert other_get.status_code == 405
+                assert other_get.status_code == 404
         finally:
             bot_engine.remove_bot(bot.id)
 

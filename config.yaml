@@ -1,6 +1,6 @@
 name: "RemoteTerm"
 description: "RemoteTerm-for-MeshCore-With-Bots"
-version: "1.4.1"
+version: "1.5.0"
 slug: "remoteterm"
 init: false
 arch:
@@ -14,10 +14,17 @@ options:
   MESHCORE_TCP_HOST: 192.168.1.1
   MESHCORE_TCP_PORT: 5000
   MESHCORE_DATABASE_PATH: "data/meshcore.db"
+  # Optional AI image codec. Installs ~120 MB of dependencies on first start
+  # after being switched on, then needs a one-time ~958 MB model download from
+  # the app. aarch64/amd64 only -- onnxruntime has no armhf/armv7/i386 wheels --
+  # and decoding a photo wants ~2.4 GB of free RAM. Leave off on small hardware;
+  # the add-on logs a warning and runs normally if it cannot be installed.
+  MESHCORE_ENABLE_AEIC: false
 schema:
   MESHCORE_TCP_HOST: str
   MESHCORE_TCP_PORT: port
   MESHCORE_DATABASE_PATH: str
+  MESHCORE_ENABLE_AEIC: bool
 ports:
   8000/tcp: null
 map:

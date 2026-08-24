@@ -34,6 +34,7 @@ from app.bots.cron import CronSchedule, parse_cron
 from app.bots.moderation import apply_profanity_mode, is_banned_sender
 from app.bots.runtime import BotCodeError, LoadedCode, call_handler, call_legacy, load_bot_code
 from app.bots.translate import Translator, detect_language
+from app.compression import is_framed_payload
 from app.models import Bot, BotEngineSettings, BotLogEntry, BotTestRequest, BotTestResponse
 
 logger = logging.getLogger(__name__)
@@ -226,12 +227,27 @@ class BotEngine:
         channel_key: str | None,
         text: str,
         flood_scope_override: str | None,
-    ) -> None:
-        filtered = apply_profanity_mode(text, self.settings.profanity_mode)
-        if filtered is None:
-            self.log("WARN", "moderation", "outgoing message dropped by profanity filter")
-            return
-        text = filtered
+    ) -> Any:
+        """Send one bot message. Returns the stored ``Message``, or None.
+
+        The return value is what lets an image send find the message row it
+        created: ``ctx.reply_image`` needs it to anchor the AEIC session, or the
+        photo renders as raw ``aei1:`` text in the operator's own conversation
+        while the recipient sees the picture. None means nothing was sent (no
+        destination, moderation, or a failed send).
+        """
+        # A framed transport payload is not prose and must not be rewritten. The
+        # profanity list is \b-anchored, and basE91 is full of non-word
+        # characters, so a payload CAN contain a bare match: censoring it
+        # substitutes bytes inside the stream and the receiver decodes a garbage
+        # image, while dropping it removes one chunk of an image whose other
+        # chunk already went out. Same invariant `encode_outbound` applies.
+        if not is_framed_payload(text):
+            filtered = apply_profanity_mode(text, self.settings.profanity_mode)
+            if filtered is None:
+                self.log("WARN", "moderation", "outgoing message dropped by profanity filter")
+                return None
+            text = filtered
 
         from fastapi import HTTPException
 
@@ -247,12 +263,12 @@ class BotEngine:
                 if is_dm:
                     if not destination:
                         self.log("WARN", "engine", "DM send skipped: no destination key")
-                        return
-                    await send_direct_message(
+                        return None
+                    sent = await send_direct_message(
                         SendDirectMessageRequest(destination=destination, text=text)
                     )
                 elif channel_key:
-                    await send_channel_message(
+                    sent = await send_channel_message(
                         SendChannelMessageRequest(
                             channel_key=channel_key,
                             text=text,
@@ -261,14 +277,15 @@ class BotEngine:
                     )
                 else:
                     self.log("WARN", "engine", "send skipped: no destination")
-                    return
+                    return None
             except HTTPException as exc:
                 self.log("ERROR", "engine", f"send failed: {exc.detail}")
-                return
+                return None
             except Exception as exc:
                 self.log("ERROR", "engine", f"send failed: {exc}")
-                return
+                return None
             self._last_send_monotonic = time.monotonic()
+            return sent
 
     # ------------------------------------------------------------------
     # Message dispatch

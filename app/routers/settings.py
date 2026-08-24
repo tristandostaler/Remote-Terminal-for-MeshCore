@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 from app.models import (
     CONTACT_TYPE_REPEATER,
     AppSettings,
+    ImageCodecSelectionRequest,
+    ImageCodecSelectionResponse,
     McmpEnabledRequest,
     McmpEnabledResponse,
 )
@@ -382,6 +384,42 @@ async def set_mcmp_enabled(request: McmpEnabledRequest) -> McmpEnabledResponse:
     return McmpEnabledResponse(
         type=request.type, id=request.id, enabled=request.enabled, version=version
     )
+
+
+@router.post("/image-codec/set", response_model=ImageCodecSelectionResponse)
+async def set_image_codec(request: ImageCodecSelectionRequest) -> ImageCodecSelectionResponse:
+    """Choose the image codec for a conversation (contact or channel).
+
+    ``ie4`` is the SAR-compatible AVIF/JPEG fragment transport and the default.
+    ``aeic`` is the neural codec: a 512x512 photo becomes ~150 bytes carried as
+    one or two ``aei1:`` text messages, but it needs the 958 MiB model bundle
+    installed here AND a peer that can decode it.
+    """
+    from app.imaging.aeic.service import aeic_service
+    from app.websocket import broadcast_event
+
+    if request.codec == "aeic":
+        reason = aeic_service.unavailable_reason(for_decode=False)
+        if reason is not None:
+            raise HTTPException(status_code=503, detail=reason)
+
+    if request.type == "contact":
+        found = await ContactRepository.set_image_codec(request.id, request.codec)
+        if not found:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        refreshed_contact = await ContactRepository.get_by_key(request.id)
+        if refreshed_contact:
+            broadcast_event("contact", refreshed_contact.model_dump())
+    else:
+        found = await ChannelRepository.set_image_codec(request.id, request.codec)
+        if not found:
+            raise HTTPException(status_code=404, detail="Channel not found")
+        refreshed = await ChannelRepository.get_by_key(request.id)
+        if refreshed:
+            broadcast_event("channel", refreshed.model_dump())
+
+    logger.info("Set %s image codec to %s: %s", request.type, request.codec, request.id[:12])
+    return ImageCodecSelectionResponse(type=request.type, id=request.id, codec=request.codec)
 
 
 @router.post("/muted-channels/toggle", response_model=MuteChannelToggleResponse)

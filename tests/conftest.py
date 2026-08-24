@@ -28,8 +28,8 @@ def cleanup_test_db_dir():
 @pytest.fixture
 async def test_db():
     """Create an in-memory test database with schema + migrations."""
-    from app.repository import bots as bots_repo
     from app.repository import (
+        aeic_image,
         channels,
         contact_telemetry,
         contacts,
@@ -39,6 +39,7 @@ async def test_db():
         room_poll,
         settings,
     )
+    from app.repository import bots as bots_repo
     from app.repository import fanout as fanout_repo
 
     db = Database(":memory:")
@@ -55,6 +56,7 @@ async def test_db():
         repeater_telemetry,
         contact_telemetry,
         room_poll,
+        aeic_image,
     ]
     originals = [(mod, mod.db) for mod in submodules]
 

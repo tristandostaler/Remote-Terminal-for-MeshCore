@@ -181,6 +181,11 @@ class ContactRepository:
                 bool(row["mcmp_enabled"]) if "mcmp_enabled" in available_columns else False
             ),
             mcmp_version=(row["mcmp_version"] if "mcmp_version" in available_columns else 2),
+            image_codec=(
+                row["image_codec"]
+                if "image_codec" in available_columns and row["image_codec"]
+                else "ie4"
+            ),
             last_contacted=row["last_contacted"],
             last_read_at=row["last_read_at"],
             first_seen=row["first_seen"],
@@ -514,6 +519,17 @@ class ContactRepository:
             async with conn.execute(
                 "UPDATE contacts SET mcmp_version = ? WHERE public_key = ?",
                 (version, public_key.lower()),
+            ) as cursor:
+                rowcount = cursor.rowcount
+        return rowcount > 0
+
+    @staticmethod
+    async def set_image_codec(public_key: str, codec: str) -> bool:
+        """Set the outbound image codec ("ie4" or "aeic") for a contact."""
+        async with db.tx() as conn:
+            async with conn.execute(
+                "UPDATE contacts SET image_codec = ? WHERE public_key = ?",
+                (codec, public_key.lower()),
             ) as cursor:
                 rowcount = cursor.rowcount
         return rowcount > 0

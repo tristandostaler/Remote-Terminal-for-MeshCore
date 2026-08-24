@@ -204,6 +204,8 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_BLE_PIN` | | BLE PIN (required when BLE address is set) |
 | `MESHCORE_LOG_LEVEL` | INFO | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `MESHCORE_DATABASE_PATH` | `data/meshcore.db` | SQLite database path |
+| `MESHCORE_ENABLE_AEIC` | false | Install the optional AI image codec on start (Docker / HA add-on). See [Optional: AI Image Codec](#optional-ai-image-codec-aeic) |
+| `MESHCORE_AEIC_MODEL_DIR` | `data/models/aeic` | Where that codec's ~958 MB model is installed. Defaults inside `data/` so it survives container recreation |
 | `MESHCORE_DISABLE_BOTS` | false | Disable bot system entirely (blocks execution and config; an intermediate security precaution, but not as good as basic auth) |
 | `MESHCORE_BASIC_AUTH_USERNAME` | | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
 | `MESHCORE_BASIC_AUTH_PASSWORD` | | Optional app-wide HTTP Basic auth password; must be set together with `MESHCORE_BASIC_AUTH_USERNAME` |
@@ -239,6 +241,104 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 > If you forget, the app will start normally but MQTT connections will fail and you'll see a toast in the UI with this same guidance.
 
 If you enable Basic Auth, protect the app with HTTPS. HTTP Basic credentials are not safe on plain HTTP. Provider callbacks under `/api/hooks/*` are exempt from app-wide Basic Auth because providers cannot supply those credentials; enabled hooks enforce their own bot-specific webhook token instead. SMS keeps query-token authentication for VoIP.ms compatibility and redacts that token from access/debug logs; Twilio also uses its signed callback header. Also note that the app's permissive CORS policy is a deliberate trusted-network tradeoff, so cross-origin browser JavaScript is not a reliable way to use that Basic Auth gate.
+
+## Optional: AI Image Codec (AEIC)
+
+RemoteTerm can send photos two ways. The default (**Standard**) packs a 256px
+greyscale AVIF/JPEG into 15–40 radio fragments and needs nothing extra. The
+optional **AI reconstruction** codec turns a 512px *colour* photo into ~150 bytes
+— one or two ordinary messages — and the receiver rebuilds the picture with a
+neural network.
+
+It is off by default because it is heavy, and RemoteTerm is meant to run on small
+appliances. Enabling it is three steps.
+
+### 1. Requirements
+
+| | |
+|---|---|
+| Platform | **64-bit only** (x86_64 or aarch64). onnxruntime publishes no wheels for armv7/armhf/i386, so the install fails there. |
+| Disk | ~120 MB of Python packages + **958 MB** of model |
+| RAM | **~2.4 GiB free** while decoding a photo. Encoding needs far less (~0.4 GiB). |
+| Speed | Encoding ~0.3 s; decoding ~5 s per photo on a modern CPU, slower on a Pi. |
+
+A Raspberry Pi 4/5 with 4 GB+ works. A Pi Zero, a 32-bit OS, or a 2 GB board does
+not — leave it off there and the app behaves exactly as before.
+
+### 2. Turn on the dependencies
+
+**Docker / docker-compose** — just set an environment variable. No rebuild, no
+custom image: `run.sh` installs the dependencies on the first start after you
+switch it on (~120 MB), and skips instantly on every start after that.
+
+```yaml
+services:
+  remoteterm:
+    environment:
+      MESHCORE_ENABLE_AEIC: "true"
+```
+
+or `docker run -e MESHCORE_ENABLE_AEIC=true ...`. Accepts `true`/`1`/`yes`/`on`.
+Wheels are cached in `./data/.uv-cache` (~200 MB), so recreating the container
+reinstalls in seconds instead of re-downloading.
+
+**Home Assistant add-on** — flip **`MESHCORE_ENABLE_AEIC`** in the add-on's
+Configuration tab and restart.
+
+**Clone and build:**
+
+```bash
+uv sync --extra aeic
+```
+
+**systemd installer** — installed up front, since a service shouldn't be
+installing packages on boot:
+
+```bash
+MESHCORE_ENABLE_AEIC=1 bash scripts/setup/install_service.sh
+```
+
+> [!NOTE]
+> If you'd rather pay the cost at image-build time than on first start, the
+> Dockerfile still accepts `--build-arg ENABLE_AEIC=1` to pre-bake it. That makes
+> the runtime step a no-op.
+
+If the dependencies can't be installed — wrong architecture, no network — the app
+logs a warning and **starts normally without the codec**. It will never keep your
+radio offline over an optional image feature.
+
+### 3. Download the model and turn it on
+
+Open any conversation → the **features** button in the chat header → **Photo
+codec**. The AI option shows a one-time **Download model (958 MB)** button with a
+progress bar; it is fetched from
+[huggingface.co/zjs81/aeic-se-onnx](https://huggingface.co/zjs81/aeic-se-onnx)
+and every file is SHA-256 verified. The download is resumable, so a dropped
+connection continues rather than restarting.
+
+The model lands in `MESHCORE_AEIC_MODEL_DIR` (default `data/models/aeic`), which
+is inside the mounted `data/` volume for both Docker and the Home Assistant
+add-on — so it survives container recreation and is downloaded once, not per
+restart.
+
+Once it is installed, pick **AI reconstruction** for a conversation. The choice is
+**per conversation**, so you can use it with one contact and leave everyone else
+on Standard.
+
+You can also drive it over the API: `GET /api/aeic/status` reports what is
+missing, and `POST /api/aeic/model/download` starts the fetch.
+
+### Things worth knowing
+
+- **Both ends need it.** The recipient must also have the codec installed to see
+  the photo; otherwise they get an unreadable `aei1:` text message. It does not
+  currently interoperate with MCO Advanced clients.
+- **It is lossy in an unusual way.** The receiver gets a recognisably similar
+  picture, not the same pixels — that is what makes 150 bytes possible.
+- **Bots can send photos too**, via `ctx.reply_image()` — see
+  [app/bots/AGENTS_bots.md](app/bots/AGENTS_bots.md).
+- Without the dependencies or the model, the AI option is visible but disabled and
+  explains which piece is missing. Nothing else changes.
 
 ## Where To Go Next
 
