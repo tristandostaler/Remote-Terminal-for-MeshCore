@@ -20,7 +20,6 @@ import { Shrink } from 'lucide-react';
 import { Button } from './ui/button';
 import { toast } from './ui/sonner';
 import { cn } from '@/lib/utils';
-import { api } from '../api';
 import {
   getTextReplaceEnabled,
   getTextReplaceMapJson,
@@ -93,7 +92,7 @@ export interface MessageInputHandle {
   focus: () => void;
 }
 
-export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(function MessageInput)
+export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(function MessageInput (
   { onSend, disabled, placeholder, conversationType, senderName, voiceConversation, mcmpEnabled, mcmpVersion },
   ref
 ) {
