@@ -532,7 +532,7 @@ class TestMailbox:
     since that is what puts mailbox in the node's ``help`` command list.
     """
 
-    async def _mailbox(self, tmp_path, settings=None, ui_triggers=None):
+    async def _mailbox(self, tmp_path, settings=None):
         """One mailbox bot record; run as many messages through it as needed."""
         from app.repository.bots import BotRepository
 
@@ -543,7 +543,6 @@ class TestMailbox:
             name="mailbox-splittest",
             code=entry["code"],
             settings={**base, **(settings or {})},
-            ui_triggers=ui_triggers,
         )
         engine = BotEngine()
 
@@ -648,19 +647,19 @@ class TestMailbox:
         assert entry is not None
         loaded = load_bot_code(entry["code"])
         assert loaded.declared_keywords == ["mbx"]
-        # Plus a no-argument handler, so words added on the Triggers tab work.
-        assert loaded.has_generic_keyword_handler
+        # The trigger word comes from the code alone. A no-argument decorator
+        # would also route whatever is typed on the Triggers tab into the same
+        # handler; mailbox deliberately does not, so `mbx` is the whole answer.
+        assert not loaded.has_generic_keyword_handler
         # And exactly one catch-all, for passive name -> key learning.
         assert len(loaded.collector.messages) == 1
 
-    async def test_an_operator_trigger_word_answers_and_is_quoted_back(self, test_db, tmp_path):
-        """The typed word is the prefix — a bot reached as `mail` says `mail`."""
-        run = await self._mailbox(tmp_path, ui_triggers=[{"kind": "keyword", "spec": "mail"}])
-        texts = await run("mail")
-        assert texts
-        joined = " ".join(texts)
-        assert "mail inbox" in joined
-        assert "mbx" not in joined
+    def test_replies_quote_the_matched_word_not_the_constant(self):
+        """So declaring an alias in the code is all an alias needs to take."""
+        ns = _load_namespace("mailbox")
+        assert ns["_Cfg"]({}, "mail").prefix == "mail"
+        # Nothing matched (a caller with no keyword) falls back to the constant.
+        assert ns["_Cfg"]({}, "").prefix == ns["DEFAULT_PREFIX"] == "mbx"
 
     async def test_passive_learning_feeds_addressing_by_name_and_stays_quiet(
         self, test_db, tmp_path
