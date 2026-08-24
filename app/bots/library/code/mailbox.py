@@ -34,8 +34,11 @@ Runs on ALL messages. Normal Mailbox commands still execute only in DMs. If an
 about 30 seconds, then opens Mailbox help in a DM when the contact resolves
 uniquely. Keep scope at "All channels" so passive directory learning works.
 
-Replies are NEVER truncated: anything over the per-message budget is split into
-numbered "(1/n) ..." parts sent in order.
+Replies are NEVER truncated: command handlers return one unsplit string and the
+async entrypoint hands it to ``ctx.reply_split``, which sends numbered
+"(1/n) ..." parts in order — sized by the *compressed* wire length when the
+conversation has MCMP enabled, so more text fits per part. ``mbx test`` is the
+one exception: its size probe must go out verbatim, so it is tagged ``_Raw``.
 
 Body size: hard ceiling HARD_MAX_BODY (2000B) per stored message. MAILBOX_MAX_BODY
 can lower it (0 = ceiling), never raise it. Retention: unread 7d, kept 30d.
@@ -51,7 +54,6 @@ import time
 
 from remoteterm import bot
 
-
 HARD_MAX_BODY = 2000
 
 BOT_META = {
@@ -59,7 +61,7 @@ BOT_META = {
     "name": "mailbox",
     "category": "Custom",
     "description": "Store-and-forward mailbox for offline nodes (DM 'mbx help')",
-    "version": "4.2.0",
+    "version": "4.3.0",
     "respond_to_dms": True,
     "settings_schema": [
         {
@@ -86,7 +88,7 @@ BOT_META = {
             "type": "int",
             "default": 2000,
             "min": 100,
-            "max": HARD_MAX_BODY
+            "max": HARD_MAX_BODY,
         },
         {
             "key": "debug_password",
@@ -130,20 +132,31 @@ def _cfg(settings, key):
     value = settings.get(key, default)
     return value if value not in (None, "") else default
 
+
 def _db_path(settings):
     return str(_cfg(settings, "db_path") or "").strip()
+
 
 def _prefix(settings):
     return str(_cfg(settings, "prefix") or "").strip()
 
+
 def _response_budget(settings):
-    return int(_cfg(settings, "response_budget") or "")
+    # Never raise: _send() consults this even on the error path, and a
+    # non-numeric setting must not swallow the notice it is trying to deliver.
+    try:
+        return int(_cfg(settings, "response_budget"))
+    except (TypeError, ValueError):
+        return int(BOT_META["settings"]["response_budget"])
+
 
 def _max_body(settings):
     return int(_cfg(settings, "max_body") or "")
 
+
 def _debug_password(settings):
     return str(_cfg(settings, "debug_password") or "").strip()
+
 
 def _privacy_notice(settings):
     prefix = _prefix(settings)
@@ -151,6 +164,7 @@ def _privacy_notice(settings):
         f"Mailbox stores messages UNENCRYPTED, readable by the "
         f"operator. Send '{prefix} accept' once to agree."
     )
+
 
 # ---------------------------------------------------------------- storage --
 
@@ -211,7 +225,9 @@ def _db(settings):
 def _purge_expired(conn):
     now = int(time.time())
     conn.execute("DELETE FROM messages WHERE played=0 AND created_at < ?", (now - TTL_SECONDS,))
-    conn.execute("DELETE FROM messages WHERE played=1 AND created_at < ?", (now - KEPT_TTL_SECONDS,))
+    conn.execute(
+        "DELETE FROM messages WHERE played=1 AND created_at < ?", (now - KEPT_TTL_SECONDS,)
+    )
     conn.execute("DELETE FROM pending WHERE created_at < ?", (now - PENDING_TTL,))
     conn.execute("DELETE FROM directory WHERE last_seen < ?", (now - DIRECTORY_TTL,))
     conn.commit()
@@ -242,23 +258,12 @@ def _resolve_name(conn, name):
 # ---------------------------------------------------------------- helpers --
 
 
-def _split_reply(settings, text, max_bytes=None):
-    max_bytes = max_bytes or _response_budget(settings)
-    if len(text.encode("utf-8")) <= max_bytes:
-        return text
-    budget = max_bytes - 8
-    parts = []
-    remaining = text
-    while remaining:
-        chunk = remaining.encode("utf-8")[:budget].decode("utf-8", "ignore")
-        if len(remaining) > len(chunk):
-            cut = max(chunk.rfind(" "), chunk.rfind("\n"))
-            if cut > budget // 2:
-                chunk = chunk[: cut + 1].rstrip()
-        parts.append(chunk)
-        remaining = remaining[len(chunk):].lstrip()
-    total = len(parts)
-    return [f"({i}/{total}) {p}" for i, p in enumerate(parts, 1)]
+class _Raw(str):
+    """A reply that must go out verbatim, in exactly one message.
+
+    Everything else is handed to ``ctx.reply_split``; only the ``mbx test``
+    size probe needs its exact byte count preserved, numbering prefix and all.
+    """
 
 
 def _looks_like_key(s):
@@ -317,7 +322,7 @@ def _cmd_store(settings, conn, recipient, body, key, name):
     body_bytes = body.encode("utf-8")
     truncated = len(body_bytes) > _max_body(settings)
     if truncated:
-        body = body_bytes[:_max_body(settings)].decode("utf-8", errors="ignore")
+        body = body_bytes[: _max_body(settings)].decode("utf-8", errors="ignore")
 
     n_recip = conn.execute(
         "SELECT COUNT(*) FROM messages WHERE recipient=? AND played=0", (recipient,)
@@ -374,8 +379,7 @@ def _cmd_to(settings, conn, arg, rid):
             )
         recipient, seen = matches[0]
         label = (
-            f"{target[:NAME_TRUNC]} [{recipient[:MIN_PUBKEY_PREFIX]}], "
-            f"heard {_age_str(seen)} ago"
+            f"{target[:NAME_TRUNC]} [{recipient[:MIN_PUBKEY_PREFIX]}], heard {_age_str(seen)} ago"
         )
 
     conn.execute(
@@ -431,13 +435,11 @@ def _cmd_send(settings, conn, text, key, name, rid):
     row = _get_pending(conn, rid)
     if not row:
         return f"No pending recipient. Start with '{_prefix(settings)} to <key or name>'."
-    body = (
-        (row[1] + " " + text).strip()
-        if (row[1] and text.strip())
-        else (text.strip() or row[1])
-    )
+    body = (row[1] + " " + text).strip() if (row[1] and text.strip()) else (text.strip() or row[1])
     if not body:
-        return f"Empty message. '{_prefix(settings)} add <text>' or '{_prefix(settings)} send <text>'."
+        return (
+            f"Empty message. '{_prefix(settings)} add <text>' or '{_prefix(settings)} send <text>'."
+        )
     conn.execute("DELETE FROM pending WHERE requester=?", (rid,))
     conn.commit()
     return _cmd_store(settings, conn, row[0], body, key, name)
@@ -471,9 +473,7 @@ def _play_one(settings, conn, key, rid, index=None, advance=False):
         n = index
     elif advance:
         n = 1
-        cur = conn.execute(
-            "SELECT message_id FROM cursors WHERE requester=?", (rid,)
-        ).fetchone()
+        cur = conn.execute("SELECT message_id FROM cursors WHERE requester=?", (rid,)).fetchone()
         if cur:
             n = (
                 conn.execute(
@@ -576,6 +576,7 @@ def _cmd_help(settings):
 
 
 def _cmd_size_test(settings, arg):
+    """Exactly-N-byte probe. _Raw so reply_split never renumbers or cuts it."""
     try:
         n = int(arg) if arg else _response_budget(settings)
     except ValueError:
@@ -583,7 +584,7 @@ def _cmd_size_test(settings, arg):
     n = max(20, min(n, 500))
     prefix = f"TEST {n}B "
     ruler = "".join(f"{i:.>10}" for i in range(10, n + 20, 10))
-    return (prefix + ruler[len(prefix):])[:n]
+    return _Raw((prefix + ruler[len(prefix) :])[:n])
 
 
 # ------------------------------------------------------------- entrypoint --
@@ -607,9 +608,7 @@ async def _redirect_channel_mailbox_to_dm(ctx, sender_name):
         from app.routers.radio import RadioAdvertiseRequest, send_advertisement
 
         try:
-            await send_advertisement(
-                RadioAdvertiseRequest(mode="flood")
-            )
+            await send_advertisement(RadioAdvertiseRequest(mode="flood"))
         except Exception as exc:
             ctx.log(
                 f"mailbox DM redirect advert error: {type(exc).__name__}: {exc}",
@@ -672,6 +671,22 @@ async def _redirect_channel_mailbox_to_dm(ctx, sender_name):
             _redirect_pending.discard(pending_key)
 
 
+async def _send(ctx, settings, reply):
+    """Put one command's reply on the air.
+
+    ``_bot_inner`` and its ``_cmd_*`` helpers return a single unsplit string (or
+    None); ``ctx.reply_split`` turns it into as many ``(i/n)`` parts as the
+    per-message budget needs. A ``_Raw`` reply is sent verbatim so ``mbx test``
+    keeps its exact byte count.
+    """
+    if reply is None:
+        return
+    if isinstance(reply, _Raw):
+        await ctx.reply(str(reply))
+        return
+    await ctx.reply_split(reply, max_bytes=_response_budget(settings))
+
+
 @bot.on_message()
 async def mailbox(ctx, msg):
     """Runs for every in-scope message.
@@ -713,16 +728,12 @@ async def mailbox(ctx, msg):
         pending_key = sender_name.lower()
 
         if pending_key in _redirect_pending:
-            await ctx.reply(
-                f"@[{sender_name}] Mailbox private redirect is already in progress."
-            )
+            await ctx.reply(f"@[{sender_name}] Mailbox private redirect is already in progress.")
             return None
 
         _redirect_pending.add(pending_key)
 
-        task = asyncio.create_task(
-            _redirect_channel_mailbox_to_dm(ctx, sender_name)
-        )
+        task = asyncio.create_task(_redirect_channel_mailbox_to_dm(ctx, sender_name))
         _redirect_tasks.add(task)
         task.add_done_callback(_redirect_tasks.discard)
 
@@ -738,7 +749,7 @@ async def mailbox(ctx, msg):
 
     try:
         # _bot_inner uses blocking sqlite3. Keep that work off the event loop.
-        return await asyncio.to_thread(
+        reply = await asyncio.to_thread(
             _bot_inner,
             settings,
             **kwargs,
@@ -751,25 +762,34 @@ async def mailbox(ctx, msg):
             authed = await asyncio.to_thread(
                 lambda: bool(
                     rid
-                    and _db(settings).execute(
+                    and _db(settings)
+                    .execute(
                         "SELECT 1 FROM debug_auth WHERE requester=?",
                         (rid,),
-                    ).fetchone()
+                    )
+                    .fetchone()
                 )
             )
             if authed:
-                return _split_reply(settings, f"MBX ERR: {type(e).__name__}: {e}")
+                await _send(ctx, settings, f"MBX ERR: {type(e).__name__}: {e}")
+                return None
         except Exception:
             pass
 
         ctx.log(f"mailbox error: {type(e).__name__}: {e}", level="WARNING")
-        return (
+        await _send(
+            ctx,
+            settings,
             f"An error occurred. Authenticate with "
-            f"'{_prefix(settings)} debug <password>' to see error details."
+            f"'{_prefix(settings)} debug <password>' to see error details.",
         )
+        return None
+
+    await _send(ctx, settings, reply)
+    return None
 
 
-def _bot_inner(settings, **kwargs) -> "str | list[str] | None":
+def _bot_inner(settings, **kwargs) -> "str | None":
     sender_name = kwargs.get("sender_name") or ""
     sender_key = (kwargs.get("sender_key") or "").lower()
     message_text = kwargs.get("message_text", "") or ""
@@ -793,89 +813,83 @@ def _bot_inner(settings, **kwargs) -> "str | list[str] | None":
     if low != _prefix(settings) and not low.startswith(_prefix(settings) + " "):
         return None
 
-    rest = text[len(_prefix(settings)):].strip()
+    rest = text[len(_prefix(settings)) :].strip()
     parts = rest.split(None, 1)
     cmd = parts[0].lower() if parts else ""
     arg = parts[1] if len(parts) > 1 else ""
 
     rid = sender_key or sender_name.lower()
     if not rid:
-        return _split_reply(settings, "Can't identify you (no key). Try again.")
+        return "Can't identify you (no key). Try again."
 
     conn = _db(settings)
     _purge_expired(conn)
 
     # ---- help & debug: allowed before consent ----
     if cmd in ("", "?"):
-        return _split_reply(settings, _cmd_help_short(settings))
+        return _cmd_help_short(settings)
 
     if cmd in ("help"):
-        return _split_reply(settings, _cmd_help(settings))
+        return _cmd_help(settings)
 
     if cmd == "debug":
-        authed = conn.execute(
-            "SELECT 1 FROM debug_auth WHERE requester=?", (rid,)
-        ).fetchone()
+        authed = conn.execute("SELECT 1 FROM debug_auth WHERE requester=?", (rid,)).fetchone()
         if not authed:
             if arg and hmac.compare_digest(arg, _debug_password(settings)):
                 conn.execute(
                     "INSERT OR REPLACE INTO debug_auth VALUES (?,?)", (rid, int(time.time()))
                 )
                 conn.commit()
-                return _split_reply(settings, f"Debug unlocked. Send '{_prefix(settings)} debug' again.")
-            return _split_reply(settings, "Debug is password-locked.")
-        #env_dump = " ".join(
+                return f"Debug unlocked. Send '{_prefix(settings)} debug' again."
+            return "Debug is password-locked."
+        # env_dump = " ".join(
         #    f"{k}={v}"
         #    for k, v in sorted(os.environ.items())
         #    if k.startswith("MAILBOX_") and k != "fcffff"
-        #)
+        # )
         n_dir = conn.execute("SELECT COUNT(*) FROM directory").fetchone()[0]
-        return _split_reply(settings, 
+        return (
             f"db={_db_path(settings)} "
             f"budget={_response_budget(settings)} body={_max_body(settings)} "
             f"(hard {HARD_MAX_BODY}) dir={n_dir} names"
-            #f"env: {env_dump or '(none)'}"
+            # f"env: {env_dump or '(none)'}"
         )
 
     if cmd == "test":
-        authed = conn.execute(
-            "SELECT 1 FROM debug_auth WHERE requester=?", (rid,)
-        ).fetchone()
+        authed = conn.execute("SELECT 1 FROM debug_auth WHERE requester=?", (rid,)).fetchone()
         if not authed:
-            return _split_reply(settings, 
-                f"Size test is debug-gated. Unlock with '{_prefix(settings)} debug <password>'."
-            )
+            return f"Size test is debug-gated. Unlock with '{_prefix(settings)} debug <password>'."
         return _cmd_size_test(settings, arg)
 
     # ---- consent gate for everything else ----
     consented = conn.execute("SELECT 1 FROM consents WHERE requester=?", (rid,)).fetchone()
     if cmd == "accept":
         if consented:
-            return _split_reply(settings, "Already accepted.")
+            return "Already accepted."
         conn.execute("INSERT INTO consents VALUES (?,?)", (rid, int(time.time())))
         conn.commit()
-        return _split_reply(settings, f"Accepted. '{_prefix(settings)} help' for commands.")
+        return f"Accepted. '{_prefix(settings)} help' for commands."
     if not consented:
-        return _split_reply(settings, _privacy_notice(settings))
+        return _privacy_notice(settings)
 
     # ---- mailbox commands ----
     if cmd == "msg":
         sub = arg.split(None, 1)
         if len(sub) < 2:
-            return _split_reply(settings, f"Usage: {_prefix(settings)} msg <key> <text>")
-        return _split_reply(settings, _cmd_store(settings, conn, sub[0], sub[1], sender_key, sender_name))
+            return f"Usage: {_prefix(settings)} msg <key> <text>"
+        return _cmd_store(settings, conn, sub[0], sub[1], sender_key, sender_name)
 
     if cmd == "to":
-        return _split_reply(settings, _cmd_to(settings, conn, arg, rid))
+        return _cmd_to(settings, conn, arg, rid)
 
     if cmd == "add":
-        return _split_reply(settings, _cmd_add(settings, conn, arg, rid))
+        return _cmd_add(settings, conn, arg, rid)
 
     if cmd == "send":
-        return _split_reply(settings, _cmd_send(settings, conn, arg, sender_key, sender_name, rid))
+        return _cmd_send(settings, conn, arg, sender_key, sender_name, rid)
 
     if cmd == "inbox":
-        return _split_reply(settings, _cmd_inbox(settings, conn, sender_key))
+        return _cmd_inbox(settings, conn, sender_key)
 
     if cmd in ("play", "next"):
         idx = None
@@ -884,15 +898,14 @@ def _bot_inner(settings, **kwargs) -> "str | list[str] | None":
                 idx = int(arg.split()[0])
             except ValueError:
                 pass
-        return _split_reply(settings, 
-            _play_one(settings, conn, sender_key, rid, index=idx, advance=(cmd == "next" and idx is None))
+        return _play_one(
+            settings, conn, sender_key, rid, index=idx, advance=(cmd == "next" and idx is None)
         )
 
     if cmd == "del":
-        return _split_reply(settings, _cmd_del(settings, conn, sender_key, rid))
+        return _cmd_del(settings, conn, sender_key, rid)
 
     if cmd == "clear":
-        return _split_reply(settings, _cmd_clear(conn, sender_key))
+        return _cmd_clear(conn, sender_key)
 
-    return _split_reply(settings, f"Unknown command. '{_prefix(settings)} help'")
-
+    return f"Unknown command. '{_prefix(settings)} help'"

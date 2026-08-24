@@ -1,8 +1,9 @@
 """FIFA World Cup scores for today, from ESPN's public scoreboard.
 
-Usage: ``wc`` or ``worldcup``. Up to three matches in one compact reply:
-live/finished matches as "ARG 2-1 FRA (FT)", scheduled ones as
-"ARG vs FRA (7:00 PM)".
+Usage: ``wc`` or ``worldcup``. Up to three matches per reply: live/finished
+matches as "ARG 2-1 FRA (FT)", scheduled ones as "ARG vs FRA (7:00 PM)".
+Sent with ``ctx.reply_split``, so a long slate goes out as ``(i/n)`` parts
+instead of being cut off.
 """
 
 from remoteterm import bot
@@ -12,15 +13,11 @@ BOT_META = {
     "name": "worldcup",
     "category": "Sports",
     "description": "World Cup scores today (ESPN scoreboard)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "cooldown_seconds": 5,
 }
 
 _URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard"
-
-
-def _clip(text: str, limit: int = 180) -> str:
-    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _format_event(event: dict) -> str:
@@ -53,4 +50,4 @@ async def worldcup(ctx, msg):
         await ctx.reply("No World Cup matches today.")
         return
     lines = [_format_event(event) for event in events[:3]]
-    await ctx.reply(_clip("\n".join(lines)))
+    await ctx.reply_split("\n".join(lines))

@@ -11,7 +11,7 @@ BOT_META = {
     "name": "gwx",
     "category": "Weather",
     "description": "Global weather anywhere (Open-Meteo)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "cooldown_seconds": 3,
     "settings_schema": [
         {
@@ -34,10 +34,6 @@ BOT_META = {
     ],
     "settings": {"default_location": "Seattle, WA", "units": "metric"},
 }
-
-
-def _clip(text: str, limit: int = 180) -> str:
-    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 @bot.on_keyword("gwx", "globalweather")
@@ -75,4 +71,4 @@ async def gwx(ctx, msg):
     except Exception:  # httpx.HTTPError / payload shape surprises (ctx.http owns the client)
         await ctx.reply(ctx.t("rt.error_upstream"))
         return
-    await ctx.reply(_clip(text))
+    await ctx.reply_split(text)

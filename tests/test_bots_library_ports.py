@@ -286,3 +286,178 @@ class TestMeshAdminBots:
         )
         assert response.error is None
         assert "not transmitted" in response.replies[0]["text"]
+
+
+class TestLongReplySplitting:
+    """Library bots hand long text to ctx.reply_split instead of hand-rolling it.
+
+    Before this migration each of these bots carried its own splitter or a hard
+    ``[:180]`` cut, so a long answer was either re-implemented per bot or lost.
+    """
+
+    MIGRATED = (
+        "mailbox",
+        "help",
+        "cmd",
+        "channels",
+        "sports",
+        "neighbors",
+        "repeater",
+        "trace",
+        "gwx",
+        "worldcup",
+        "wx",
+    )
+
+    async def _test_run(self, key: str, request: BotTestRequest, settings=None):
+        from app.repository.bots import BotRepository
+
+        entry = get_library_entry(key)
+        assert entry is not None
+        bot = await BotRepository.create(
+            name=f"{key}-splittest", code=entry["code"], settings=settings or {}
+        )
+        return await BotEngine().test_run(bot, request)
+
+    def test_migrated_bots_use_reply_split(self):
+        for key in self.MIGRATED:
+            entry = get_library_entry(key)
+            assert entry is not None, key
+            assert "ctx.reply_split(" in entry["code"], f"{key} still splits by hand"
+
+    def test_no_library_bot_reimplements_the_splitter(self):
+        """``(i/n)`` numbering belongs to ctx.reply_split, not to bot code."""
+        from app.bots.library import list_library
+
+        for entry in list_library():
+            assert "({i}/{total})" not in entry["code"], f"{entry['key']} hand-numbers parts"
+
+    async def test_cmd_lists_every_command_across_parts(self, test_db):
+        response = await self._test_run("cmd", BotTestRequest(text="cmd"))
+        assert response.error is None
+        # Nothing is dropped and nothing is advertised as omitted.
+        joined = " ".join(r["text"] for r in response.replies)
+        assert "more — see the Bots tab" not in joined
+
+    async def test_help_splits_a_long_command_list(self, test_db):
+        """A command list past one frame goes out numbered, never cut with '…'."""
+        from app.bots.api import DEFAULT_SPLIT_BYTES
+
+        entry = get_library_entry("help")
+        assert entry is not None
+        loaded = load_bot_code(entry["code"])
+        handler = loaded.collector.keywords[0].handler
+
+        ctx = BotContext(
+            bot_id="help",
+            bot_name="help",
+            settings={},
+            state={},
+            is_test=True,
+            loop=asyncio.get_event_loop(),
+            origin_is_dm=True,
+            origin_sender_key="ab" * 32,
+        )
+        ctx.get_enabled_bots = lambda: [  # type: ignore[method-assign]
+            {"name": f"bot{i}", "description": "d", "keywords": [f"keyword{i:02d}"]}
+            for i in range(40)
+        ]
+        await handler(ctx, BotMessage(text="help", is_dm=True, sender_key="ab" * 32))
+
+        texts = [s["text"] for s in ctx.captured_sends]
+        # Last message is the unchanged hint; the list before it is numbered.
+        assert texts[-1] == "Say 'help <command>' for details."
+        parts = texts[:-1]
+        assert len(parts) > 1, "expected the long list to split"
+        assert [p.split("/")[0] for p in parts] == [f"({i}" for i in range(1, len(parts) + 1)]
+        assert "…" not in " ".join(parts), "list must not be truncated any more"
+        for part in parts:
+            assert len(part.encode("utf-8")) <= DEFAULT_SPLIT_BYTES
+        # Every keyword survives.
+        joined = " ".join(p.split(") ", 1)[1] for p in parts)
+        for i in range(40):
+            assert f"keyword{i:02d}" in joined
+
+
+class TestMailbox:
+    """Mailbox builds one unsplit string per command; the entrypoint splits it.
+
+    ``_bot_inner`` runs in a worker thread and cannot await, so every ``_cmd_*``
+    branch returns raw text and ``mailbox()`` hands it to ctx.reply_split. These
+    tests pin the two things that migration could silently break: a branch
+    forgetting to return, and the raw ``mbx test`` probe getting renumbered.
+    """
+
+    async def _mailbox(self, tmp_path, settings=None):
+        """One mailbox bot record; run as many messages through it as needed."""
+        from app.repository.bots import BotRepository
+
+        entry = get_library_entry("mailbox")
+        assert entry is not None
+        base = {"db_path": str(tmp_path / "mailbox.db"), "prefix": "mbx"}
+        record = await BotRepository.create(
+            name="mailbox-splittest", code=entry["code"], settings={**base, **(settings or {})}
+        )
+        engine = BotEngine()
+
+        async def run(text: str, sender_key: str = "ab" * 32):
+            response = await engine.test_run(
+                record, BotTestRequest(text=text, is_dm=True, sender_key=sender_key)
+            )
+            assert response.error is None, response.error
+            return [r["text"] for r in response.replies]
+
+        return run
+
+    async def test_help_goes_out_as_numbered_parts(self, test_db, tmp_path):
+        run = await self._mailbox(tmp_path)
+        texts = await run("mbx help")
+        assert len(texts) > 1, "the full guide does not fit one frame"
+        assert [t.split("/")[0] for t in texts] == [f"({i}" for i in range(1, len(texts) + 1)]
+        for text in texts:
+            assert len(text.encode("utf-8")) <= 155
+
+    async def test_response_budget_setting_still_sizes_the_parts(self, test_db, tmp_path):
+        run = await self._mailbox(tmp_path, settings={"response_budget": 60})
+        for text in await run("mbx help"):
+            assert len(text.encode("utf-8")) <= 60
+
+    async def test_short_reply_is_a_single_unnumbered_message(self, test_db, tmp_path):
+        run = await self._mailbox(tmp_path)
+        await run("mbx accept")
+        texts = await run("mbx bogus")
+        assert len(texts) == 1
+        assert texts[0].startswith("Unknown command.")
+
+    async def test_consent_gate_answers_alone(self, test_db, tmp_path):
+        """A gated branch must return, not fall through into a later command."""
+        run = await self._mailbox(tmp_path)
+        texts = await run("mbx inbox")
+        assert len(texts) == 1
+        assert "UNENCRYPTED" in texts[0]
+
+    async def test_size_probe_is_sent_raw_in_one_message(self, test_db, tmp_path):
+        """`mbx test N` measures the link — reply_split must not touch it."""
+        run = await self._mailbox(tmp_path)
+        assert "unlocked" in (await run("mbx debug CHANGE-ME-s3cret"))[0]
+
+        texts = await run("mbx test 300")
+        assert len(texts) == 1, "the probe must not be split"
+        assert len(texts[0].encode("utf-8")) == 300
+        assert texts[0].startswith("TEST 300B ")
+
+    async def test_stored_message_plays_back_whole(self, test_db, tmp_path):
+        run = await self._mailbox(tmp_path)
+        sender = "ab" * 32
+        recipient = "cd" * 32
+        body = " ".join(f"word{i:03d}" for i in range(80))
+
+        await run("mbx accept", sender_key=sender)
+        await run(f"mbx msg {recipient} {body}", sender_key=sender)
+        await run("mbx accept", sender_key=recipient)
+        texts = await run("mbx play", sender_key=recipient)
+
+        assert len(texts) > 1
+        joined = " ".join(t.split(") ", 1)[1] for t in texts)
+        for i in range(80):
+            assert f"word{i:03d}" in joined, f"word{i:03d} lost in playback"

@@ -12,7 +12,7 @@ BOT_META = {
     "name": "trace",
     "category": "Mesh",
     "description": "Active route trace along a hex path (real trace packet)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "cooldown_seconds": 30,
     "settings_schema": [
         {
@@ -76,4 +76,4 @@ async def run_trace(ctx, msg):
         label = node.name or node.observed_hash or "?"
         snr = f" {node.snr:.1f}dB" if node.snr is not None else ""
         parts.append(f"{label}{snr}")
-    await ctx.reply(f"Trace ({result.path_len} hops): {' > '.join(parts)}"[:180])
+    await ctx.reply_split(f"Trace ({result.path_len} hops): {' > '.join(parts)}")

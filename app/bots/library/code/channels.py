@@ -7,10 +7,8 @@ BOT_META = {
     "name": "channels",
     "category": "Basic",
     "description": "Lists known hashtag channels",
-    "version": "1.0.0",
+    "version": "1.1.0",
 }
-
-_MAX_LINE = 160
 
 
 @bot.on_keyword("channels", "channel")
@@ -28,25 +26,6 @@ async def list_channels(ctx, msg):
         await ctx.reply(ctx.t("rt.no_results"))
         return
 
-    lines: list[str] = []
-    current = ""
-    shown = 0
-    for name in names:
-        candidate = f"{current} {name}" if current else name
-        if not current or len(candidate) <= _MAX_LINE:
-            current = candidate
-            shown += 1
-            continue
-        lines.append(current)
-        if len(lines) == 2:
-            break
-        current = name
-        shown += 1
-    if len(lines) < 2 and current:
-        lines.append(current)
-
-    extra = len(names) - shown
-    if extra > 0:
-        lines[-1] += f" +{extra} more"
-    for line in lines:
-        await ctx.reply(line)
+    # ctx.reply_split packs the full list into as many RF-sized "(i/n)" parts as
+    # it takes, so no channel is dropped and no name is cut in half.
+    await ctx.reply_split(" ".join(names))

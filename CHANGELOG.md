@@ -8,6 +8,7 @@
 * Feature: Discord and Telegram one-way channel bridges as fanout integrations
 * Feature: Multibyte Rollout panel in Settings › Statistics — node-level multibyte path adoption (contacts and repeaters by direct-route hop width), complementing the packet-level Path Hash Width chart
 * Note: meshcore-bot's channelpause and reload commands are intentionally not ported — the workspace's per-bot enable toggles, the disable-all kill switch, and hot reload on save supersede them
+* Change: Built-in bots no longer hand-roll message splitting — mailbox, help, cmd, channels, sports, neighbors, repeater, trace, gwx, worldcup and wx now send long replies through `ctx.reply_split`, so answers that used to be cut off at ~180 characters go out whole as numbered `(i/n)` parts (and pack more per part on MCMP conversations)
 * Change: Settings › "MQTT & Automation" is now "Integrations"; legacy fanout Python bots migrate automatically into the Bots workspace (migration 064) and keep their exact behavior via the legacy `def bot(**kwargs)` wrapper
 
 ## [3.17.1] - 2026-07-26

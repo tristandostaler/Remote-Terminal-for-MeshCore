@@ -7,7 +7,7 @@ BOT_META = {
     "name": "sports",
     "category": "Sports",
     "description": "Live and final scores from ESPN (NFL, NBA, MLB, NHL, MLS)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "settings_schema": [
         {
             "key": "league",
@@ -40,8 +40,6 @@ _LEAGUE_PATHS = {
     "nhl": "hockey/nhl",
     "mls": "soccer/usa.1",
 }
-
-_MAX_REPLY = 170
 
 
 def _parse_game(event):
@@ -108,16 +106,6 @@ async def sports(ctx, msg):
         await ctx.reply(ctx.t("rt.no_results"))
         return
 
-    replies = []
-    current = ""
-    for line in lines:
-        candidate = f"{current} | {line}" if current else line
-        if not current or len(candidate) <= _MAX_REPLY:
-            current = candidate
-        else:
-            replies.append(current)
-            current = line
-    if current:
-        replies.append(current)
-    for text in replies[:2]:
-        await ctx.reply(text)
+    # ctx.reply_split packs the games into as many RF-sized "(i/n)" parts as it
+    # takes, so no game is dropped and no line is cut in half.
+    await ctx.reply_split(" | ".join(lines))

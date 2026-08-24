@@ -7,7 +7,7 @@ BOT_META = {
     "name": "help",
     "category": "Basic",
     "description": "Command list and per-command help",
-    "version": "1.0.0",
+    "version": "1.1.0",
 }
 
 
@@ -20,7 +20,7 @@ async def show_help(ctx, msg):
         for entry in bots:
             if wanted == entry["name"].lower() or wanted in entry["keywords"]:
                 tries = ", ".join(entry["keywords"][:6]) or "(no keywords)"
-                await ctx.reply(f"{entry['name']}: {entry['description']} — try: {tries}")
+                await ctx.reply_split(f"{entry['name']}: {entry['description']} — try: {tries}")
                 return
         await ctx.reply(ctx.t("rt.no_results"))
         return
@@ -30,8 +30,7 @@ async def show_help(ctx, msg):
         if entry["keywords"]:
             keywords.append(entry["keywords"][0])
     keywords.sort()
-    line = ", ".join(keywords)
-    if len(line) > 160:
-        line = line[:157].rsplit(",", 1)[0] + ", …"
-    await ctx.reply(f"Commands: {line}")
+    # ctx.reply_split packs the whole list into as many RF-sized "(i/n)" parts as
+    # it takes, so no command is dropped and no keyword is cut in half.
+    await ctx.reply_split(f"Commands: {', '.join(keywords)}")
     await ctx.reply("Say 'help <command>' for details.")

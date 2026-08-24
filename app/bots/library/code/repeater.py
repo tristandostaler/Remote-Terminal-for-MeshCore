@@ -15,7 +15,7 @@ BOT_META = {
     "name": "repeater",
     "category": "Admin",
     "description": "Repeater fleet overview: list, stats (DM, admins)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "admin_only": True,
     "respond_to_dms": True,
 }
@@ -58,7 +58,7 @@ async def repeater_cmd(ctx, msg):
             f"{c.name or c.public_key[:8]} ({_ago(now, c.last_seen)})" for c in repeaters[:6]
         )
         more = f" +{len(repeaters) - 6} more" if len(repeaters) > 6 else ""
-        await ctx.reply(f"{len(repeaters)} repeaters: {listed}{more}"[:180])
+        await ctx.reply_split(f"{len(repeaters)} repeaters: {listed}{more}")
         return
 
     if sub == "stats":
