@@ -1038,3 +1038,109 @@ class TestGenericKeywordHandler:
         # `roll_dice` is this bot's primary handler, so `d20 2d6` rolls a spec
         # rather than taking the 1..N path the `roll` keyword owns.
         assert response.replies[0]["text"].startswith("2d6: ")
+
+
+class TestNoBotAnswersEverything:
+    """The bare @bot.on_keyword() must not turn a bot into a catch-all.
+
+    A no-argument keyword decorator is *not* a wildcard: ``LoadedBot.keyword_map``
+    only emits a pair for it when the record actually carries UI keywords, and
+    the match is still exact-word (``text == kw`` or ``text.startswith(kw + " ")``).
+    The catch-all loops in the engine read ``collector.messages`` — on_message —
+    never ``collector.keywords``. These tests prove that rather than assert it.
+    """
+
+    NONSENSE = "xyzzy plugh quux frotz"
+
+    # The only library bots that legitimately see every in-scope message. Both
+    # filter themselves: greeter answers greetings, mailbox only learns names.
+    CATCH_ALL = {"greeter", "mailbox"}
+
+    # greeter's whole job is welcoming a sender it has not seen, whatever they
+    # said — an on_message bot that predates this convention and gained nothing
+    # from it. It is exempt from "must not reply", not from being accounted for.
+    GREETS_STRANGERS = {"greeter"}
+
+    def test_a_generic_handler_maps_to_nothing_without_ui_keywords(self):
+        from app.bots.engine import LoadedBot
+        from app.bots.library import list_library
+        from app.models import Bot
+
+        for entry in list_library():
+            code = load_bot_code(entry["code"])
+            record = Bot(id=entry["key"], name=entry["key"], code=entry["code"])
+            mapped = [kws for kws, _ in LoadedBot(record=record, code=code).keyword_map]
+            assert () not in mapped, f"{entry['key']} maps an empty keyword tuple"
+            declared = {kw for trig in code.collector.keywords for kw in trig.keywords}
+            assert {kw for kws in mapped for kw in kws} == declared, entry["key"]
+
+    def test_no_bot_has_gained_a_catch_all(self):
+        from app.bots.library import list_library
+
+        catch_alls = {
+            entry["key"]
+            for entry in list_library()
+            if load_bot_code(entry["code"]).collector.messages
+        }
+        assert catch_alls == self.CATCH_ALL
+
+    async def test_nonsense_reaches_no_library_bot(self, test_db, tmp_path):
+        """Every library bot, run against a message matching nothing: no reply."""
+        from app.bots.library import list_library
+        from app.repository.bots import BotRepository
+
+        engine = BotEngine()
+        for entry in list_library():
+            record = await BotRepository.create(
+                name=f"{entry['key']}-catchalltest",
+                code=entry["code"],
+                # mailbox would otherwise open the real data/mailbox.db
+                settings={"db_path": str(tmp_path / f"{entry['key']}.db")},
+            )
+            for is_dm in (True, False):
+                response = await engine.test_run(
+                    record,
+                    BotTestRequest(
+                        text=self.NONSENSE,
+                        is_dm=is_dm,
+                        sender_key="ab" * 32,
+                        sender_name="TestUser",
+                    ),
+                )
+                # Only the two on_message bots get a look at this at all;
+                # everything else reports that nothing matched.
+                assert response.matched is (entry["key"] in self.CATCH_ALL), (
+                    f"{entry['key']} matched={response.matched} (is_dm={is_dm})"
+                )
+                if not response.matched:
+                    assert "no trigger matched" in (response.error or ""), entry["key"]
+                if entry["key"] in self.GREETS_STRANGERS:
+                    continue
+                assert response.replies == [], (
+                    f"{entry['key']} answered a message that matches nothing "
+                    f"(is_dm={is_dm}): {response.replies}"
+                )
+
+    async def test_an_extra_keyword_answers_only_itself(self, test_db):
+        """Adding one word does not widen the bot to everything else."""
+        from app.repository.bots import BotRepository
+
+        entry = get_library_entry("ping")
+        assert entry is not None
+        record = await BotRepository.create(
+            name="ping-onlyitself",
+            code=entry["code"],
+            ui_triggers=[{"kind": "keyword", "spec": "alive"}],
+        )
+        engine = BotEngine()
+
+        answered = await engine.test_run(
+            record, BotTestRequest(text="alive", is_dm=True, sender_name="K0PHX")
+        )
+        assert answered.replies, "the extra keyword must answer"
+
+        for text in (self.NONSENSE, "alivening", "not alive", "aliv"):
+            quiet = await engine.test_run(
+                record, BotTestRequest(text=text, is_dm=True, sender_name="K0PHX")
+            )
+            assert quiet.replies == [], f"ping answered {text!r}"
