@@ -12,9 +12,17 @@ operators).
 - `api.py` — the authoring surface (`from remoteterm import bot` + `BotContext`).
   Decorators register handlers into a collector while `runtime.load_bot_code`
   exec()s the source. `BotContext` carries sends (`reply`/`send`/`send_dm`),
-  `settings`, persistent `state`, `http` (httpx), `geocode`, i18n (`t`),
-  `mesh_stats`, `get_enabled_bots`, logging. Test runs capture sends instead of
-  transmitting.
+  image sends (`reply_image`/`send_image`/`send_dm_image`), `settings`,
+  persistent `state`, `http` (httpx), `geocode`, i18n (`t`), `mesh_stats`,
+  `get_enabled_bots`, logging. Test runs capture sends instead of transmitting.
+  - **Image sends** take encoded bytes (anything Pillow opens — e.g. straight
+    from `ctx.http`) or exactly 786,432 bytes of 512×512 packed RGB, and return
+    how many messages it took. The image is stretched into a 512px square and
+    AEIC-encoded to ~150 bytes, then framed as `aei1:` text chunks that go out
+    through the ordinary `_dispatch_send`, so they obey the same TX spacing,
+    moderation and test-capture rules as any reply. Needs the optional `aeic`
+    extra and the downloaded model on this server; raises naming the missing
+    piece otherwise. See `app/imaging/aeic/AGENTS_aeic.md`.
 - `runtime.py` — load/validate source. Two styles: decorated handlers, or a
   legacy module-level `def bot(...)` (auto-wrapped; executed via the original
   `app/fanout/bot_exec.execute_bot_code`, so migrated bots behave identically).

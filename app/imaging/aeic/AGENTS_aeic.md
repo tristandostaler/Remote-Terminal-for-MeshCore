@@ -134,25 +134,50 @@ transport or a bridge between the two needs no second definition.
 ### Planned: migrate to 0xAE1C when command 62 lands
 
 **The text transport is interim.** When `CMD_SEND_CHANNEL_DATA` (62) becomes
-available in the Python `meshcore` library, switch the *outbound* path to the
-binary 0xAE1C GRP_DATA transport. Two reasons: it is what MCO Advanced speaks,
-so AEIC images start interoperating instead of being RemoteTerm-to-RemoteTerm
-only; and it drops basE91's ~23% expansion, which puts most photos back into a
-single packet.
+available in the Python `meshcore` library, the binary 0xAE1C GRP_DATA transport
+takes over the outbound path. It is what MCO Advanced speaks, so AEIC images
+start interoperating instead of being RemoteTerm-to-RemoteTerm only, and it drops
+basE91's ~23% expansion — a 156-byte bitstream (the measured mean) is *one*
+binary chunk but *two* text messages.
 
-The work:
+`transport.py` is built for that swap and is the only file that should need
+editing:
 
-1. Outbound frame builder for command 62 (or a raw GRP_DATA frame, the way
-   `app/services/voice.py` builds raw DM frames today).
-2. A GROUP_DATA (0x06) decrypt/ingest route beside the existing GROUP_TEXT
-   (0x05) one in `app/packet_processor.py`.
-3. Port upstream's XOR parity chunk — the binary framing carries it and the text
-   framing deliberately does not.
-4. **Keep `aei1:` decoding inbound.** Peers on the text-only form must keep
-   working, so this is an addition, not a replacement, and the per-conversation
-   selector likely grows a transport choice rather than silently switching.
+| piece | where | state |
+| --- | --- | --- |
+| the seam every sender goes through | `select_transport()` | done |
+| capability probe for command 62 | `channel_data_transport_available()` | done — returns True on its own once the library exposes it, and selection follows |
+| text framing | `TextChunkTransport` | done |
+| binary framing + send | `ChannelDataTransport.send` | **to write** — full wire format is in its docstring |
+
+Everything that sends an image — `POST /aeic/send` and the bot
+`reply_image`/`send_image`/`send_dm_image` — already goes through
+`aeic_service.send_image`, which picks the transport. Neither knows which one it
+got, so neither changes.
+
+Three things live outside `transport.py` and still need doing:
+
+1. A GROUP_DATA (0x06) decrypt/ingest route beside the existing GROUP_TEXT
+   (0x05) one in `app/packet_processor.py`, dispatching on data type 0xAE1C.
+   (Outbound can go via a raw frame the way `app/services/voice.py` builds raw
+   DM frames, if the library still lacks command 62.)
+2. Reassembly that honours upstream's XOR parity chunk — the binary framing
+   carries it and `ingest.py` currently reassembles text chunks only.
+3. **Keep `aei1:` decoding inbound.** Peers on the text-only form must keep
+   working, so this is an addition, not a replacement; the per-conversation
+   selector likely grows a transport choice rather than switching silently.
 
 `AeicStreamMetadata` needs no change: its byte already *is* the upstream one.
+`tests/test_aeic_transport.py` pins the shared contract, so a
+`ChannelDataTransport` that satisfies those tests is a drop-in.
+
+### One interaction worth knowing about
+
+`aei1:` chunks must never be MCMP-compressed. MCMP v2 has an "only if smaller"
+gate and leaves them alone by luck, but **v3 always wraps** — which would inflate
+a chunk sized exactly to the 156-byte radio budget and get it truncated,
+corrupting the image with nothing raised. `encode_outbound` therefore skips any
+already-framed payload (`is_framed_payload`: `aei1`, `IE4:`, `mcmp2:`, `mcmp3:`).
 
 Two things are deliberately absent: **no parity chunk** (upstream spends a third
 packet on XOR parity; here an image is 1–2 messages, so parity would cost

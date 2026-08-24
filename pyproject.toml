@@ -26,6 +26,10 @@ dependencies = [
 aeic = [
     "numpy>=1.26",
     "onnxruntime>=1.20",
+    # Only for the bot send path: a bot fetches a JPEG and something has to
+    # decode and resize it. The browser does its own resize, so a user send
+    # never touches Pillow. See app/imaging/aeic/prepare.py.
+    "pillow>=10.0",
 ]
 
 [tool.pytest.ini_options]

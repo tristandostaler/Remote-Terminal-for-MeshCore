@@ -17,7 +17,10 @@ import pytest
 from app.compression.mcmp import (
     _V3_FLAG_SIGNED,
     MeshCompressor,
+    encode_outbound,
     encode_v3_text,
+    get_compressor,
+    is_framed_payload,
     try_decode_incoming,
     try_decode_v3_text,
 )
@@ -160,3 +163,41 @@ def test_literal_prefixed_text_is_not_false_decoded(compressor: MeshCompressor):
     # stripped ("mcmp2:hello" -> "hello").
     assert try_decode_incoming("mcmp2:hello") is None
     assert compressor.try_decode_prefixed("mcmp2:hello") is None
+
+
+class TestFramedPayloadGuard:
+    """``encode_outbound`` must leave already-framed transport payloads alone.
+
+    v3 has no "only if smaller" gate, so without this guard a conversation on v3
+    would wrap an AEIC image chunk sized exactly to the 156-byte radio budget
+    into a larger ``mcmp3:`` body -- and the radio would truncate it, corrupting
+    the image with nothing raised anywhere.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param("aei10500" + "A" * 140, id="AEIC image chunk"),
+            pytest.param("IE4:a:0:e:74:4r:1mc", id="IE4 envelope"),
+            pytest.param("mcmp2:already-encoded", id="an MCMP v2 body"),
+            pytest.param("mcmp3:already-encoded", id="an MCMP v3 body"),
+        ],
+    )
+    @pytest.mark.parametrize("version", [2, 3])
+    def test_returns_a_framed_payload_unchanged(self, text, version):
+        assert encode_outbound(text, version=version) == text
+        assert is_framed_payload(text)
+
+    def test_ordinary_prose_is_still_compressed(self):
+        prose = "Battery at 40%, switching to power save and checking channel five."
+        assert not is_framed_payload(prose)
+        assert encode_outbound(prose, version=3) != prose
+
+    def test_a_budget_sized_chunk_would_otherwise_overflow(self):
+        """The concrete harm the guard prevents, asserted rather than described."""
+        chunk = "aei10500" + "A" * 148
+        assert len(chunk) == 156  # exactly the DM budget
+        # Force the v3 container to see what would have gone on air.
+        wrapped = encode_v3_text(get_compressor(), chunk, timestamp=0)
+        assert len(wrapped) > 156, "v3 wrapping is what the guard is protecting against"
+        assert encode_outbound(chunk, version=3) == chunk

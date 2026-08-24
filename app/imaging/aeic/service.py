@@ -41,10 +41,17 @@ from app.imaging.aeic.bundle import (
     download_bundle,
 )
 from app.imaging.aeic.onnx_backend import SQUARE_SIZE, onnxruntime_available
+from app.imaging.aeic.prepare import prepare_square_rgb
 from app.imaging.aeic.text_transport import (
     AeicStreamMetadata,
     aspect_code_for,
     encode_chunks,
+)
+from app.imaging.aeic.transport import (
+    AeicSendResult,
+    AeicTarget,
+    AeicTransport,
+    select_transport,
 )
 
 logger = logging.getLogger(__name__)
@@ -225,6 +232,89 @@ class AeicService:
         logger.info("AEIC decoded %d bytes into a %dpx image", len(bitstream), SQUARE_SIZE)
         return png
 
+    async def send_image(
+        self,
+        data: bytes,
+        target: AeicTarget,
+        *,
+        source_width: int | None = None,
+        source_height: int | None = None,
+        session_id: int | None = None,
+        transport: AeicTransport | None = None,
+    ) -> tuple[AeicSendResult, bytes, AeicStreamMetadata]:
+        """Encode one image and put it on air. The single send entry point.
+
+        ``data`` is either a 512x512 packed-RGB square (the browser path) or any
+        image Pillow can open (the bot path); see
+        :func:`app.imaging.aeic.prepare.prepare_square_rgb`.
+
+        ``source_width``/``source_height`` override the shape recorded in the
+        metadata byte. Pass them when the caller knows the original dimensions
+        but is supplying already-squared pixels -- which is exactly the browser
+        case, since raw pixels carry no aspect of their own.
+
+        The transport comes from :func:`select_transport` unless one is passed,
+        so this method does not change when the binary 0xAE1C transport lands.
+        """
+        rgb, detected_width, detected_height = prepare_square_rgb(data)
+        width = source_width if source_width is not None else detected_width
+        height = source_height if source_height is not None else detected_height
+
+        bitstream = await self.encode_rgb(rgb)
+        metadata = AeicStreamMetadata(
+            square_size=SQUARE_SIZE,
+            aspect_code=aspect_code_for(width, height),
+        )
+        chosen = transport or select_transport()
+        result = await chosen.send(bitstream, metadata, target, session_id=session_id)
+        await self._record_outgoing(result, metadata, target, bitstream)
+        return result, bitstream, metadata
+
+    async def _record_outgoing(
+        self,
+        result: AeicSendResult,
+        metadata: AeicStreamMetadata,
+        target: AeicTarget,
+        bitstream: bytes,
+    ) -> None:
+        """Store the sent image as a session so the UI renders it as a picture.
+
+        Without this the sender's own outgoing message shows as raw ``aei1:``
+        text in their conversation while the recipient sees the photo. Done here
+        rather than in each caller so the route and the bot path cannot drift.
+        """
+        from app.repository import AeicImageRepository
+        from app.repository.aeic_image import session_key as make_session_key
+
+        key = make_session_key("self", result.session_id)
+        try:
+            await AeicImageRepository.enforce_cache_limit()
+            await AeicImageRepository.create_session(
+                key=key,
+                message_id=None,
+                direction="outgoing",
+                conversation_type=target.conversation_type,
+                conversation_key=target.conversation_key,
+                peer_public_key=(
+                    target.conversation_key if target.conversation_type == "PRIV" else None
+                ),
+                square_size=metadata.square_size,
+                aspect_code=metadata.aspect_code,
+                rate_code=metadata.rate_code,
+                total_chunks=result.chunk_count,
+                state="complete",
+            )
+            await AeicImageRepository.store_bitstream(key, bitstream)
+            first = next(
+                (m for m in result.emitted if m is not None and getattr(m, "id", None)), None
+            )
+            if first is not None:
+                await AeicImageRepository.set_message_id(key, first.id)
+        except Exception:
+            # The image is already on air; failing to record it locally must not
+            # turn a delivered photo into a raised error for the caller.
+            logger.exception("Could not record the outgoing AEIC session %s", key)
+
     async def frame_for_send(
         self,
         rgb: bytes,
@@ -234,7 +324,11 @@ class AeicService:
         message_budget: int,
         session_id: int | None = None,
     ) -> tuple[list[str], bytes, AeicStreamMetadata]:
-        """Encode and frame one photo: ``(messages, bitstream, metadata)``."""
+        """Encode and frame one photo: ``(messages, bitstream, metadata)``.
+
+        Text-transport specific, kept for callers that need the framed chunks
+        themselves rather than having them sent. Prefer :meth:`send_image`.
+        """
         bitstream = await self.encode_rgb(rgb)
         metadata = AeicStreamMetadata(
             square_size=SQUARE_SIZE,

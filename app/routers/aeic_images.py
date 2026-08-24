@@ -23,11 +23,16 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from app.event_handlers import track_pending_ack
 from app.imaging.aeic.ingest import decode_session
 from app.imaging.aeic.onnx_backend import SQUARE_SIZE
-from app.imaging.aeic.service import RGB_BYTES_EXPECTED, AeicUnavailable, aeic_service
+from app.imaging.aeic.prepare import RGB_BYTES_EXPECTED, AeicImagePrepareError
+from app.imaging.aeic.service import AeicUnavailable, aeic_service
 from app.imaging.aeic.text_transport import (
-    DEFAULT_MESSAGE_BUDGET,
     AeicTextFormatError,
     new_session_id,
+)
+from app.imaging.aeic.transport import (
+    AeicTarget,
+    AeicTransportUnavailable,
+    resolve_message_budget,
 )
 from app.models import AeicStatusResponse
 from app.repository import (
@@ -46,9 +51,6 @@ from app.websocket import broadcast_error, broadcast_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/aeic", tags=["aeic"])
-
-CHANNEL_SENDER_OVERHEAD = 2
-"""The ``": "`` a channel message's ``"sender: "`` prefix costs on top of the name."""
 
 
 @router.get("/status", response_model=AeicStatusResponse)
@@ -111,58 +113,29 @@ async def send_aeic_image(
         contact = await ContactRepository.get_by_key_or_prefix(conversation_key)
         if contact is None or len(contact.public_key) != 64:
             raise HTTPException(status_code=404, detail="image destination contact not found")
-        budget = DEFAULT_MESSAGE_BUDGET
+        budget = await resolve_message_budget("PRIV")
         channel = None
     else:
         channel = await ChannelRepository.get_by_key(conversation_key)
         if channel is None:
             raise HTTPException(status_code=404, detail="image destination channel not found")
         contact = None
-        # A channel message carries "sender: " inside the encrypted payload, so
-        # the chunk budget shrinks by the radio's own name.
-        self_name = await _self_name()
-        budget = DEFAULT_MESSAGE_BUDGET - len(self_name.encode()) - CHANNEL_SENDER_OVERHEAD
+        budget = await resolve_message_budget("CHAN", radio_manager=radio_manager)
 
     session_id = new_session_id()
-    try:
-        chunks, bitstream, metadata = await aeic_service.frame_for_send(
-            rgb,
-            source_width=source_width,
-            source_height=source_height,
-            message_budget=budget,
-            session_id=session_id,
-        )
-    except AeicUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except AeicTextFormatError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    await AeicImageRepository.enforce_cache_limit()
-    key = make_session_key("self", session_id)
     normalized_key = contact.public_key if contact else channel.key  # type: ignore[union-attr]
-    await AeicImageRepository.create_session(
-        key=key,
-        message_id=None,
-        direction="outgoing",
-        conversation_type=conversation_type,
-        conversation_key=normalized_key,
-        peer_public_key=contact.public_key if contact else None,
-        square_size=metadata.square_size,
-        aspect_code=metadata.aspect_code,
-        rate_code=metadata.rate_code,
-        total_chunks=len(chunks),
-        state="complete",
-    )
-    for index, payload_text in enumerate(chunks):
-        await AeicImageRepository.add_chunk(key, index, _chunk_payload(payload_text, index))
-    await AeicImageRepository.store_bitstream(key, bitstream)
 
-    messages = []
-    for index, chunk_text in enumerate(chunks):
+    async def emit_text(chunk: str):
+        """Send one framed chunk through the normal message path.
+
+        The transport calls this per chunk and does not care which send it is;
+        that indirection is what lets the binary 0xAE1C transport replace it
+        without this route changing.
+        """
         if contact is not None:
-            message = await send_direct_message_to_contact(
+            return await send_direct_message_to_contact(
                 contact=contact,
-                text=chunk_text,
+                text=chunk,
                 radio_manager=radio_manager,
                 broadcast_fn=broadcast_event,
                 track_pending_ack_fn=track_pending_ack,
@@ -170,35 +143,52 @@ async def send_aeic_image(
                 message_repository=MessageRepository,
                 contact_repository=ContactRepository,
             )
-        else:
-            message = await send_channel_message_to_channel(
-                channel=channel,
-                channel_key_upper=channel.key.upper(),  # type: ignore[union-attr]
-                key_bytes=bytes.fromhex(channel.key),  # type: ignore[union-attr]
-                text=chunk_text,
-                radio_manager=radio_manager,
-                broadcast_fn=broadcast_event,
-                error_broadcast_fn=broadcast_error,
-                now_fn=time.time,
-                temp_radio_slot=0,
-                message_repository=MessageRepository,
-            )
-        if index == 0 and message is not None:
-            await AeicImageRepository.set_message_id(key, message.id)
-        messages.append(message.model_dump() if message is not None else None)
+        return await send_channel_message_to_channel(
+            channel=channel,
+            channel_key_upper=channel.key.upper(),  # type: ignore[union-attr]
+            key_bytes=bytes.fromhex(channel.key),  # type: ignore[union-attr]
+            text=chunk,
+            radio_manager=radio_manager,
+            broadcast_fn=broadcast_event,
+            error_broadcast_fn=broadcast_error,
+            now_fn=time.time,
+            temp_radio_slot=0,
+            message_repository=MessageRepository,
+        )
 
-    logger.info(
-        "Sent a %d-byte AEIC image as %d message(s) to %s %s",
-        len(bitstream),
-        len(chunks),
-        conversation_type,
-        normalized_key[:12],
+    target = AeicTarget(
+        conversation_type=conversation_type,  # type: ignore[arg-type]
+        conversation_key=normalized_key,
+        emit_text=emit_text,
+        message_budget=budget,
+        radio_manager=radio_manager,
     )
+
+    try:
+        result, bitstream, metadata = await aeic_service.send_image(
+            rgb,
+            target,
+            # The browser sends an already-squared 512px frame, so the original
+            # shape has to come from the query rather than from the pixels.
+            source_width=source_width,
+            source_height=source_height,
+            session_id=session_id,
+        )
+    except AeicUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (AeicTextFormatError, AeicImagePrepareError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AeicTransportUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # The session row is written by aeic_service.send_image, so both this route
+    # and the bot send path record an outgoing image identically.
     return {
-        "session_key": key,
-        "bitstream_bytes": len(bitstream),
-        "chunk_count": len(chunks),
-        "messages": messages,
+        "session_key": make_session_key("self", result.session_id),
+        "transport": result.transport,
+        "bitstream_bytes": result.payload_bytes,
+        "chunk_count": result.chunk_count,
+        "messages": [m.model_dump() if m is not None else None for m in result.emitted],
     }
 
 
@@ -266,29 +256,6 @@ async def get_session_content(session_key: str) -> Response:
         media_type="image/png",
         headers={"Cache-Control": "private, max-age=3600"},
     )
-
-
-async def _self_name() -> str:
-    """The radio's own name, which a channel message prefixes to its body.
-
-    Only used to shrink the per-chunk budget, so an unknown name degrades to a
-    slightly optimistic budget rather than a failure -- and the chunker still
-    refuses to build a chunk that cannot fit its own header.
-    """
-    try:
-        async with radio_manager.radio_operation("aeic_self_name") as mc:
-            return (mc.self_info.get("name", "") if mc.self_info else "") or ""
-    except Exception:  # noqa: BLE001 - a missing name only costs chunk capacity
-        logger.debug("Could not read the radio name for the AEIC chunk budget")
-        return ""
-
-
-def _chunk_payload(chunk_text: str, index: int) -> str:
-    """The basE91 slice of a framed chunk, for storage alongside the session."""
-    from app.imaging.aeic.text_transport import parse_chunk
-
-    parsed = parse_chunk(chunk_text)
-    return parsed.payload if parsed is not None else chunk_text
 
 
 def _session_payload(session: dict) -> dict:

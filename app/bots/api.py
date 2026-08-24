@@ -414,23 +414,23 @@ class BotContext:
                 flood_scope_override=scope,
             )
 
-    async def send(self, channel: str, text: str, *, region: Any = _UNSET) -> None:
-        """Send to any channel by name (``#chan`` / ``Public``) or 32-hex key."""
+    async def _resolve_channel_key(self, channel: str) -> str:
+        """Channel name (``#chan`` / ``Public``) or 32-hex key -> upper-case key."""
         from app.repository import ChannelRepository
 
-        key: str | None = None
         candidate = channel.strip()
         if len(candidate) == 32 and all(c in "0123456789abcdefABCDEF" for c in candidate):
-            key = candidate.upper()
-        else:
-            channels = await ChannelRepository.get_all()
-            wanted = candidate.lstrip("#").lower()
-            for ch in channels:
-                if ch.name.lstrip("#").lower() == wanted:
-                    key = ch.key
-                    break
-        if key is None:
-            raise ValueError(f"unknown channel {channel!r}")
+            return candidate.upper()
+        channels = await ChannelRepository.get_all()
+        wanted = candidate.lstrip("#").lower()
+        for ch in channels:
+            if ch.name.lstrip("#").lower() == wanted:
+                return ch.key
+        raise ValueError(f"unknown channel {channel!r}")
+
+    async def send(self, channel: str, text: str, *, region: Any = _UNSET) -> None:
+        """Send to any channel by name (``#chan`` / ``Public``) or 32-hex key."""
+        key = await self._resolve_channel_key(channel)
         scope: str | None
         if region is _UNSET:
             scope = None
@@ -527,6 +527,187 @@ class BotContext:
         except Exception:
             return None
         return None
+
+    # -- images --------------------------------------------------------------
+    async def _dispatch_image(
+        self,
+        data: bytes,
+        *,
+        is_dm: bool,
+        destination: str | None,
+        channel_key: str | None,
+        flood_scope_override: str | None,
+        source_width: int | None,
+        source_height: int | None,
+    ) -> int:
+        """Encode one image and send it. Returns the number of messages used.
+
+        Everything about *how* it goes on air lives in
+        :mod:`app.imaging.aeic.transport`, reached through
+        ``aeic_service.send_image``. This method only supplies a destination and
+        an emitter, so when the binary 0xAE1C transport lands the bot API does
+        not change at all.
+        """
+        from app.imaging.aeic.prepare import AeicImagePrepareError
+        from app.imaging.aeic.service import AeicUnavailable, aeic_service
+        from app.imaging.aeic.transport import AeicTarget, resolve_message_budget
+
+        if not data:
+            raise ValueError("no image data")
+
+        conversation_type = "PRIV" if is_dm else "CHAN"
+        conversation_key = (destination if is_dm else channel_key) or ""
+        if not conversation_key:
+            raise ValueError("image send needs a destination")
+
+        radio_manager = None
+        if not self.is_test:
+            from app.services.radio_runtime import radio_runtime
+
+            radio_manager = radio_runtime
+
+        async def emit_text(chunk: str):
+            # Straight through the bot's own send path, so image chunks obey the
+            # same TX spacing, moderation and test-capture rules as any reply.
+            await self._dispatch_send(
+                is_dm=is_dm,
+                destination=destination,
+                channel_key=channel_key,
+                text=chunk,
+                flood_scope_override=flood_scope_override,
+            )
+            return None
+
+        target = AeicTarget(
+            conversation_type=conversation_type,
+            conversation_key=conversation_key,
+            emit_text=emit_text,
+            message_budget=await resolve_message_budget(
+                conversation_type, radio_manager=radio_manager
+            ),
+            radio_manager=radio_manager,
+        )
+
+        try:
+            result, _bitstream, _metadata = await aeic_service.send_image(
+                data,
+                target,
+                source_width=source_width,
+                source_height=source_height,
+            )
+        except (AeicUnavailable, AeicImagePrepareError) as exc:
+            # Surface the reason verbatim: it names the missing piece (the
+            # onnxruntime extra, the undownloaded model, or Pillow) and the bot
+            # author is the one who has to act on it.
+            raise RuntimeError(f"AEIC image send failed: {exc}") from exc
+        self.log(
+            f"sent a {result.payload_bytes} B image as {result.chunk_count} "
+            f"message(s) via {result.transport}"
+        )
+        return result.chunk_count
+
+    async def reply_image(
+        self,
+        data: bytes,
+        *,
+        region: Any = _UNSET,
+        source_width: int | None = None,
+        source_height: int | None = None,
+    ) -> int:
+        """Reply with a photo where the triggering message came from.
+
+        ``data`` is either an encoded image (JPEG/PNG/WebP -- anything Pillow can
+        open, e.g. straight from ``ctx.http``) or exactly 786,432 bytes of
+        512x512 packed RGB. It is stretched into a 512x512 square, encoded to
+        ~150 bytes by the AEIC neural codec, and sent as one or two ordinary
+        text messages. Returns how many messages that took.
+
+        The recipient needs the AEIC model installed to see it, and gets a
+        perceptually similar reconstruction rather than the original pixels.
+        Requires the ``aeic`` extra and the downloaded model on THIS server;
+        raises with the specific missing piece otherwise.
+        """
+        scope: str | None
+        if region is _UNSET:
+            scope = None
+        elif region is None or region == "":
+            scope = ""
+        else:
+            scope = str(region)
+        if self._origin_is_dm:
+            return await self._dispatch_image(
+                data,
+                is_dm=True,
+                destination=self._origin_sender_key,
+                channel_key=None,
+                flood_scope_override=None,
+                source_width=source_width,
+                source_height=source_height,
+            )
+        return await self._dispatch_image(
+            data,
+            is_dm=False,
+            destination=None,
+            channel_key=self._origin_channel_key,
+            flood_scope_override=scope,
+            source_width=source_width,
+            source_height=source_height,
+        )
+
+    async def send_image(
+        self,
+        channel: str,
+        data: bytes,
+        *,
+        region: Any = _UNSET,
+        source_width: int | None = None,
+        source_height: int | None = None,
+    ) -> int:
+        """Send a photo to any channel by name (``#chan`` / ``Public``) or key.
+
+        See :meth:`reply_image` for what ``data`` accepts and what the recipient
+        needs.
+        """
+        key = await self._resolve_channel_key(channel)
+        scope: str | None
+        if region is _UNSET:
+            scope = None
+        elif region is None or region == "":
+            scope = ""
+        else:
+            scope = str(region)
+        return await self._dispatch_image(
+            data,
+            is_dm=False,
+            destination=None,
+            channel_key=key,
+            flood_scope_override=scope,
+            source_width=source_width,
+            source_height=source_height,
+        )
+
+    async def send_dm_image(
+        self,
+        public_key: str,
+        data: bytes,
+        *,
+        source_width: int | None = None,
+        source_height: int | None = None,
+    ) -> int:
+        """Send a photo to a contact by full public key.
+
+        See :meth:`reply_image` for what ``data`` accepts and what the recipient
+        needs.
+        """
+        return await self._dispatch_image(
+            data,
+            is_dm=True,
+            destination=public_key,
+            channel_key=None,
+            flood_scope_override=None,
+            source_width=source_width,
+            source_height=source_height,
+        )
 
     # -- geocoding -----------------------------------------------------------
     async def geocode(self, query: str) -> dict[str, Any] | None:
