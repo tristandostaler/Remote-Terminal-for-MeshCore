@@ -27,8 +27,23 @@ COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /usr/local/bin/uv
 # Copy dependency files first for layer caching
 COPY pyproject.toml uv.lock ./
 
+# Optional AEIC neural image codec (onnxruntime + numpy + Pillow, ~120 MB
+# installed). Off by default so the standard image stays small and runs on small
+# appliances. Enable with:
+#
+#   docker build --build-arg ENABLE_AEIC=1 -t remoteterm .
+#
+# 64-bit only: onnxruntime publishes manylinux wheels for x86_64 and aarch64
+# only, so this WILL fail to install on armv7/armhf/i386. Decoding a photo also
+# needs ~2.4 GiB of RAM available to the container.
+ARG ENABLE_AEIC=0
+
 # Install dependencies (no dev/test deps)
-RUN uv sync --frozen --no-dev
+RUN if [ "$ENABLE_AEIC" = "1" ]; then \
+        uv sync --frozen --no-dev --extra aeic; \
+    else \
+        uv sync --frozen --no-dev; \
+    fi
 
 # Copy application code (remoteterm/ is the import surface for DB-stored bots)
 COPY app/ ./app/

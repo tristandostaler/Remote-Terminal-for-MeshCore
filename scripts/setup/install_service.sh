@@ -219,10 +219,33 @@ echo
 
 # ── python dependencies ────────────────────────────────────────────────────────
 
-echo -e "${YELLOW}Installing Python dependencies (uv sync)...${NC}"
+# The AEIC neural image codec is an optional extra (onnxruntime + numpy +
+# Pillow, ~120 MB installed) so small appliances do not pay for it. Opt in with
+# ENABLE_AEIC=1. 64-bit only, and decoding needs ~2.4 GiB RAM.
+ENABLE_AEIC="${ENABLE_AEIC:-0}"
+
 cd "$REPO_DIR"
-uv sync
-echo -e "${GREEN}Dependencies ready.${NC}"
+if [ "$ENABLE_AEIC" = "1" ]; then
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64|amd64|aarch64|arm64) ;;
+        *)
+            echo -e "${RED}Error: ENABLE_AEIC=1 needs a 64-bit platform; this is ${ARCH}.${NC}"
+            echo    "onnxruntime has no wheels for 32-bit ARM or i386."
+            exit 1
+            ;;
+    esac
+    echo -e "${YELLOW}Installing Python dependencies including the AEIC image codec (uv sync --extra aeic)...${NC}"
+    uv sync --extra aeic
+    echo -e "${GREEN}Dependencies ready (AEIC enabled).${NC}"
+    echo -e "  The ~958 MB model still has to be downloaded once, from a"
+    echo -e "  conversation's features panel or POST /api/aeic/model/download."
+else
+    echo -e "${YELLOW}Installing Python dependencies (uv sync)...${NC}"
+    uv sync
+    echo -e "${GREEN}Dependencies ready.${NC}"
+    echo -e "  AEIC image codec not installed. Re-run with ENABLE_AEIC=1 to add it."
+fi
 echo
 
 # ── frontend assets ────────────────────────────────────────────────────────────
