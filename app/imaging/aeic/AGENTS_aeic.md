@@ -70,6 +70,8 @@ stays testable on an install that never opted into the `aeic` extra.
 | `rans.py` | the rANS coder, byte-identical to the C++ reference | stdlib |
 | `png.py` | a minimal PNG writer for decoded output | stdlib |
 | `text_transport.py` | the `aei1:` basE91 message framing | stdlib |
+| `channel_data.py` | binary GRP_DATA framing, XOR parity, companion frames | stdlib |
+| `channel_data_ingest.py` | inbound GRP_DATA reassembly and storage | stdlib |
 | `entropy.py` | masks, squeeze, `build_indexes`, the four-stage loop | numpy |
 | `onnx_backend.py` | ORT sessions and tensor marshalling | numpy + ORT |
 | `bundle.py` | the model registry, digests, resumable download | httpx |
@@ -119,62 +121,90 @@ Everything heavy goes through `asyncio.to_thread` with a semaphore of one. The
 event loop is also carrying the radio; a BLE notify stream stalled for the ~5 s
 synthesis pass drops mesh traffic.
 
-## Transport: why text and not GRP_DATA
+## Two transports, and which one carries what
 
-MCO Advanced carries AEIC as a binary GRP_DATA (0x06) chunk stream with data type
-`0xAE1C`, via `CMD_SEND_CHANNEL_DATA` (62). RemoteTerm does not, for two
-concrete reasons: the Python `meshcore` library does not expose command 62, and
-RemoteTerm's channel path only decrypts and ingests GROUP_TEXT (0x05).
+An AEIC bitstream reaches the air one of two ways. Everything that sends an
+image — `POST /aeic/send` and the bot `reply_image`/`send_image`/`send_dm_image`
+— goes through `aeic_service.send_image`, which picks via `select_transport()`;
+no call site knows which it got.
 
-So the bitstream is basE91-framed as `aei1:` **text**, the way
-`app/compression/mcmp.py` frames compressed prose. That transport already works
-on every route: ACKed on DMs, survives the channel crypto path, visible to bots,
-stored in the message table. And it fits — 117 B → 144 chars against a 156-byte
-budget, so a typical photo is one message.
-
-The chunk-0 metadata byte is deliberately bit-for-bit the same byte MCO Advanced
-puts in *its* chunk 0 (`aspect(4) | resolution(2) | rate(2)`), so a future binary
-transport or a bridge between the two needs no second definition.
-
-### Planned: migrate to 0xAE1C when command 62 lands
-
-**The text transport is interim.** When `CMD_SEND_CHANNEL_DATA` (62) becomes
-available in the Python `meshcore` library, the binary 0xAE1C GRP_DATA transport
-takes over the outbound path. It is what MCO Advanced speaks, so AEIC images
-start interoperating instead of being RemoteTerm-to-RemoteTerm only, and it drops
-basE91's ~23% expansion — a 156-byte bitstream (the measured mean) is *one*
-binary chunk but *two* text messages.
-
-`transport.py` is built for that swap and is the only file that should need
-editing:
-
-| piece | where | state |
+| transport | payload | used for |
 | --- | --- | --- |
-| the seam every sender goes through | `select_transport()` | done |
-| capability probe for command 62 | `channel_data_transport_available()` | done — returns True on its own once the library exposes it, and selection follows |
-| text framing | `TextChunkTransport` | done |
-| binary framing + send | `ChannelDataTransport.send` | **to write** — full wire format is in its docstring |
+| `ChannelDataTransport` | binary GRP_DATA (0x06), data type `0xAE1C` | **channels** — the default |
+| `TextChunkTransport` | `aei1:` basE91 text messages | **DMs**, and channels when the binary one is refused |
 
-Everything that sends an image — `POST /aeic/send` and the bot
-`reply_image`/`send_image`/`send_dm_image` — already goes through
-`aeic_service.send_image`, which picks the transport. Neither knows which one it
-got, so neither changes.
+**Binary is preferred on channels because it is the interoperable one.** It is
+what MCO Advanced actually speaks, so images render on a peer's phone instead of
+arriving as a line of basE91; and it avoids basE91's ~23% expansion, which puts
+the measured 156-byte mean into *one* chunk where text needs two.
 
-Three things live outside `transport.py` and still need doing:
+**Direct messages are always text.** GRP_DATA is a group payload type; there is
+no DM equivalent.
 
-1. A GROUP_DATA (0x06) decrypt/ingest route beside the existing GROUP_TEXT
-   (0x05) one in `app/packet_processor.py`, dispatching on data type 0xAE1C.
-   (Outbound can go via a raw frame the way `app/services/voice.py` builds raw
-   DM frames, if the library still lacks command 62.)
-2. Reassembly that honours upstream's XOR parity chunk — the binary framing
-   carries it and `ingest.py` currently reassembles text chunks only.
-3. **Keep `aei1:` decoding inbound.** Peers on the text-only form must keep
-   working, so this is an addition, not a replacement; the per-conversation
-   selector likely grows a transport choice rather than switching silently.
+The chunk-0 metadata byte is bit-for-bit the same in both (`aspect(4) |
+resolution(2) | rate(2)`), so nothing has to be re-derived when crossing between
+them.
 
-`AeicStreamMetadata` needs no change: its byte already *is* the upstream one.
-`tests/test_aeic_transport.py` pins the shared contract, so a
-`ChannelDataTransport` that satisfies those tests is a drop-in.
+### The library does not need to expose command 62
+
+It was previously believed this was blocked on meshcore-py growing a
+`send_channel_data` helper. It is not: `commands.send` is a **generic
+dispatcher**, so `channel_data.build_send_command` builds the frame
+(`[0x3E][channel_idx][0xFF][type_lo][type_hi][blob]`) and hands it over directly.
+
+What genuinely cannot be determined from Python is whether the *firmware*
+implements command 62 — there is no capability flag. The radio answers by
+rejecting the first blob, and that is why `AeicChannelDataUnsupported` is a
+distinct exception: it is raised **only** when blob 0 was refused, i.e. nothing
+reached the air, so `send_image` can cleanly fall back to text. A failure on any
+later blob raises the plain `AeicTransportUnavailable` and is NOT retried,
+because part of the image is already out and resending would duplicate it.
+
+### Receiving: a hook, because meshcore-py drops frame 27
+
+Inbound GRP_DATA arrives as companion frame `RESP_CODE_CHANNEL_DATA_RECV` (27).
+meshcore-py's `PacketType` jumps straight from 26 to 28, so such a frame reaches
+`reader.handle_rx`'s final `else` and is logged away as "Unhandled packet type" —
+which is exactly why an image sent from MCO Advanced produced *nothing* in
+RemoteTerm, not even garbled text.
+
+`event_handlers.install_channel_data_adapter` wraps `handle_rx` to intercept it,
+the same strategy (and idempotency flag) `install_full_raw_data_adapter` already
+uses for a different library gap.
+
+**This path deliberately does no crypto.** The firmware has already decrypted the
+packet and split off the data type. We do *not* add a raw-RF GROUP_DATA decoder
+beside the GROUP_TEXT one, because the on-air plaintext layout for GRP_DATA is
+not documented in any source we can check — MCO Advanced never sees it either —
+and guessing where the blob starts inside the plaintext does not fail loudly in
+this codec, it reconstructs a sharp, wrong picture. The cost of that choice: this
+only sees frames the *local* radio decrypted, so the channel must be loaded in
+one of its slots. `radio.channel_key_for_slot` maps the frame's slot index back
+to a channel; a slot this process never loaded is logged and skipped.
+
+### More than one image codec rides GRP_DATA
+
+MCO Advanced ships **AEIC** (`0xAE1C`) *and* **MCOimg** (`0xFFF0`), plus MCMP
+text (`0xFFF1`). Only AEIC is a codec RemoteTerm has. `channel_data_ingest`
+recognises the others by type and reports them as unsupported rather than handing
+them to the AEIC decoder, which would turn them confidently into garbage.
+
+### A received binary image has no message text
+
+Nothing textual crossed the air, so unlike the `aei1:` path there is no body to
+keep. The backend writes a synthetic message row whose text is the local marker
+`aeib:<session_key>` purely to give the picture a place in the conversation; the
+frontend matches it with `parseAeicBinaryRef`. **It is a local server↔UI
+convention and never goes on air** — do not mistake it for a wire format.
+
+### Parity is on for binary, off for text
+
+The binary framing spends a third packet on upstream's XOR parity chunk, and
+`channel_data.recover_missing_body` implements its single-loss recovery including
+every guard — notably that only the LAST data chunk may be short, without which a
+flipped bit in the parity length byte yields a truncated image reported as
+complete. Text framing still omits parity: there each chunk is an ACKed, retried
+message, whereas a GRP_DATA blob is fire-and-forget.
 
 ### One interaction worth knowing about
 

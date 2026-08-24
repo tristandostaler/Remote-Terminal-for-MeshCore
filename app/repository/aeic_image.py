@@ -12,6 +12,7 @@ later -- after the download finishes -- without asking the sender to retransmit
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import Any
 from uuid import uuid4
@@ -38,6 +39,20 @@ def session_key(peer_key: str | None, session_id: int) -> str:
     """
     prefix = (peer_key or "unknown")[:12].lower()
     return f"{prefix}:{session_id:04d}"
+
+
+def inbound_channel_data_session_key(conversation_key: str, bitstream: bytes) -> str:
+    """Key for an image received over the binary GRP_DATA transport.
+
+    Not derived from the wire ``img_id``: that is a single byte scoped to a
+    2-byte sender prefix, so it is far too small to key storage on -- the same
+    trap :func:`outgoing_session_key` exists to avoid. Hashing the reassembled
+    bitstream instead makes the key content-addressed, which also means a
+    duplicate delivery of the same image lands on the same row rather than
+    creating a second copy of a 600 KB PNG.
+    """
+    digest = hashlib.sha256(conversation_key.encode() + bitstream).hexdigest()
+    return f"grp:{digest[:16]}"
 
 
 def outgoing_session_key(message_id: int | None = None) -> str:
