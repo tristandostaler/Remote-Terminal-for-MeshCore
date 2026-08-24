@@ -24,7 +24,6 @@ from typing import Any
 
 from remoteterm import bot
 
-
 BOT_META = {
     "key": "hamcall",
     "name": "hamcall",
@@ -97,7 +96,7 @@ def _extract_callsign(value: Any) -> str | None:
     # Handles display names such as "VE2 ABC".
     for start in range(len(tokens)):
         for width in (2, 3):
-            candidate = "".join(tokens[start:start + width])
+            candidate = "".join(tokens[start : start + width])
             if re.fullmatch(callsign_re, candidate):
                 return candidate
 
@@ -233,38 +232,26 @@ async def _lookup(
                 else:
                     callsign_data = hamdb.get("callsign") or {}
                     if isinstance(callsign_data, dict):
-                        call = str(
-                            callsign_data.get("call") or callsign
-                        ).strip().upper()
+                        call = str(callsign_data.get("call") or callsign).strip().upper()
 
                         fname = _fix_utf8_mojibake(
-                            callsign_data.get("fname")
-                            or callsign_data.get("first_name")
-                            or ""
+                            callsign_data.get("fname") or callsign_data.get("first_name") or ""
                         ).strip()
 
                         lname = _fix_utf8_mojibake(
-                            callsign_data.get("name")
-                            or callsign_data.get("last_name")
-                            or ""
+                            callsign_data.get("name") or callsign_data.get("last_name") or ""
                         ).strip()
 
                         city = _fix_utf8_mojibake(
-                            callsign_data.get("addr2")
-                            or callsign_data.get("city")
-                            or ""
+                            callsign_data.get("addr2") or callsign_data.get("city") or ""
                         ).strip()
 
                         state = _fix_utf8_mojibake(
-                            callsign_data.get("state")
-                            or callsign_data.get("province")
-                            or ""
+                            callsign_data.get("state") or callsign_data.get("province") or ""
                         ).strip()
 
                         person = fname or lname
-                        location = ", ".join(
-                            part for part in (city, state) if part
-                        )
+                        location = ", ".join(part for part in (city, state) if part)
 
                         parts = [call]
                         if person:
@@ -292,9 +279,7 @@ async def _lookup(
     local = await asyncio.to_thread(_get_local, settings, callsign)
 
     if local:
-        username = _fix_utf8_mojibake(
-            local.get("username") or callsign
-        ).strip()
+        username = _fix_utf8_mojibake(local.get("username") or callsign).strip()
         city = _fix_utf8_mojibake(local.get("city") or "").strip()
 
         result = f"{callsign} {username}"
@@ -318,6 +303,7 @@ def _command_argument(msg) -> str:
     return text
 
 
+@bot.on_keyword()
 @bot.on_keyword("hamcall")
 async def hamcall(ctx, msg):
     arg = _command_argument(msg)
@@ -376,10 +362,7 @@ async def hamcall(ctx, msg):
         return
 
     if error == f"{callsign} introuvable.":
-        await ctx.reply(
-            f"📻 {callsign} introuvable | Ajout: hamcall add CALLSIGN NOM VILLE"
-        )
+        await ctx.reply(f"📻 {callsign} introuvable | Ajout: hamcall add CALLSIGN NOM VILLE")
         return
 
     await ctx.reply(f"📻 {error}")
-
