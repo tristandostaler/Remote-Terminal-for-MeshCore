@@ -15,7 +15,14 @@ BOT_META = {
     "name": "airplanes",
     "category": "Info",
     "description": "Closest aircraft overhead (airplanes.live ADS-B)",
-    "version": "1.1.0",
+    "long_description": (
+        "`airplanes`, `adsb` or `aircraft` queries the free airplanes.live ADS-B feed and reports "
+        "the three closest aircraft with callsign, altitude, distance and direction. Give it a "
+        "place name to look elsewhere; with no argument it uses the default location (or lat/lon) "
+        "configured below. The search radius is set in nautical miles. No API key, but the server "
+        "needs internet access."
+    ),
+    "version": "1.1.1",
     "cooldown_seconds": 5,
     "settings_schema": [
         {

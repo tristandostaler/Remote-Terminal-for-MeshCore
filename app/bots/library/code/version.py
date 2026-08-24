@@ -7,7 +7,12 @@ BOT_META = {
     "name": "version",
     "category": "Basic",
     "description": "Shows the app and bot library versions",
-    "version": "1.1.0",
+    "long_description": (
+        "`version` (or `ver`) replies with the RemoteTerm version this server runs, its short "
+        "commit hash, and the bot library version. Useful for confirming what a remote node is "
+        "running before blaming the mesh for a bug. Local and one frame long."
+    ),
+    "version": "1.1.1",
 }
 
 

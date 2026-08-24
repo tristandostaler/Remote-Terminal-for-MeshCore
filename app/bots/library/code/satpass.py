@@ -14,7 +14,14 @@ BOT_META = {
     "name": "satpass",
     "category": "Solar",
     "description": "Next visible satellite pass (N2YO, key required)",
-    "version": "1.1.0",
+    "long_description": (
+        "`satpass` reports the next visible pass of a satellite over your location: when it rises, "
+        "how high it climbs, and where to look. `satpass iss`, `satpass hubble`, `satpass "
+        "tiangong` or a raw NORAD id such as `satpass 25544` pick the object. Requires a free N2YO "
+        "API key and the observer latitude/longitude in the settings below, plus internet access "
+        "on this server."
+    ),
+    "version": "1.1.1",
     "cooldown_seconds": 5,
     "settings_schema": [
         {

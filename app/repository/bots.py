@@ -38,6 +38,7 @@ def _row_to_bot(row: aiosqlite.Row) -> Bot:
         name=row["name"],
         category=row["category"],
         description=row["description"],
+        long_description=row["long_description"],
         code=row["code"],
         enabled=bool(row["enabled"]),
         admin_only=bool(row["admin_only"]),
@@ -60,7 +61,8 @@ def _row_to_bot(row: aiosqlite.Row) -> Bot:
 
 
 _BOT_COLUMNS = """
-    id, name, category, description, code, enabled, admin_only, respond_to_dms,
+    id, name, category, description, long_description, code, enabled, admin_only,
+    respond_to_dms,
     scope, cooldown_seconds, per_user_cooldown_seconds, queue_threshold_seconds,
     settings_schema, settings, ui_triggers, builtin_key, builtin_version,
     modified, last_error, sort_order, created_at, updated_at
@@ -110,6 +112,7 @@ class BotRepository:
         name: str,
         category: str = "Custom",
         description: str = "",
+        long_description: str = "",
         code: str = "",
         enabled: bool = False,
         admin_only: bool = False,
@@ -132,18 +135,19 @@ class BotRepository:
             await conn.execute(
                 """
                 INSERT INTO bots (
-                    id, name, category, description, code, enabled, admin_only,
-                    respond_to_dms, scope, cooldown_seconds, per_user_cooldown_seconds,
-                    queue_threshold_seconds, settings_schema, settings, ui_triggers,
-                    state, builtin_key, builtin_version, modified, sort_order,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, 0, ?, ?)
+                    id, name, category, description, long_description, code, enabled,
+                    admin_only, respond_to_dms, scope, cooldown_seconds,
+                    per_user_cooldown_seconds, queue_threshold_seconds, settings_schema,
+                    settings, ui_triggers, state, builtin_key, builtin_version, modified,
+                    sort_order, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     new_id,
                     name,
                     category,
                     description,
+                    long_description,
                     code,
                     1 if enabled else 0,
                     1 if admin_only else 0,
@@ -175,6 +179,7 @@ class BotRepository:
             "name",
             "category",
             "description",
+            "long_description",
             "code",
             "enabled",
             "admin_only",

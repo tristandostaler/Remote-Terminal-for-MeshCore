@@ -12,7 +12,14 @@ BOT_META = {
     "name": "path",
     "category": "Mesh",
     "description": "Decode a routing path into repeater names",
-    "version": "1.1.0",
+    "long_description": (
+        "`path` with no argument decodes the route the triggering message itself took and names "
+        "each repeater it passed through; `path a1b2c3` decodes a pasted hex path the same way. "
+        "Hop identifiers are resolved against this node's contact list and flagged when more than "
+        "one repeater shares a prefix. The hop width setting must match the number of bytes per "
+        "hop your mesh uses."
+    ),
+    "version": "1.1.1",
     "settings_schema": [
         {
             "key": "hop_width",

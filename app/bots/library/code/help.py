@@ -30,7 +30,14 @@ BOT_META = {
     "name": "help",
     "category": "Basic",
     "description": "Command list (help, cmd) and per-command help",
-    "version": "1.4.0",
+    "long_description": (
+        "`help` lists every keyword this node currently answers to, and `help <command>` explains "
+        "one of them and names all of its aliases. `cmd` and `commands` are aliases for the bare "
+        "list. The list is built from the bots actually enabled here, including keywords you added "
+        "yourself on the Triggers tab, and is split across as many numbered parts as it needs. "
+        "Usually the first bot worth enabling."
+    ),
+    "version": "1.4.1",
 }
 
 

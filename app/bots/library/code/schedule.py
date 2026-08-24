@@ -9,7 +9,13 @@ BOT_META = {
     "name": "schedule",
     "category": "Admin",
     "description": "Lists the next scheduled messages",
-    "version": "1.1.0",
+    "long_description": (
+        "`schedule` lists the next scheduled messages this node will send, with the day and time "
+        "each one fires. It reads the Scheduler tab's entries, skips the disabled ones, shows the "
+        "three soonest and counts the rest. A quick way to check what is queued without opening "
+        "the app."
+    ),
+    "version": "1.1.1",
     "respond_to_dms": True,
 }
 

@@ -56,7 +56,10 @@ operators).
 - `placeholders.py` — `{total_contacts}`-style tokens for scheduled messages.
 - `library/` — built-in bots as real `.py` files under `library/code/`, each
   self-describing via a module-level `BOT_META` dict (metadata +
-  `settings_schema`). Seeded at startup (`ensure_seeded`): inserts are
+  `settings_schema`). Both descriptions are required: `description` is the one
+  line the bots list shows, `long_description` the 3-5 lines the editor's
+  Settings tab shows under it. Seeding backfills an empty `long_description`
+  without a version bump (only an empty one — never over an operator's text). Seeded at startup (`ensure_seeded`): inserts are
   **disabled by default**; unmodified built-ins refresh on version bumps;
   operator-modified ones are never touched. "Reset to default" restores from
   the shipped file.

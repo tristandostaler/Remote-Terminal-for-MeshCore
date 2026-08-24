@@ -7,7 +7,14 @@ BOT_META = {
     "name": "channels",
     "category": "Basic",
     "description": "Lists known hashtag channels",
-    "version": "1.2.0",
+    "long_description": (
+        "`channels` (or `channel`) lists every hashtag channel this node knows about, sorted "
+        "alphabetically. The list is packed into as many numbered parts as it takes, so nothing is "
+        "dropped or cut in half on a node with many channels. It reads the app's own channel "
+        "table, so it costs nothing beyond the reply. Handy for telling a newcomer where the mesh "
+        "talks."
+    ),
+    "version": "1.2.1",
 }
 
 

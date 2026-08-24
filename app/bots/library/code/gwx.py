@@ -11,7 +11,14 @@ BOT_META = {
     "name": "gwx",
     "category": "Weather",
     "description": "Global weather anywhere (Open-Meteo)",
-    "version": "1.2.0",
+    "long_description": (
+        "`gwx [place]` (or `globalweather`) reports current conditions and a short forecast from "
+        "Open-Meteo, which covers the whole planet and needs no API key. With no place it uses the "
+        "default location below; the units setting switches between metric and imperial. Use it "
+        "where the US-only NWS data behind `wx` has nothing to say. The server needs internet "
+        "access."
+    ),
+    "version": "1.2.1",
     "cooldown_seconds": 3,
     "settings_schema": [
         {

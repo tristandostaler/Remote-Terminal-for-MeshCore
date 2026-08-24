@@ -13,7 +13,14 @@ BOT_META = {
     "name": "solarforecast",
     "category": "Solar",
     "description": "PV production forecast today/tomorrow (forecast.solar)",
-    "version": "1.1.0",
+    "long_description": (
+        "`solarforecast` (or `sf`) estimates how much your PV array will make today and tomorrow "
+        "from the location, tilt, azimuth and kWp configured below. The figures come from the free "
+        "forecast.solar API, which is rate-limited to roughly a dozen calls an hour — hence the "
+        "generous cooldown. Fill in the panel details before enabling, or the answer describes "
+        "someone else's roof."
+    ),
+    "version": "1.1.1",
     "cooldown_seconds": 60,
     "settings_schema": [
         {

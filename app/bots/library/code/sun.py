@@ -15,7 +15,13 @@ BOT_META = {
     "name": "sun",
     "category": "Solar",
     "description": "Sunrise/sunset times for a location (NOAA solar math)",
-    "version": "1.1.0",
+    "long_description": (
+        "`sun` gives today's sunrise and sunset for the default location, and `sun <place>` for "
+        "anywhere else. Times are computed locally from the NOAA solar equations and shown in this "
+        "node's timezone; the only network use is the optional place lookup. With coordinates "
+        "filled in below it works entirely offline."
+    ),
+    "version": "1.1.1",
     "settings_schema": [
         {
             "key": "default_location",

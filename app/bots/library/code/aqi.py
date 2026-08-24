@@ -11,7 +11,13 @@ BOT_META = {
     "name": "aqi",
     "category": "Weather",
     "description": "Air quality: US AQI and PM2.5 (Open-Meteo)",
-    "version": "1.1.0",
+    "long_description": (
+        "`aqi [place]` (or `airquality`) reports the US AQI and PM2.5 concentration for a location "
+        "from Open-Meteo's air-quality API. Name a place and it is geocoded first; with no "
+        "argument the default location configured below is used. No API key is needed, but the "
+        "server needs internet access."
+    ),
+    "version": "1.1.1",
     "cooldown_seconds": 3,
     "settings_schema": [
         {
