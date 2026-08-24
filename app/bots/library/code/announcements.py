@@ -7,7 +7,14 @@ BOT_META = {
     "name": "announcements",
     "category": "Admin",
     "description": "Admin-only: announce <#channel|here> <text>",
-    "version": "1.1.0",
+    "long_description": (
+        "`announce <#channel> <text>` posts to any channel this node has joined, and `announce "
+        "here <text>` echoes the text back into the current conversation. Admin-only: senders that "
+        "are not on the Engine tab's admin list get no answer. Text longer than the configured "
+        "maximum is refused rather than split, so an announcement stays one frame. The usual way "
+        "to push a notice to a channel from a DM."
+    ),
+    "version": "1.1.1",
     "admin_only": True,
     "settings_schema": [
         {

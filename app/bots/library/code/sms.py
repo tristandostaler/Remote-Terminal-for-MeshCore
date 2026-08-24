@@ -53,7 +53,15 @@ BOT_META = {
     "name": "SMS",
     "category": "Communication",
     "description": "VoIP.ms or Twilio SMS with direct RemoteTerm callback and channel/DM conversation routing",
-    "version": "1.7.0",
+    "long_description": (
+        "Bridges SMS and the mesh through VoIP.ms or Twilio. `sms NUMBER MESSAGE` sends a text, "
+        "`reply MESSAGE` answers the last one received, and `smsstatus` reports the link. Incoming "
+        "texts arrive on /api/hooks/sms and `smsroute` decides where each number lands — a test "
+        "reply, the bot channels, or a DM to one user. Needs the provider credentials, the DID and "
+        "a webhook token set below, and this server reachable from the provider at the callback "
+        "URL shown there."
+    ),
+    "version": "1.7.1",
     "admin_only": True,
     "settings_schema": [
         {

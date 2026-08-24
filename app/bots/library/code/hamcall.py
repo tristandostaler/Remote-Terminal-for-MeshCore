@@ -29,7 +29,15 @@ BOT_META = {
     "name": "hamcall",
     "category": "Utility",
     "description": "Lookup amateur-radio callsigns with a local fallback database",
-    "version": "1.1.0",
+    "long_description": (
+        "`hamcall CALLSIGN` looks up an amateur-radio licence and replies with the operator's name "
+        "and location; with no argument it tries to read a callsign out of the sender's node name. "
+        "Lookups hit the public HamDB API first and fall back to a local SQLite copy at the "
+        "configured path, so the bot keeps answering when the node is offline. `hamcall add "
+        "CALLSIGN NAME CITY` adds an entry to that local database. API timeouts are reported as "
+        'such, never as "not found".'
+    ),
+    "version": "1.1.1",
     "settings_schema": [
         {
             "key": "db_path",

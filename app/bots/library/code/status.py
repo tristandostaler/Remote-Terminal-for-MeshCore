@@ -7,7 +7,13 @@ BOT_META = {
     "name": "status",
     "category": "Admin",
     "description": "Runtime status: radio, mesh counts, bot engine (DM, admins)",
-    "version": "1.1.0",
+    "long_description": (
+        "`status` reports this installation's health: whether the radio is connected, how many "
+        "contacts and repeaters are known, the 24-hour message count, and how many bots are "
+        "enabled or failing to load. DM-only and admin-gated — it describes the server, not the "
+        "mesh. Use it to check on a node you are not sitting in front of."
+    ),
+    "version": "1.1.1",
     "admin_only": True,
     "respond_to_dms": True,
 }

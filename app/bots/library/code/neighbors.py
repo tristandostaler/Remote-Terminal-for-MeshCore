@@ -13,7 +13,13 @@ BOT_META = {
     "name": "neighbors",
     "category": "Mesh",
     "description": "Lists zero-hop neighbors (nodes heard directly)",
-    "version": "1.2.0",
+    "long_description": (
+        "`neighbors` lists the contacts this radio hears directly — the ones whose known route is "
+        "zero hops. It reads the app's existing contact table instead of probing, so it costs one "
+        "reply and no mesh traffic, and it knows only what has been heard so far. The quick answer "
+        'to "who is actually in range of this node?"'
+    ),
+    "version": "1.2.1",
     "cooldown_seconds": 60,
 }
 

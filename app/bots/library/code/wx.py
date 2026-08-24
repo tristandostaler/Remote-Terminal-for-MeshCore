@@ -17,7 +17,15 @@ BOT_META = {
     "name": "wx",
     "category": "Weather",
     "description": "Forecast + alerts: NWS with Open-Meteo fallback",
-    "version": "1.2.0",
+    "long_description": (
+        "`wx [place]` (or `weather`) gives the forecast, and `wxa`, `wxalert` or `wx alerts "
+        "[place]` lists active NWS warnings for US locations. US points use api.weather.gov; "
+        "everywhere else — and whenever NWS is down — Open-Meteo answers instead, so it works "
+        "worldwide. With no place it uses the default location below, in your chosen units. Set "
+        "the morning channel and add a cron trigger on the Triggers tab to push a daily forecast "
+        "there."
+    ),
+    "version": "1.2.1",
     "cooldown_seconds": 3,
     "settings_schema": [
         {

@@ -18,7 +18,13 @@ BOT_META = {
     "name": "dice",
     "category": "Fun",
     "description": "Dice roller (d20, 2d6, decade) and flat 1..N rolls",
-    "version": "1.2.0",
+    "long_description": (
+        "`dice` rolls a d20; `dice d6`, `dice 3d6` and `dice decade` (two d10s) take the usual "
+        "notation. `roll [max]` is the simpler flat draw from 1 to N, defaulting to 100. The "
+        "number of dice in one roll is capped by the setting below so a single message cannot "
+        "flood the channel with output. Entirely offline — no network access."
+    ),
+    "version": "1.2.1",
     "settings_schema": [
         {
             "key": "max_dice",

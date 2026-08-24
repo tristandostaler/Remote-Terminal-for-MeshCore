@@ -15,7 +15,14 @@ BOT_META = {
     "name": "earthquake",
     "category": "Alerts",
     "description": "USGS quake alerts for an area; 'quake' shows the latest",
-    "version": "1.1.0",
+    "long_description": (
+        "Two jobs in one bot. A cron trigger polls the USGS event feed every ten minutes and "
+        "pushes new quakes at or above your minimum magnitude to the configured channel, while "
+        "`quake` answers on demand with the latest event from the past 24 hours. The area is a "
+        "latitude/longitude bounding box set below. Quakes already announced are remembered across "
+        "restarts, so nothing is repeated. Internet access required."
+    ),
+    "version": "1.1.1",
     "settings_schema": [
         {
             "key": "min_magnitude",

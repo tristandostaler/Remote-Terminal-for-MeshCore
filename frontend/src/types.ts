@@ -822,6 +822,8 @@ export interface Bot {
   name: string;
   category: string;
   description: string;
+  /** The few extra lines under the one-liner, shown on the editor's Settings tab. */
+  long_description: string;
   code: string;
   enabled: boolean;
   admin_only: boolean;
@@ -853,6 +855,7 @@ export interface BotUpdatePayload {
   name?: string;
   category?: string;
   description?: string;
+  long_description?: string;
   code?: string;
   enabled?: boolean;
   admin_only?: boolean;
@@ -870,6 +873,7 @@ export interface BotLibraryEntry {
   name: string;
   category: string;
   description: string;
+  long_description: string;
   version: string;
   installed: boolean;
 }

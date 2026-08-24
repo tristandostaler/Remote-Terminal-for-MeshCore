@@ -9,7 +9,13 @@ BOT_META = {
     "name": "hello",
     "category": "Basic",
     "description": "Greets back anyone who says hello, hi, hola, bonjour, ...",
-    "version": "1.2.0",
+    "long_description": (
+        "Answers anyone who greets the node — hello, hi, hola, bonjour and about thirty other "
+        "salutations — with a robot-flavoured greeting back. Purely social, and entirely offline. "
+        "Because it reacts to very common words, leave it on the bot channels and DMs unless you "
+        "widen its scope deliberately."
+    ),
+    "version": "1.2.1",
 }
 
 KEYWORDS = (

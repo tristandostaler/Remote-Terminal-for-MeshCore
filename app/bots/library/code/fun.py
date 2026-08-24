@@ -20,7 +20,14 @@ BOT_META = {
     "name": "fun",
     "category": "Fun",
     "description": "Jokes, dad jokes, cat facts, fun facts, fortunes, Magic 8-Ball",
-    "version": "1.1.0",
+    "long_description": (
+        "One bot for the mesh's one-liners: `joke`, `dadjoke`, `catfact`, `funfact`, `fortune`, "
+        "`magic8`, and `fun` for a random pick of whatever is switched on. Each source has its own "
+        "on/off setting below, so a node that should stay offline can keep the network-backed ones "
+        "disabled and still answer. It replaces the six single-purpose bots that used to do this "
+        "separately."
+    ),
+    "version": "1.1.1",
     "settings_schema": [
         {
             "key": "joke_enabled",

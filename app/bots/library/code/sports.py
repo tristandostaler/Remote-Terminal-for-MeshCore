@@ -19,7 +19,14 @@ BOT_META = {
     "name": "sports",
     "category": "Sports",
     "description": "Live and final scores from ESPN (NFL, NBA, MLB, NHL, MLS, World Cup)",
-    "version": "1.3.0",
+    "long_description": (
+        "`sports` (or `score` / `scores`) reports live and final scores for the league configured "
+        "below, and an inline league such as `sports nhl` overrides it for one call. `wc` / "
+        "`worldcup` are shorthand for the FIFA World Cup board. Add a cron trigger and a live "
+        "channel and it will also announce score changes while games are on. Scores come from "
+        "ESPN's public scoreboard; internet access required."
+    ),
+    "version": "1.3.1",
     "settings_schema": [
         {
             "key": "league",

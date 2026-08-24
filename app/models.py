@@ -1336,6 +1336,8 @@ class Bot(BaseModel):
     name: str
     category: str = "Custom"
     description: str = ""
+    # The few lines under the one-liner: what it answers, what it needs.
+    long_description: str = ""
     code: str = ""
     enabled: bool = False
     admin_only: bool = False
@@ -1368,6 +1370,7 @@ class BotCreateRequest(BaseModel):
     name: str
     category: str = "Custom"
     description: str = ""
+    long_description: str = ""
     code: str = ""
     enabled: bool = False
     from_builtin_key: str | None = None
@@ -1377,6 +1380,7 @@ class BotUpdateRequest(BaseModel):
     name: str | None = None
     category: str | None = None
     description: str | None = None
+    long_description: str | None = None
     code: str | None = None
     enabled: bool | None = None
     admin_only: bool | None = None

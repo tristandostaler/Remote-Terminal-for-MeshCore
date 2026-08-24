@@ -11,7 +11,14 @@ BOT_META = {
     "name": "prefix",
     "category": "Mesh",
     "description": "Repeater lookup by hex prefix; 'prefix free' lists unused ones",
-    "version": "1.1.0",
+    "long_description": (
+        "`prefix a1` says which repeaters answer to that one-byte routing prefix, flagging the "
+        "collision when more than one does. `prefix free` lists the one-byte prefixes no repeater "
+        "this node knows is using — what you want when choosing a prefix for a new repeater. Both "
+        "read the local contact list, so the answer is only as complete as what this node has "
+        "heard."
+    ),
+    "version": "1.1.1",
 }
 
 

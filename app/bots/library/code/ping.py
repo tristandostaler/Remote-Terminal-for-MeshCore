@@ -20,7 +20,13 @@ BOT_META = {
     "name": "ping",
     "category": "Basic",
     "description": "Liveness check with signal report: hops, path, region, clock offset",
-    "version": "1.3.0",
+    "long_description": (
+        "`ping` (or `test`) confirms the node is alive and describes how your message arrived: the "
+        'hop count and the repeaters it came through, or "Direct"; the region scope when the '
+        "message was scoped; and your clock offset when it is far enough off to matter. One frame "
+        "in, one frame out, which makes it the standard first check from a new spot."
+    ),
+    "version": "1.3.1",
 }
 
 # Below this the two clocks are close enough that reporting the delta is noise.
