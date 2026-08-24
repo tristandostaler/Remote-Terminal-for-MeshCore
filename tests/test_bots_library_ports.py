@@ -387,10 +387,11 @@ class TestLongReplySplitting:
         ]
         await handler(ctx, BotMessage(text="help", is_dm=True, sender_key="ab" * 32))
 
-        texts = [s["text"] for s in ctx.captured_sends]
-        # Last message is the unchanged hint; the list before it is numbered.
-        assert texts[-1] == "Say 'help <command>' for details."
-        parts = texts[:-1]
+        parts = [s["text"] for s in ctx.captured_sends]
+        # The hint rides in the first part, not in a message of its own.
+        assert parts[0].startswith("(1/")
+        assert "Say 'help <command>' for details.\nCommands: " in parts[0]
+        assert not any(p.rstrip().endswith("for details.") for p in parts[1:])
         assert len(parts) > 1, "expected the long list to split"
         assert [p.split("/")[0] for p in parts] == [f"({i}" for i in range(1, len(parts) + 1)]
         assert "…" not in " ".join(parts), "list must not be truncated any more"
@@ -446,6 +447,11 @@ class TestHelpShowsEveryTrigger:
         {"name": "fun", "description": "d", "keywords": ["joke", "jokes", "fortune"]},
         {"name": "ping", "description": "d", "keywords": ["ping"]},
     ]
+
+    async def test_the_hint_rides_with_the_list_rather_than_following_it(self):
+        """One transmission fewer, and the pointer lands before the list."""
+        texts = await self._run(self.BOTS, "help")
+        assert texts == ["Say 'help <command>' for details.\nCommands: joke (jokes/fortune), ping"]
 
     async def test_list_spells_out_the_aliases_of_each_command(self):
         texts = await self._run(self.BOTS, "help")

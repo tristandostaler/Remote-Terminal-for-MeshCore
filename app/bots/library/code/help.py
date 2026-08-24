@@ -92,7 +92,10 @@ async def show_help(ctx, msg):
     if not commands:
         await ctx.reply("No keyword commands enabled — see the Bots tab")
         return
-    # ctx.reply_split packs the whole list into as many RF-sized "(i/n)" parts as
-    # it takes, so no command is dropped and no keyword is cut in half.
-    await ctx.reply_split(f"Commands: {', '.join(commands)}")
-    await ctx.reply("Say 'help <command>' for details.")
+    # The hint leads the list instead of following it as its own message: one
+    # fewer transmission, and it arrives with the first part rather than after
+    # however many the list took. ctx.reply_split packs the rest into as many
+    # RF-sized "(i/n)" parts as it needs, so no command is dropped and no
+    # keyword is cut in half; it breaks on the newline or a later space, never
+    # inside the hint.
+    await ctx.reply_split(f"Say 'help <command>' for details.\nCommands: {', '.join(commands)}")
