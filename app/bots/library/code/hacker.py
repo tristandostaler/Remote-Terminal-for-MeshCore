@@ -12,7 +12,7 @@ BOT_META = {
     "name": "hacker",
     "category": "Fun",
     "description": "Linux commands get joke supervillain-mainframe errors",
-    "version": "1.1.0",
+    "version": "1.2.0",
 }
 
 KEYWORDS = (

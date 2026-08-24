@@ -15,7 +15,7 @@ BOT_META = {
     "name": "repeater",
     "category": "Admin",
     "description": "Repeater fleet overview: list, stats (DM, admins)",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "admin_only": True,
     "respond_to_dms": True,
 }

@@ -11,7 +11,7 @@ BOT_META = {
     "name": "gwx",
     "category": "Weather",
     "description": "Global weather anywhere (Open-Meteo)",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "cooldown_seconds": 3,
     "settings_schema": [
         {

@@ -11,7 +11,7 @@ BOT_META = {
     "name": "prefix",
     "category": "Mesh",
     "description": "Repeater lookup by hex prefix; 'prefix free' lists unused ones",
-    "version": "1.0.0",
+    "version": "1.1.0",
 }
 
 

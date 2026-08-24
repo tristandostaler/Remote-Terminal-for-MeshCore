@@ -15,7 +15,7 @@ BOT_META = {
     "name": "sun",
     "category": "Solar",
     "description": "Sunrise/sunset times for a location (NOAA solar math)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "settings_schema": [
         {
             "key": "default_location",

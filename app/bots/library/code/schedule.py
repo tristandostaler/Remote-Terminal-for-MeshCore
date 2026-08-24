@@ -9,7 +9,7 @@ BOT_META = {
     "name": "schedule",
     "category": "Admin",
     "description": "Lists the next scheduled messages",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "respond_to_dms": True,
 }
 

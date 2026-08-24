@@ -15,7 +15,7 @@ BOT_META = {
     "name": "airplanes",
     "category": "Info",
     "description": "Closest aircraft overhead (airplanes.live ADS-B)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "cooldown_seconds": 5,
     "settings_schema": [
         {

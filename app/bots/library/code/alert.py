@@ -18,7 +18,7 @@ BOT_META = {
     "name": "alert",
     "category": "Alerts",
     "description": "Active emergency incidents from PulsePoint (needs agency ids)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "cooldown_seconds": 30,
     "settings_schema": [
         {

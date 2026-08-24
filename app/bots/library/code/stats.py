@@ -7,7 +7,7 @@ BOT_META = {
     "name": "stats",
     "category": "Mesh",
     "description": "24h mesh statistics digest",
-    "version": "1.0.0",
+    "version": "1.1.0",
 }
 
 

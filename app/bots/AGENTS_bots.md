@@ -128,6 +128,15 @@ token gate only.
   `LoadedBot.keyword_map` drops a UI keyword the code already declares, so an
   extra keyword can never answer for a command the code owns
   (`tests/test_bots_library_ports.py::TestGenericKeywordHandler` pins all of it).
+- **Editing a `library/code/*.py` file means bumping its `BOT_META["version"]`,
+  in the same commit.** `ensure_seeded` refreshes an unmodified row only when
+  `builtin_version != entry["version"]` — it compares versions, never code — so
+  an edit shipped without a bump reaches new installs and *no existing one*,
+  permanently. This is easy to miss on a sweep across many bots: the library-wide
+  change that added the bare `@bot.on_keyword()` to 35 files shipped with zero
+  bumps and had to be followed by a bump-only commit.
+  `tests/test_bots_library_schema.py::test_a_version_bump_is_what_delivers_new_code`
+  asserts both halves. Additive, behaviour-preserving edits take the minor slot.
 - The engine never raises into `broadcast_event` — every handler run is
   wrapped, recorded, and logged.
 - Frontend: the Bots view lives at `#bots` / `#bots/{botId}`

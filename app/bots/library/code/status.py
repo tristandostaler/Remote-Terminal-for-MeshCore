@@ -7,7 +7,7 @@ BOT_META = {
     "name": "status",
     "category": "Admin",
     "description": "Runtime status: radio, mesh counts, bot engine (DM, admins)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "admin_only": True,
     "respond_to_dms": True,
 }

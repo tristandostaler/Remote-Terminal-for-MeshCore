@@ -9,7 +9,7 @@ BOT_META = {
     "name": "hello",
     "category": "Basic",
     "description": "Greets back anyone who says hello, hi, hola, bonjour, ...",
-    "version": "1.1.0",
+    "version": "1.2.0",
 }
 
 KEYWORDS = (

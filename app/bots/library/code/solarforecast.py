@@ -13,7 +13,7 @@ BOT_META = {
     "name": "solarforecast",
     "category": "Solar",
     "description": "PV production forecast today/tomorrow (forecast.solar)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "cooldown_seconds": 60,
     "settings_schema": [
         {

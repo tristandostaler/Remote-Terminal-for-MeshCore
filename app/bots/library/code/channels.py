@@ -7,7 +7,7 @@ BOT_META = {
     "name": "channels",
     "category": "Basic",
     "description": "Lists known hashtag channels",
-    "version": "1.1.0",
+    "version": "1.2.0",
 }
 
 

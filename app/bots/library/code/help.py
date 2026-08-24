@@ -30,7 +30,7 @@ BOT_META = {
     "name": "help",
     "category": "Basic",
     "description": "Command list (help, cmd) and per-command help",
-    "version": "1.3.0",
+    "version": "1.4.0",
 }
 
 

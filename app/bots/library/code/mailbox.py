@@ -71,7 +71,7 @@ BOT_META = {
     "name": "mailbox",
     "category": "Custom",
     "description": "Store-and-forward mailbox for offline nodes (DM 'mbx help')",
-    "version": "5.0.0",
+    "version": "5.1.0",
     "respond_to_dms": True,
     "settings_schema": [
         {

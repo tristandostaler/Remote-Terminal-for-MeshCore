@@ -11,7 +11,7 @@ BOT_META = {
     "name": "advert",
     "category": "Admin",
     "description": "Sends a flood advert on request (DM, admins, 1h cooldown)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "admin_only": True,
     "cooldown_seconds": 3600,
     "settings_schema": [

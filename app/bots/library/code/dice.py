@@ -18,7 +18,7 @@ BOT_META = {
     "name": "dice",
     "category": "Fun",
     "description": "Dice roller (d20, 2d6, decade) and flat 1..N rolls",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "settings_schema": [
         {
             "key": "max_dice",

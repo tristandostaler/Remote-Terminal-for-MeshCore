@@ -14,7 +14,7 @@ BOT_META = {
     "name": "moon",
     "category": "Solar",
     "description": "Moon phase, illumination, next full/new moon",
-    "version": "1.0.0",
+    "version": "1.1.0",
 }
 
 _SYNODIC_DAYS = 29.530588853
