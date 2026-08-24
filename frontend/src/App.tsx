@@ -1,5 +1,6 @@
 import { useEffect, useCallback, useRef, useState, useMemo, type MouseEvent } from 'react';
 import { api } from './api';
+import type { ImageCodecId } from './api';
 import { takePrefetchOrFetch } from './prefetch';
 import { useWebSocket } from './useWebSocket';
 import {
@@ -263,6 +264,37 @@ export function App() {
       } catch {
         apply(prior?.mcmp_enabled ?? false, prior?.mcmp_version ?? 2); // revert
         toast.error('Failed to update compression');
+      }
+    },
+    [contacts, channels, setContacts, setChannels]
+  );
+
+  const handleSetImageCodec = useCallback(
+    async (type: 'channel' | 'contact', id: string, codec: ImageCodecId) => {
+      const apply = (next: ImageCodecId) => {
+        if (type === 'contact') {
+          setContacts((prev) =>
+            prev.map((c) => (c.public_key === id ? { ...c, image_codec: next } : c))
+          );
+        } else {
+          setChannels((prev) => prev.map((c) => (c.key === id ? { ...c, image_codec: next } : c)));
+        }
+      };
+      const prior =
+        type === 'contact'
+          ? contacts.find((c) => c.public_key === id)
+          : channels.find((c) => c.key === id);
+      apply(codec); // optimistic
+      try {
+        await api.setImageCodec(type, id, codec);
+      } catch (error) {
+        apply(prior?.image_codec ?? 'ie4'); // revert
+        // The server rejects 'aeic' with a 503 explaining what is missing (no
+        // onnxruntime, or the model not downloaded), so show its reason rather
+        // than a generic failure.
+        toast.error('Failed to change the photo codec', {
+          description: error instanceof Error ? error.message : String(error),
+        });
       }
     },
     [contacts, channels, setContacts, setChannels]
@@ -610,6 +642,7 @@ export function App() {
     onToggleFavorite: handleToggleFavorite,
     onToggleMute: handleToggleMute,
     onSetMcmpEnabled: handleSetMcmpEnabled,
+    onSetImageCodec: handleSetImageCodec,
     onDeleteContact: handleDeleteContact,
     onDeleteChannel: handleDeleteChannel,
     onSetChannelFloodScopeOverride: handleSetChannelFloodScopeOverride,

@@ -114,6 +114,9 @@ class Contact(BaseModel):
     favorite: bool = False
     mcmp_enabled: bool = False  # Opt-in: MCMP-compress outbound messages to this contact
     mcmp_version: int = 2  # MCMP transport when enabled: 2 = mcmp2:, 3 = mcmp3: container
+    # Which codec an outbound photo uses: "ie4" (AVIF/JPEG fragments) or "aeic"
+    # (the neural codec, carried as aei1: basE91 text). See app/imaging/aeic/.
+    image_codec: str = "ie4"
     last_contacted: int | None = None  # Last time we sent/received a message
     last_read_at: int | None = None  # Server-side read state tracking
     first_seen: int | None = None
@@ -361,6 +364,9 @@ class Channel(BaseModel):
     muted: bool = False
     mcmp_enabled: bool = False  # Opt-in: MCMP-compress outbound messages to this channel
     mcmp_version: int = 2  # MCMP transport when enabled: 2 = mcmp2:, 3 = mcmp3: container
+    # Which codec an outbound photo uses: "ie4" (AVIF/JPEG fragments) or "aeic"
+    # (the neural codec, carried as aei1: basE91 text). See app/imaging/aeic/.
+    image_codec: str = "ie4"
 
 
 class ChannelMessageCounts(BaseModel):
@@ -583,6 +589,52 @@ class McmpEnabledResponse(BaseModel):
     id: str
     enabled: bool
     version: int
+
+
+class ImageCodecSelectionRequest(BaseModel):
+    """Choose the image codec for a conversation (contact or channel)."""
+
+    type: Literal["contact", "channel"]
+    id: str
+    # "ie4" is the SAR-compatible AVIF/JPEG fragment transport every
+    # conversation starts on; "aeic" is the neural codec, which needs the
+    # optional model bundle installed and a peer that speaks aei1:.
+    codec: Literal["ie4", "aeic"]
+
+
+class ImageCodecSelectionResponse(BaseModel):
+    type: Literal["contact", "channel"]
+    id: str
+    codec: str
+
+
+class AeicAssetStatus(BaseModel):
+    """One file of the AEIC model bundle, as the settings UI sees it."""
+
+    file_name: str
+    role: str
+    size_bytes: int
+    installed: bool
+
+
+class AeicStatusResponse(BaseModel):
+    """Whether this install can encode and/or decode AEIC images, and why not."""
+
+    runtime_available: bool = Field(
+        description="True when the optional onnxruntime dependency is importable"
+    )
+    supports_encode: bool
+    supports_decode: bool
+    downloading: bool
+    download_file: str | None = None
+    downloaded_bytes: int = 0
+    download_total_bytes: int = 0
+    installed_bytes: int = 0
+    bundle_total_bytes: int
+    model_dir: str
+    rate_point: str
+    last_error: str | None = None
+    assets: list[AeicAssetStatus] = Field(default_factory=list)
 
 
 class RepeaterLoginRequest(BaseModel):

@@ -11,8 +11,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MessageInput } from '../components/MessageInput';
 import { api } from '../api';
 import { toast } from '../components/ui/sonner';
-import { api } from '../api';
-import { encodeMeshImage } from '../services/imageCodec';
+import { encodeMeshImage, prepareAeicImage } from '../services/imageCodec';
 
 const voiceCapture = vi.hoisted(() => ({
   start: vi.fn().mockResolvedValue(undefined),
@@ -28,6 +27,12 @@ const encodedImage = vi.hoisted(() => ({
   width: 128,
   height: 96,
 }));
+const preparedAeicImage = vi.hoisted(() => ({
+  rgb: new Uint8Array(12),
+  sourceWidth: 4032,
+  sourceHeight: 3024,
+  previewBlob: new Blob(['aeic-preview'], { type: 'image/png' }),
+}));
 
 vi.mock('../services/voiceCapture', () => ({
   VoiceCapture: vi.fn(function VoiceCapture() {
@@ -37,29 +42,36 @@ vi.mock('../services/voiceCapture', () => ({
 
 vi.mock('../services/imageCodec', () => ({
   encodeMeshImage: vi.fn().mockResolvedValue(encodedImage),
+  prepareAeicImage: vi.fn().mockResolvedValue(preparedAeicImage),
+  AEIC_SQUARE_SIZE: 512,
 }));
-
-vi.mock('../api', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../api')>();
-  return {
-    ...original,
-    api: {
-      ...original.api,
-      sendVoice: vi.fn().mockResolvedValue(undefined),
-      sendImage: vi.fn().mockResolvedValue(undefined),
-    },
-  };
-});
 
 // Mock sonner (toast)
 vi.mock('../components/ui/sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 
-// Mock the API — MessageInput calls api.estimateMcmp for the compressed counter.
-vi.mock('../api', () => ({
-  api: { estimateMcmp: vi.fn() },
-}));
+// ONE api mock. There must not be a second vi.mock('../api') in this file: the
+// last one registered wins outright, so a second partial mock silently replaces
+// these spies with undefined and every assertion on them fails as "not a spy".
+vi.mock('../api', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../api')>();
+  return {
+    ...original,
+    api: {
+      ...original.api,
+      estimateMcmp: vi.fn(),
+      sendVoice: vi.fn().mockResolvedValue(undefined),
+      sendImage: vi.fn().mockResolvedValue(undefined),
+      sendAeicImage: vi.fn().mockResolvedValue({
+        session_key: 'self:0001',
+        bitstream_bytes: 156,
+        chunk_count: 2,
+        messages: [],
+      }),
+    },
+  };
+});
 
 const mockApi = api as unknown as { estimateMcmp: ReturnType<typeof vi.fn> };
 
@@ -91,6 +103,7 @@ describe('MessageInput', () => {
     disabled?: boolean;
     voice?: boolean;
     mcmpEnabled?: boolean;
+    imageCodec?: 'ie4' | 'aeic';
   }) {
     return render(
       <MessageInput
@@ -99,6 +112,7 @@ describe('MessageInput', () => {
         conversationType={props.conversationType}
         senderName={props.senderName}
         mcmpEnabled={props.mcmpEnabled}
+        imageCodec={props.imageCodec}
         placeholder="Type a message..."
         voiceConversation={props.voice ? { type: 'PRIV', key: 'aa'.repeat(32) } : undefined}
       />
@@ -409,6 +423,107 @@ describe('MessageInput', () => {
       await waitFor(() =>
         expect(api.sendImage).toHaveBeenCalledWith('PRIV', 'aa'.repeat(32), encodedImage)
       );
+    });
+
+    it('routes an attachment through the AI codec when the conversation selects it', async () => {
+      renderInput({ conversationType: 'contact', voice: true, imageCodec: 'aeic' });
+      const file = new File(['source'], 'photo.jpg', { type: 'image/jpeg' });
+      fireEvent.change(screen.getByLabelText('Choose image'), { target: { files: [file] } });
+
+      // The preview shows what will actually be encoded: a 512px square, with
+      // the source shape recorded so the receiver can undo the stretch.
+      expect(await screen.findByText(/512×512 colour/)).toBeVisible();
+      expect(screen.getByText(/from 4032×3024/)).toBeVisible();
+      expect(screen.getByText(/1–2 messages/)).toBeVisible();
+
+      expect(prepareAeicImage).toHaveBeenCalledWith(file);
+      expect(encodeMeshImage).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Send photo' }));
+      await waitFor(() =>
+        expect(api.sendAeicImage).toHaveBeenCalledWith('PRIV', 'aa'.repeat(32), preparedAeicImage)
+      );
+      expect(api.sendImage).not.toHaveBeenCalled();
+    });
+
+    it('hides the max-size selector for the AI codec, which is always 512px', async () => {
+      renderInput({ conversationType: 'contact', voice: true, imageCodec: 'aeic' });
+      const file = new File(['source'], 'photo.jpg', { type: 'image/jpeg' });
+      fireEvent.change(screen.getByLabelText('Choose image'), { target: { files: [file] } });
+      await screen.findByText(/512×512 colour/);
+      expect(screen.queryByLabelText('Maximum image dimension')).not.toBeInTheDocument();
+    });
+
+    /**
+     * Switching the codec on an already-attached photo has to re-prepare it.
+     *
+     * When preparation was imperative -- fired from the file input's onChange --
+     * the old pixels survived the switch, and the send went out with the codec
+     * the user had just switched AWAY from while the panel header claimed the
+     * new one. Preparation is now an effect over (file, size, codec).
+     */
+    it('re-prepares and sends via IE4 when the codec switches away from AI', async () => {
+      const { rerender } = renderInput({
+        conversationType: 'contact',
+        voice: true,
+        imageCodec: 'aeic',
+      });
+      const file = new File(['source'], 'photo.jpg', { type: 'image/jpeg' });
+      fireEvent.change(screen.getByLabelText('Choose image'), { target: { files: [file] } });
+      await screen.findByText(/512×512 colour/);
+      expect(prepareAeicImage).toHaveBeenCalledWith(file);
+      expect(encodeMeshImage).not.toHaveBeenCalled();
+
+      rerender(
+        <MessageInput
+          onSend={onSend}
+          disabled={false}
+          conversationType="contact"
+          imageCodec="ie4"
+          placeholder="Type a message..."
+          voiceConversation={{ type: 'PRIV', key: 'aa'.repeat(32) }}
+        />
+      );
+
+      // The IE4 preparation runs, and the AI-specific preview line is gone.
+      await waitFor(() => expect(encodeMeshImage).toHaveBeenCalledWith(file, 256));
+      await waitFor(() => expect(screen.queryByText(/512×512 colour/)).not.toBeInTheDocument());
+
+      fireEvent.click(screen.getByRole('button', { name: 'Send image' }));
+      await waitFor(() =>
+        expect(api.sendImage).toHaveBeenCalledWith('PRIV', 'aa'.repeat(32), encodedImage)
+      );
+      expect(api.sendAeicImage).not.toHaveBeenCalled();
+    });
+
+    it('re-prepares and sends via the AI codec when the codec switches to it', async () => {
+      const { rerender } = renderInput({
+        conversationType: 'contact',
+        voice: true,
+        imageCodec: 'ie4',
+      });
+      const file = new File(['source'], 'photo.jpg', { type: 'image/jpeg' });
+      fireEvent.change(screen.getByLabelText('Choose image'), { target: { files: [file] } });
+      await screen.findByAltText('Image attachment preview');
+      expect(encodeMeshImage).toHaveBeenCalledWith(file, 256);
+
+      rerender(
+        <MessageInput
+          onSend={onSend}
+          disabled={false}
+          conversationType="contact"
+          imageCodec="aeic"
+          placeholder="Type a message..."
+          voiceConversation={{ type: 'PRIV', key: 'aa'.repeat(32) }}
+        />
+      );
+
+      await waitFor(() => expect(prepareAeicImage).toHaveBeenCalledWith(file));
+      fireEvent.click(screen.getByRole('button', { name: 'Send photo' }));
+      await waitFor(() =>
+        expect(api.sendAeicImage).toHaveBeenCalledWith('PRIV', 'aa'.repeat(32), preparedAeicImage)
+      );
+      expect(api.sendImage).not.toHaveBeenCalled();
     });
 
     it('rejects an invalid image cleanly', async () => {

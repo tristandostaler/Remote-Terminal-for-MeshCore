@@ -165,6 +165,8 @@ export interface Contact {
   favorite: boolean;
   mcmp_enabled?: boolean;
   mcmp_version?: number;
+  /** Codec for outbound photos: 'ie4' (AVIF/JPEG fragments) or 'aeic' (neural). */
+  image_codec?: 'ie4' | 'aeic';
   last_contacted: number | null;
   last_read_at: number | null;
   first_seen: number | null;
@@ -251,6 +253,8 @@ export interface Channel {
   muted: boolean;
   mcmp_enabled?: boolean;
   mcmp_version?: number;
+  /** Codec for outbound photos: 'ie4' (AVIF/JPEG fragments) or 'aeic' (neural). */
+  image_codec?: 'ie4' | 'aeic';
 }
 
 export interface ChannelMessageCounts {

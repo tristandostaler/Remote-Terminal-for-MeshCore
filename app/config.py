@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     ble_pin: str = ""
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     database_path: str = "data/meshcore.db"
+    # Where the optional AEIC neural image-codec bundle is installed. ~958 MiB,
+    # downloaded on demand, never shipped with the app. Defaults beside the
+    # database so a Home Assistant add-on's mapped /app/data volume keeps it
+    # across restarts.
+    aeic_model_dir: str = "data/models/aeic"
     disable_bots: bool = False
     enable_message_poll_fallback: bool = False
     force_channel_slot_reconfigure: bool = False

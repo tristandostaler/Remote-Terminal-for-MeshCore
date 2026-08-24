@@ -19,6 +19,19 @@ dependencies = [
     "pywebpush>=0.14.0",
 ]
 
+# Optional: the AEIC neural image codec (see app/imaging/aeic/AGENTS_aeic.md).
+# Heavy, and only needed by installs that opt into the AI image codec, so it is
+# an extra rather than a base dependency: `uv sync --extra aeic`.
+[project.optional-dependencies]
+aeic = [
+    "numpy>=1.26",
+    "onnxruntime>=1.20",
+    # Only for the bot send path: a bot fetches a JPEG and something has to
+    # decode and resize it. The browser does its own resize, so a user send
+    # never touches Pillow. See app/imaging/aeic/prepare.py.
+    "pillow>=10.0",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

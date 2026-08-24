@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.compression import decode_incoming_body
+from app.imaging.aeic.ingest import note_inbound_chunk
 from app.models import CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM, Contact, ContactUpsert, Message
 from app.repository import (
     AmbiguousPublicKeyPrefixError,
@@ -264,6 +265,17 @@ async def _store_direct_message(
         )
         broadcast_message(
             message=message, broadcast_fn=broadcast_fn, realtime=realtime, packet_hash=packet_hash
+        )
+
+        # An aei1: body is one chunk of an AEIC image. The text stays in the
+        # message (as the IE4 envelope does); this feeds the reassembler.
+        await note_inbound_chunk(
+            text=text,
+            message_id=msg_id,
+            conversation_type="PRIV",
+            conversation_key=conversation_key,
+            peer_public_key=sender_key or conversation_key,
+            broadcast_fn=broadcast_fn,
         )
 
         if update_last_contacted_key:

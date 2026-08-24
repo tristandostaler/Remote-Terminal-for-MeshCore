@@ -62,6 +62,7 @@ from app.radio_sync import (
     stop_telemetry_collect,
 )
 from app.routers import (
+    aeic_images,
     bots,
     channels,
     contacts,
@@ -241,6 +242,7 @@ app.include_router(statistics.router, prefix="/api")
 app.include_router(push.router, prefix="/api")
 app.include_router(voice.router, prefix="/api")
 app.include_router(images.router, prefix="/api")
+app.include_router(aeic_images.router, prefix="/api")
 app.include_router(ws.router, prefix="/api")
 
 # Serve frontend static files in production

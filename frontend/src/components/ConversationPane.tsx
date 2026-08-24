@@ -18,6 +18,7 @@ import type {
   RadioTraceResponse,
 } from '../types';
 import { CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM } from '../types';
+import type { ImageCodecId } from '../api';
 import {
   getContactDisplayName,
   isPrefixOnlyContact,
@@ -70,6 +71,7 @@ interface ConversationPaneProps {
     enabled: boolean,
     version: number
   ) => Promise<void>;
+  onSetImageCodec?: (type: 'channel' | 'contact', id: string, codec: ImageCodecId) => Promise<void>;
   onDeleteContact: (publicKey: string) => Promise<void>;
   onDeleteChannel: (key: string) => Promise<void>;
   onSetChannelFloodScopeOverride: (channelKey: string, floodScopeOverride: string) => Promise<void>;
@@ -154,6 +156,7 @@ export function ConversationPane({
   onToggleFavorite,
   onToggleMute,
   onSetMcmpEnabled,
+  onSetImageCodec,
   onDeleteContact,
   onDeleteChannel,
   onSetChannelFloodScopeOverride,
@@ -209,6 +212,11 @@ export function ConversationPane({
     activeConversation?.type === 'contact'
       ? (activeContact?.mcmp_version ?? 2)
       : (activeChannel?.mcmp_version ?? 2);
+  // Which codec the compose bar uses when a photo is attached.
+  const activeImageCodec: ImageCodecId =
+    activeConversation?.type === 'contact'
+      ? (activeContact?.image_codec ?? 'ie4')
+      : (activeChannel?.image_codec ?? 'ie4');
   // Reset the room-auth gate when the conversation changes, but do it during
   // render (guarded by the previous id) rather than in an effect. An effect here
   // races the keyed RoomServerPanel's own onAuthenticatedChange mount report:
@@ -363,6 +371,7 @@ export function ConversationPane({
         onToggleFavorite={onToggleFavorite}
         onToggleMute={onToggleMute}
         onSetMcmpEnabled={onSetMcmpEnabled}
+        onSetImageCodec={onSetImageCodec}
         onSetChannelFloodScopeOverride={onSetChannelFloodScopeOverride}
         onSetChannelPathHashModeOverride={onSetChannelPathHashModeOverride}
         onDeleteChannel={onDeleteChannel}
@@ -443,6 +452,7 @@ export function ConversationPane({
           }
           mcmpEnabled={activeMcmpEnabled}
           mcmpVersion={activeMcmpVersion}
+          imageCodec={activeImageCodec}
           placeholder={
             !health?.radio_connected
               ? 'Radio not connected'

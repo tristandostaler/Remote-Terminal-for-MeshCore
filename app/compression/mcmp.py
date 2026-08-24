@@ -956,6 +956,23 @@ def _log_model_load_failure() -> None:
         logger.warning("MCMP model unavailable; outbound compression disabled", exc_info=True)
 
 
+# Transport envelopes that are already framed binary payloads riding in a text
+# message. Compressing one is pointless (the payload is basE91 of compressed or
+# high-entropy bytes) and, for v3, actively harmful: v3 has no "only if smaller"
+# gate, so it would inflate a chunk sized exactly to the radio budget and the
+# radio would TRUNCATE it. A truncated basE91 chunk corrupts the whole image.
+_FRAMED_PREFIXES = ("mcmp2:", "mcmp3:", "aei1", "IE4:")
+
+
+def is_framed_payload(text: str) -> bool:
+    """Whether ``text`` is already a transport envelope, not user prose.
+
+    See :data:`_FRAMED_PREFIXES`. Used by :func:`encode_outbound` to leave such
+    payloads alone; exposed so senders can assert the same invariant.
+    """
+    return text.startswith(_FRAMED_PREFIXES)
+
+
 def encode_outbound(text: str, *, version: int = 2, timestamp: int = 0) -> str:
     """Compress ``text`` for sending, as MCMP v2 (``mcmp2:``) or v3 (``mcmp3:``).
 
@@ -967,10 +984,18 @@ def encode_outbound(text: str, *, version: int = 2, timestamp: int = 0) -> str:
       the same text (container + basE91). ``timestamp`` should be the message's
       sender timestamp so a retry/resend produces identical bytes.
 
+    Text that is already a framed transport payload (an AEIC image chunk, an IE4
+    envelope, or an already-encoded MCMP body) is returned unchanged — see
+    :func:`is_framed_payload`. Without that guard, a conversation on v3 would
+    inflate a budget-sized image chunk past the radio's limit and silently
+    truncate the image.
+
     Never raises — on model-load failure the original text is returned so sending
     still works, just uncompressed. Both versions are decoded on the way in.
     """
     if not text:
+        return text
+    if is_framed_payload(text):
         return text
     try:
         compressor = get_compressor()
@@ -1050,3 +1075,27 @@ def decode_incoming_body(text: str) -> str:
         len(decoded.text),
     )
     return decoded.text
+
+
+def encode_base91(data: bytes) -> str:
+    """basE91-encode arbitrary binary for carriage inside a text message.
+
+    Exposed for :mod:`app.imaging.aeic.text_transport`, which frames AEIC image
+    bitstreams the same way MCMP frames compressed prose. This is the encoder
+    both upstream Dart helpers share, so text produced here is readable by them.
+
+    The alphabet excludes space, the apostrophe, the backslash and the hyphen,
+    which is what makes the output safe to drop into a MeshCore message body.
+    """
+    return _b91_encode(data)
+
+
+def decode_base91(text: str) -> bytes:
+    """Inverse of :func:`encode_base91`.
+
+    Uses the v2 decoder, which is the exact counterpart of ``_b91_encode``'s
+    trailing-byte handling; verified to round-trip arbitrary binary at every
+    length in ``tests/test_aeic_text_transport.py``. Raises
+    :class:`MeshCompressorError` on a character outside the alphabet.
+    """
+    return _b91_decode_v2(text)

@@ -34,3 +34,8 @@ docker-compose.yaml
 
 # HA test environment (created by scripts/setup/start_ha_test_env.sh)
 ha_test_config/
+
+# AEIC ONNX-I/O recordings (7.4 MB each) used by tests/test_aeic_onnx.py.
+# Extract them from a meshcore-open checkout when you need them; see
+# tests/aeic_fixtures.py. The tests skip when they are absent.
+tests/fixtures/aeic/e2e/

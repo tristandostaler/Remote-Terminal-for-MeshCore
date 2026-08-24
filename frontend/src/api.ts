@@ -69,6 +69,55 @@ export interface VoiceSessionStatus {
   missing_indices: number[];
 }
 
+/** Which codec a conversation uses for outbound photos. */
+export type ImageCodecId = 'ie4' | 'aeic';
+
+export interface AeicAssetStatus {
+  file_name: string;
+  role: string;
+  size_bytes: number;
+  installed: boolean;
+}
+
+/** Whether this server can run the AEIC codec, and how the model download is going. */
+export interface AeicStatus {
+  runtime_available: boolean;
+  supports_encode: boolean;
+  supports_decode: boolean;
+  downloading: boolean;
+  download_file: string | null;
+  downloaded_bytes: number;
+  download_total_bytes: number;
+  installed_bytes: number;
+  bundle_total_bytes: number;
+  model_dir: string;
+  rate_point: string;
+  last_error: string | null;
+  assets: AeicAssetStatus[];
+}
+
+export interface AeicSessionStatus {
+  session_key: string;
+  message_id: number | null;
+  state: string;
+  square_size: number;
+  aspect_code: number;
+  rate_code: number;
+  total_chunks: number;
+  received_chunks: number;
+  missing_indices: number[];
+  bitstream_bytes: number;
+  decoded: boolean;
+  decode_error: string | null;
+}
+
+export interface AeicSendResult {
+  session_key: string;
+  bitstream_bytes: number;
+  chunk_count: number;
+  messages: unknown[];
+}
+
 export interface ImageSessionStatus {
   session_id: string;
   state: string;
@@ -150,6 +199,50 @@ export const api = {
   getImageSession: (sessionId: string) =>
     fetchJson<ImageSessionStatus>(`/images/sessions/${sessionId}`),
   imageContentUrl: (sessionId: string) => `${API_BASE}/images/sessions/${sessionId}/content`,
+  /**
+   * Send a photo with the AEIC neural codec. The body is raw 512x512 packed RGB
+   * (786,432 bytes) prepared by `prepareAeicImage`; the server encodes it to
+   * ~150 bytes and transmits one or two `aei1:` text messages.
+   */
+  sendAeicImage: async (
+    conversationType: 'PRIV' | 'CHAN',
+    conversationKey: string,
+    image: { rgb: Uint8Array; sourceWidth: number; sourceHeight: number }
+  ) => {
+    const query = new URLSearchParams({
+      conversation_type: conversationType,
+      conversation_key: conversationKey,
+      source_width: String(image.sourceWidth),
+      source_height: String(image.sourceHeight),
+    });
+    const response = await fetch(`${API_BASE}/aeic/send?${query}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: image.rgb as unknown as BodyInit,
+    });
+    if (!response.ok)
+      throw new Error((await response.json().catch(() => null))?.detail || response.statusText);
+    return response.json() as Promise<AeicSendResult>;
+  },
+  getAeicStatus: () => fetchJson<AeicStatus>('/aeic/status'),
+  startAeicModelDownload: () => fetchJson<AeicStatus>('/aeic/model/download', { method: 'POST' }),
+  cancelAeicModelDownload: () =>
+    fetchJson<AeicStatus>('/aeic/model/download/cancel', { method: 'POST' }),
+  getAeicSessionForMessage: (messageId: number) =>
+    fetchJson<AeicSessionStatus>(`/aeic/messages/${messageId}`),
+  getAeicSession: (sessionKey: string) =>
+    fetchJson<AeicSessionStatus>(`/aeic/sessions/${encodeURIComponent(sessionKey)}`),
+  retryAeicDecode: (sessionKey: string) =>
+    fetchJson<AeicSessionStatus>(`/aeic/sessions/${encodeURIComponent(sessionKey)}/decode`, {
+      method: 'POST',
+    }),
+  aeicContentUrl: (sessionKey: string) =>
+    `${API_BASE}/aeic/sessions/${encodeURIComponent(sessionKey)}/content`,
+  setImageCodec: (type: 'contact' | 'channel', id: string, codec: ImageCodecId) =>
+    fetchJson<{ type: string; id: string; codec: ImageCodecId }>('/settings/image-codec/set', {
+      method: 'POST',
+      body: JSON.stringify({ type, id, codec }),
+    }),
   sendVoice: async (conversationType: 'PRIV' | 'CHAN', conversationKey: string, pcm: Blob) => {
     const response = await fetch(
       `${API_BASE}/voice/send?conversation_type=${conversationType}&conversation_key=${encodeURIComponent(conversationKey)}`,

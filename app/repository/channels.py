@@ -28,7 +28,7 @@ class ChannelRepository:
         async with db.readonly() as conn:
             async with conn.execute(
                 """
-                SELECT key, name, is_hashtag, on_radio, flood_scope_override, path_hash_mode_override, last_read_at, favorite, muted, mcmp_enabled, mcmp_version
+                SELECT key, name, is_hashtag, on_radio, flood_scope_override, path_hash_mode_override, last_read_at, favorite, muted, mcmp_enabled, mcmp_version, image_codec
                 FROM channels
                 WHERE key = ?
                 """,
@@ -48,6 +48,7 @@ class ChannelRepository:
                 muted=bool(row["muted"]),
                 mcmp_enabled=bool(row["mcmp_enabled"]),
                 mcmp_version=row["mcmp_version"],
+                image_codec=row["image_codec"] or "ie4",
             )
         return None
 
@@ -56,7 +57,7 @@ class ChannelRepository:
         async with db.readonly() as conn:
             async with conn.execute(
                 """
-                SELECT key, name, is_hashtag, on_radio, flood_scope_override, path_hash_mode_override, last_read_at, favorite, muted, mcmp_enabled, mcmp_version
+                SELECT key, name, is_hashtag, on_radio, flood_scope_override, path_hash_mode_override, last_read_at, favorite, muted, mcmp_enabled, mcmp_version, image_codec
                 FROM channels
                 ORDER BY name
                 """
@@ -75,6 +76,7 @@ class ChannelRepository:
                 muted=bool(row["muted"]),
                 mcmp_enabled=bool(row["mcmp_enabled"]),
                 mcmp_version=row["mcmp_version"],
+                image_codec=row["image_codec"] or "ie4",
             )
             for row in rows
         ]
@@ -119,6 +121,17 @@ class ChannelRepository:
             async with conn.execute(
                 "UPDATE channels SET mcmp_version = ? WHERE key = ?",
                 (version, key.upper()),
+            ) as cursor:
+                rowcount = cursor.rowcount
+        return rowcount > 0
+
+    @staticmethod
+    async def set_image_codec(key: str, codec: str) -> bool:
+        """Set the outbound image codec ("ie4" or "aeic") for a channel."""
+        async with db.tx() as conn:
+            async with conn.execute(
+                "UPDATE channels SET image_codec = ? WHERE key = ?",
+                (codec, key.upper()),
             ) as cursor:
                 rowcount = cursor.rowcount
         return rowcount > 0
