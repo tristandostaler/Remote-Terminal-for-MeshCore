@@ -21,8 +21,8 @@ import time
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app.event_handlers import track_pending_ack
+from app.imaging.aeic.constants import SQUARE_SIZE
 from app.imaging.aeic.ingest import decode_session
-from app.imaging.aeic.onnx_backend import SQUARE_SIZE
 from app.imaging.aeic.prepare import RGB_BYTES_EXPECTED, AeicImagePrepareError
 from app.imaging.aeic.service import AeicUnavailable, aeic_service
 from app.imaging.aeic.text_transport import (

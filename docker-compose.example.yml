@@ -24,6 +24,14 @@ services:
     environment:
       MESHCORE_DATABASE_PATH: data/meshcore.db
 
+      # Optional AI image codec (send a 512px photo as ~150 bytes).
+      # Installs ~120 MB of dependencies on the first start after you switch it
+      # on -- no rebuild and no custom image -- then the ~958 MB model is a
+      # one-time download from the app's conversation features panel.
+      # Requires amd64/aarch64 and ~2.4 GB free RAM to decode. Wheels are cached
+      # in ./data/.uv-cache so recreating the container does not refetch them.
+      # MESHCORE_ENABLE_AEIC: "true"
+
       # Radio connection
       # Serial (USB)
       MESHCORE_SERIAL_PORT: /dev/meshcore-radio

@@ -26,11 +26,10 @@ from __future__ import annotations
 
 import logging
 
-from app.imaging.aeic.onnx_backend import SQUARE_SIZE
+from app.imaging.aeic.constants import RGB_BYTES_EXPECTED, SQUARE_SIZE
 
 logger = logging.getLogger(__name__)
 
-RGB_BYTES_EXPECTED = SQUARE_SIZE * SQUARE_SIZE * 3
 
 MAX_SOURCE_BYTES = 32 * 1024 * 1024
 """Refuse a source image larger than this before handing it to a decoder.

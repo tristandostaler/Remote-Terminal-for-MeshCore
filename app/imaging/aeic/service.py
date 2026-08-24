@@ -40,7 +40,7 @@ from app.imaging.aeic.bundle import (
     AeicDownloadCancelled,
     download_bundle,
 )
-from app.imaging.aeic.onnx_backend import SQUARE_SIZE, onnxruntime_available
+from app.imaging.aeic.constants import SQUARE_SIZE, onnxruntime_available
 from app.imaging.aeic.prepare import prepare_square_rgb
 from app.imaging.aeic.text_transport import (
     AeicStreamMetadata,

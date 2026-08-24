@@ -204,7 +204,8 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_BLE_PIN` | | BLE PIN (required when BLE address is set) |
 | `MESHCORE_LOG_LEVEL` | INFO | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `MESHCORE_DATABASE_PATH` | `data/meshcore.db` | SQLite database path |
-| `MESHCORE_AEIC_MODEL_DIR` | `data/models/aeic` | Where the optional AI image codec's ~958 MB model is installed. Defaults inside `data/` so it survives container recreation; see [Optional: AI image codec](#optional-ai-image-codec-aeic) |
+| `MESHCORE_ENABLE_AEIC` | false | Install the optional AI image codec on start (Docker / HA add-on). See [Optional: AI Image Codec](#optional-ai-image-codec-aeic) |
+| `MESHCORE_AEIC_MODEL_DIR` | `data/models/aeic` | Where that codec's ~958 MB model is installed. Defaults inside `data/` so it survives container recreation |
 | `MESHCORE_DISABLE_BOTS` | false | Disable bot system entirely (blocks execution and config; an intermediate security precaution, but not as good as basic auth) |
 | `MESHCORE_BASIC_AUTH_USERNAME` | | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
 | `MESHCORE_BASIC_AUTH_PASSWORD` | | Optional app-wide HTTP Basic auth password; must be set together with `MESHCORE_BASIC_AUTH_USERNAME` |
@@ -264,7 +265,25 @@ appliances. Enabling it is three steps.
 A Raspberry Pi 4/5 with 4 GB+ works. A Pi Zero, a 32-bit OS, or a 2 GB board does
 not — leave it off there and the app behaves exactly as before.
 
-### 2. Install the dependencies
+### 2. Turn on the dependencies
+
+**Docker / docker-compose** — just set an environment variable. No rebuild, no
+custom image: `run.sh` installs the dependencies on the first start after you
+switch it on (~120 MB), and skips instantly on every start after that.
+
+```yaml
+services:
+  remoteterm:
+    environment:
+      MESHCORE_ENABLE_AEIC: "true"
+```
+
+or `docker run -e MESHCORE_ENABLE_AEIC=true ...`. Accepts `true`/`1`/`yes`/`on`.
+Wheels are cached in `./data/.uv-cache` (~200 MB), so recreating the container
+reinstalls in seconds instead of re-downloading.
+
+**Home Assistant add-on** — flip **`MESHCORE_ENABLE_AEIC`** in the add-on's
+Configuration tab and restart.
 
 **Clone and build:**
 
@@ -272,20 +291,21 @@ not — leave it off there and the app behaves exactly as before.
 uv sync --extra aeic
 ```
 
-**systemd installer:**
+**systemd installer** — installed up front, since a service shouldn't be
+installing packages on boot:
 
 ```bash
-ENABLE_AEIC=1 bash scripts/setup/install_service.sh
+MESHCORE_ENABLE_AEIC=1 bash scripts/setup/install_service.sh
 ```
 
-**Docker** — the published image does not include it, so build your own:
+> [!NOTE]
+> If you'd rather pay the cost at image-build time than on first start, the
+> Dockerfile still accepts `--build-arg ENABLE_AEIC=1` to pre-bake it. That makes
+> the runtime step a no-op.
 
-```bash
-docker build --build-arg ENABLE_AEIC=1 -t remoteterm-aeic .
-```
-
-then point your `docker-compose.yml` at `image: remoteterm-aeic` (or uncomment
-`build: .` and add the build arg under it).
+If the dependencies can't be installed — wrong architecture, no network — the app
+logs a warning and **starts normally without the codec**. It will never keep your
+radio offline over an optional image feature.
 
 ### 3. Download the model and turn it on
 

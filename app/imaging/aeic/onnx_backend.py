@@ -69,6 +69,30 @@ import threading
 import numpy as np
 
 from app.imaging.aeic.bundle import AeicBundle
+
+# Constants and the runtime probe live in the stdlib-only `constants` module so
+# that importing the AEIC package does not require numpy. See its docstring --
+# the app failed to start entirely when they lived here.
+from app.imaging.aeic.constants import (  # noqa: F401 - re-exported
+    BASE0_OUTPUT,
+    BASE_INPUT,
+    BASE_SHAPE,
+    DECODER_INPUT,
+    DECODER_OUTPUT,
+    HYPER_STAGE,
+    IMAGE_INPUT,
+    LATENT_ELEMENTS,
+    LATENT_SHAPE,
+    MEANS_OUTPUT,
+    SCALES_OUTPUT,
+    SQUARE_SIZE,
+    STAGE_INPUT,
+    ZQ_INPUT,
+    ZQ_SHAPE,
+    AeicRuntimeMissing,
+    onnxruntime_available,
+    require_onnxruntime,
+)
 from app.imaging.aeic.entropy import (
     AeicEntropyNetwork,
     EncodeSideTensors,
@@ -77,56 +101,7 @@ from app.imaging.aeic.entropy import (
 
 logger = logging.getLogger(__name__)
 
-IMAGE_INPUT = "image"
-ZQ_INPUT = "z_q"
-BASE_INPUT = "base"
-STAGE_INPUT = "stage"
-BASE0_OUTPUT = "base0"
-MEANS_OUTPUT = "means"
-SCALES_OUTPUT = "scales"
-DECODER_INPUT = "y_hat"
-DECODER_OUTPUT = "image"
-
-HYPER_STAGE = -1
-"""The ``stage`` value that selects the hyper-synthesis branch.
-
-Any negative value works; -1 is the documented one. Note the graph does NOT
-validate ``stage``: anything >= 4 silently falls into the stage-3 branch, either
-of which desynchronises rANS without an error, so :meth:`run_stage` checks.
-"""
-
-ZQ_SHAPE = (1, 128, 4, 4)
-BASE_SHAPE = (1, 256, 16, 16)
-LATENT_SHAPE = (1, 256, 16, 16)
-LATENT_ELEMENTS = 256 * 16 * 16
-SQUARE_SIZE = 512
-"""Square edge length. 512 is a hard floor -- the SD-Turbo UNet in the synthesis
-decoder needs a 64x64 latent and collapses below it."""
-
-
-class AeicRuntimeMissing(RuntimeError):
-    """onnxruntime is not installed, so the AEIC codec cannot run at all."""
-
-
-def onnxruntime_available() -> bool:
-    """Whether the optional ``aeic`` extra is installed."""
-    try:
-        import onnxruntime  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-def _require_onnxruntime():
-    try:
-        import onnxruntime
-    except ImportError as exc:  # pragma: no cover - depends on the install
-        raise AeicRuntimeMissing(
-            "the AEIC image codec needs onnxruntime, which is an optional extra. "
-            "Install it with `uv sync --extra aeic` (or "
-            "`pip install 'remoteterm-meshcore[aeic]'`)."
-        ) from exc
-    return onnxruntime
+_require_onnxruntime = require_onnxruntime
 
 
 def _session_options(*, single_threaded: bool):

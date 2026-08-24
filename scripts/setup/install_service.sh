@@ -221,8 +221,14 @@ echo
 
 # The AEIC neural image codec is an optional extra (onnxruntime + numpy +
 # Pillow, ~120 MB installed) so small appliances do not pay for it. Opt in with
-# ENABLE_AEIC=1. 64-bit only, and decoding needs ~2.4 GiB RAM.
-ENABLE_AEIC="${ENABLE_AEIC:-0}"
+# MESHCORE_ENABLE_AEIC=1 (ENABLE_AEIC is accepted as an alias). Installed here
+# rather than at first run because a systemd service should not be installing
+# packages on boot. 64-bit only, and decoding needs ~2.4 GiB RAM.
+ENABLE_AEIC="${MESHCORE_ENABLE_AEIC:-${ENABLE_AEIC:-0}}"
+case "$(printf '%s' "$ENABLE_AEIC" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) ENABLE_AEIC=1 ;;
+    *) ENABLE_AEIC=0 ;;
+esac
 
 cd "$REPO_DIR"
 if [ "$ENABLE_AEIC" = "1" ]; then

@@ -215,12 +215,39 @@ for skips before trusting a change to `entropy.py` or `onnx_backend.py`.
 
 ## Installing it
 
-```bash
-uv sync --extra aeic          # onnxruntime + numpy
-```
+Dependencies (onnxruntime + numpy + Pillow):
+
+| deployment | how |
+| --- | --- |
+| Docker / compose / HA add-on | `MESHCORE_ENABLE_AEIC=true` — `run.sh` installs on first start, no rebuild |
+| clone-and-build | `uv sync --extra aeic` |
+| systemd installer | `MESHCORE_ENABLE_AEIC=1 bash scripts/setup/install_service.sh` |
+| pre-baked image | `docker build --build-arg ENABLE_AEIC=1 .` (makes the runtime step a no-op) |
 
 Then download the bundle from the conversation features panel, or
 `POST /api/aeic/model/download`. It lands in `settings.aeic_model_dir`
 (`data/models/aeic` by default) and every file is SHA-256 verified — a table set
 that disagrees with the checkpoint is the silent-corruption case, so there is no
 skip-verification path.
+
+### THE EXTRA MUST STAY GENUINELY OPTIONAL
+
+`app/services/messages.py` imports `note_inbound_chunk` at module level, so this
+package is on the import path of the **whole application**. If importing it pulls
+numpy, a base install cannot start at all — uvicorn dies with
+`ModuleNotFoundError: No module named 'numpy'` before the radio connects.
+
+That shipped once and no test caught it, because numpy is installed in the dev
+environment and in CI. So:
+
+- `constants.py` holds every shape, graph-IO name and the runtime probe, and is
+  **stdlib-only**. Light modules take what they need from there.
+- `entropy.py` and `onnx_backend.py` are the only modules allowed to import
+  numpy / onnxruntime at module level, and nothing light may import them at
+  module level — `service.py` reaches them inside the functions that run
+  inference.
+- `prepare.py` imports Pillow inside the function, and passes raw pixels through
+  without touching it at all.
+- `tests/test_aeic_optional_extra.py` enforces this **statically**, by parsing
+  the import graph. It is the only way to catch it without a second,
+  dependency-free environment.
