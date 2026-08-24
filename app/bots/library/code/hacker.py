@@ -63,6 +63,7 @@ RESPONSES = (
 )
 
 
+@bot.on_keyword()
 @bot.on_keyword(*KEYWORDS)
 async def mainframe(ctx, msg):
     cmd = msg.keyword or "that"

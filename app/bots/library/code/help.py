@@ -62,6 +62,7 @@ def _triggers(entry):
     return unique
 
 
+@bot.on_keyword()
 @bot.on_keyword("help", "cmd", "commands")
 async def show_help(ctx, msg):
     bots = ctx.get_enabled_bots()

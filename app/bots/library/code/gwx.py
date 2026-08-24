@@ -36,6 +36,7 @@ BOT_META = {
 }
 
 
+@bot.on_keyword()
 @bot.on_keyword("gwx", "globalweather")
 async def gwx(ctx, msg):
     query = msg.arg_text.strip() or str(ctx.settings.get("default_location") or "Seattle, WA")

@@ -148,6 +148,7 @@ async def _alert_lines(ctx, lat: float, lon: float) -> list[str]:
     return lines
 
 
+@bot.on_keyword()
 @bot.on_keyword("wx", "weather", "wxa", "wxalert")
 async def wx(ctx, msg):
     args = list(msg.args)

@@ -281,8 +281,9 @@ async def _deliver(ctx, source: str) -> None:
 
 @bot.on_keyword(*_SOURCE_KEYWORDS)
 async def one_liner(ctx, msg):
-    # Only declared keywords reach here (UI keywords route to generic handlers,
-    # and this bot declares all of its own), so the lookup always resolves.
+    # Only the declared source words reach here: a Triggers-tab keyword routes
+    # to the generic handler below, which is `fun` and picks a source itself. So
+    # this lookup always resolves — keep it that way if a handler is added.
     source = _KEYWORD_SOURCES[(msg.keyword or "").lower()]
     if not _enabled(ctx, source):
         await ctx.reply(f"'{msg.keyword}' is switched off in this bot's settings.")
@@ -290,6 +291,7 @@ async def one_liner(ctx, msg):
     await _deliver(ctx, source)
 
 
+@bot.on_keyword()
 @bot.on_keyword("fun")
 async def surprise_me(ctx, msg):
     available = [s for s in _SOURCES if _enabled(ctx, s)]

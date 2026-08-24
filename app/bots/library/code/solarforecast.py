@@ -76,6 +76,7 @@ def _setting(ctx, key: str, default: float) -> float:
         return default
 
 
+@bot.on_keyword()
 @bot.on_keyword("solarforecast", "sf")
 async def solarforecast(ctx, msg):
     lat = _setting(ctx, "lat", 47.6062)

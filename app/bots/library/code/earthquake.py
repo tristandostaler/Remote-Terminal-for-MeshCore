@@ -82,6 +82,7 @@ def _format_quake(feature: dict) -> str:
     return f"{mag_text} quake {place}{when}"[:170]
 
 
+@bot.on_keyword()
 @bot.on_keyword("quake")
 async def quake(ctx, msg):
     since = datetime.now(tz=UTC) - timedelta(hours=24)

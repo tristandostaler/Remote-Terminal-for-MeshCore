@@ -99,6 +99,7 @@ def _incident_age_ok(incident: dict, max_age_hours: int) -> bool:
     return (datetime.now(UTC) - when).total_seconds() <= max_age_hours * 3600
 
 
+@bot.on_keyword()
 @bot.on_keyword("alert", "alerts", "incidents")
 async def active_incidents(ctx, msg):
     agencies = str(ctx.settings.get("agency_ids", "") or "").strip()

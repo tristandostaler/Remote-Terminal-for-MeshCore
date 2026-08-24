@@ -32,6 +32,7 @@ _PHASES = (
 )
 
 
+@bot.on_keyword()
 @bot.on_keyword("moon")
 async def moon(ctx, msg):
     now = datetime.now(tz=UTC)

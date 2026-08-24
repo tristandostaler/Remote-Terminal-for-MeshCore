@@ -11,6 +11,7 @@ BOT_META = {
 }
 
 
+@bot.on_keyword()
 @bot.on_keyword("channels", "channel")
 async def list_channels(ctx, msg):
     # Mesh introspection: read-only import of RemoteTerm's own channel

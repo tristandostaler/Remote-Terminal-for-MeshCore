@@ -25,6 +25,7 @@ BOT_META = {
 USAGE = "usage: announce <#channel> <text> — or: announce here <text>"
 
 
+@bot.on_keyword()
 @bot.on_keyword("announce")
 async def announce(ctx, msg):
     if len(msg.args) < 2:
