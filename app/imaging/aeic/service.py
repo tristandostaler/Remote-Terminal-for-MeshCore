@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -49,6 +50,7 @@ from app.imaging.aeic.text_transport import (
     encode_chunks,
 )
 from app.imaging.aeic.transport import (
+    CHANNEL_DATA_TRANSPORT,
     AeicChannelDataUnsupported,
     AeicSendResult,
     AeicTarget,
@@ -101,7 +103,13 @@ class AeicService:
 
     def status(self) -> dict:
         bundle = self.bundle()
-        runtime = onnxruntime_available()
+        # An explicit MESHCORE_ENABLE_AEIC=false reports as "no runtime", which is
+        # what the settings panel already renders as "switched off on this server,
+        # set MESHCORE_ENABLE_AEIC=true" -- precisely the right message, and it
+        # was previously unreachable on a server that had the extra installed.
+        # Without this the panel would offer to download 958 MiB for a codec that
+        # unavailable_reason() refuses to run.
+        runtime = onnxruntime_available() and settings.enable_aeic is not False
         return {
             "runtime_available": runtime,
             "supports_encode": runtime and bundle.supports_encode,
@@ -127,7 +135,20 @@ class AeicService:
         }
 
     def unavailable_reason(self, *, for_decode: bool) -> str | None:
-        """A sentence to show the user, or None when the codec is usable."""
+        """A sentence to show the user, or None when the codec is usable.
+
+        The single chokepoint for "can the codec run": both ``_require_ready``
+        (encode and decode) and the settings UI go through here, so the switch
+        below cannot be true in one place and false in another.
+        """
+        if settings.enable_aeic is False:
+            # Checked FIRST and independently of the dependency and the bundle,
+            # which is the whole point: an explicit false has to win even on a
+            # server where both are already installed, and reconstruction is
+            # exactly what keeps working otherwise. `run.sh` reads this variable
+            # only to decide whether to install the extra, so it cannot uninstall
+            # anything when the value flips back.
+            return "The AI image codec is switched off on this server (MESHCORE_ENABLE_AEIC=false)."
         if not onnxruntime_available():
             return (
                 "The AI image codec needs the optional onnxruntime dependency, "
@@ -301,6 +322,33 @@ class AeicService:
         storage_key = await self._record_outgoing(result, metadata, target, bitstream)
         return replace(result, storage_key=storage_key), bitstream, metadata
 
+    async def _create_binary_marker_message(self, key: str, target: AeicTarget) -> int | None:
+        """Mint the local message row a binary-transport image hangs off.
+
+        Mirrors what the inbound GRP_DATA path writes, deliberately: the same
+        ``aeib:`` marker, so one frontend branch renders both directions. The
+        marker is a LOCAL convention between server and UI -- nothing textual
+        crossed the air in either direction -- and is never transmitted.
+
+        Returns None on failure. That is the pre-existing behaviour for an
+        unrecordable send and stays non-fatal: the picture is already on air, so
+        losing the local bubble must not raise at the caller.
+        """
+        from app.imaging.aeic.channel_data_ingest import marker_text
+        from app.repository import MessageRepository
+
+        try:
+            return await MessageRepository.create(
+                msg_type=target.conversation_type,
+                text=marker_text(key),
+                received_at=int(time.time()),
+                conversation_key=target.conversation_key,
+                outgoing=True,
+            )
+        except Exception:
+            logger.exception("Could not create the local marker row for AEIC image %s", key)
+            return None
+
     async def _record_outgoing(
         self,
         result: AeicSendResult,
@@ -326,6 +374,20 @@ class AeicService:
         first = next((m for m in result.emitted if m is not None and getattr(m, "id", None)), None)
         message_id = getattr(first, "id", None) if first is not None else None
         key = outgoing_session_key(message_id)
+        if message_id is None and result.transport == CHANNEL_DATA_TRANSPORT:
+            # The binary transport emits no text, so it produces no message rows
+            # -- and a session with message_id NULL is a session the conversation
+            # cannot render, which is why a channel image flew to MCO Advanced
+            # while the sender's own bubble never appeared. Mint the same marker
+            # row the inbound GRP_DATA path already writes, so both directions of
+            # a binary image hang off a message the same way.
+            #
+            # Scoped to that transport on purpose. A TEXT send can also land here
+            # with no message id -- a bot whose send was dropped by moderation --
+            # and there the absence is the correct outcome: minting a row would
+            # put a bubble back in the conversation for a message that was
+            # deliberately not sent.
+            message_id = await self._create_binary_marker_message(key, target)
         try:
             await AeicImageRepository.enforce_cache_limit()
             await AeicImageRepository.create_session(

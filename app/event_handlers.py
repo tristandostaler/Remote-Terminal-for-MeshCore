@@ -358,6 +358,40 @@ def install_full_raw_data_adapter(meshcore) -> None:
     reader._remoteterm_full_raw_data = True
 
 
+async def _resolve_channel_data_key(channel_index: int) -> str | None:
+    """Map an inbound GRP_DATA frame's radio slot to a channel key.
+
+    Cheap caches first, then the radio. The radio query is the only path that
+    works on a cold cache, and a cold cache is the NORMAL state for a receiver:
+    the reuse maps are populated as a side effect of *sending*, and on TCP (or
+    with ``force_channel_slot_reconfigure``) they are never populated at all --
+    see :meth:`RadioManager.channel_key_for_slot`. Resolving from the caches
+    alone meant a peer's image was dropped unless we happened to have sent on
+    that channel first.
+
+    Safe to await here: the connection spawns each ``handle_rx`` as its own task,
+    so waiting on a command reply does not stall the frame that carries it.
+    ``_resolve_channel_for_pending_message`` also remembers what it learns, so
+    only the first chunk of an image pays for the round trip.
+    """
+    from app.radio_sync import _resolve_channel_for_pending_message
+    from app.services.radio_runtime import radio_runtime
+
+    cached = radio_runtime.channel_key_for_slot(channel_index)
+    if cached is not None:
+        return cached
+
+    try:
+        async with radio_runtime.radio_operation("aeic_channel_data_slot") as mc:
+            key, _name = await _resolve_channel_for_pending_message(mc, channel_index)
+    except Exception:
+        # A busy or disconnected radio is not worth an exception here; the next
+        # chunk retries, and a fully unresolvable slot is logged by the caller.
+        logger.debug("Could not ask the radio which channel is in slot %d", channel_index)
+        return None
+    return key
+
+
 async def on_channel_data(frame: bytes) -> None:
     """Handle one ``RESP_CODE_CHANNEL_DATA_RECV`` (27) frame.
 
@@ -367,18 +401,17 @@ async def on_channel_data(frame: bytes) -> None:
     """
     from app.imaging.aeic.channel_data import parse_channel_data_frame
     from app.imaging.aeic.channel_data_ingest import handle_channel_data
-    from app.services.radio_runtime import radio_runtime
 
     parsed = parse_channel_data_frame(frame)
     if parsed is None:
         return
-    conversation_key = radio_runtime.channel_key_for_slot(parsed.channel_index)
+    conversation_key = await _resolve_channel_data_key(parsed.channel_index)
     if conversation_key is None:
-        # The frame names a radio slot, and only slots this process loaded are
-        # resolvable. Nothing to attach the image to, so say why rather than
-        # dropping it silently.
+        # The frame names a radio slot and nothing -- not the slot caches, not the
+        # radio itself -- could say which channel lives there. Nothing to attach
+        # the image to, so say why rather than dropping it silently.
         logger.info(
-            "Ignoring GRP_DATA on radio slot %d: no channel is loaded there by this process",
+            "Ignoring GRP_DATA on radio slot %d: could not resolve it to a channel",
             parsed.channel_index,
         )
         return

@@ -17,6 +17,13 @@ fi
 # with an environment variable from docker-compose, a plain `docker run -e`, or
 # the Home Assistant add-on options — no rebuild and no custom image.
 #
+# This block only ever INSTALLS; it cannot uninstall. Turning the codec back off
+# is therefore the app's job, not this script's: MESHCORE_ENABLE_AEIC is also
+# read at runtime (app/config.py) and an explicit false switches the codec off
+# even on a server where the dependency and the 958 MiB model are already
+# present. Leaving it to this script alone meant flipping the value back to
+# false changed nothing, because onnxruntime still imported.
+#
 # Deliberately non-fatal. This is an optional feature, and losing the radio
 # because an image codec could not install would be a bad trade, so every failure
 # path below warns and carries on; the app then shows the AI photo option as
