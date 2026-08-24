@@ -279,6 +279,30 @@ class TestSplitReplies:
         # Compression packs more per message -> strictly fewer parts than raw.
         assert 1 <= len(compressed_parts) < len(raw_parts)
 
+    async def test_reply_split_dm_budget_is_a_whole_frame(self, test_db):
+        """A DM has no sender prefix, so it gets the full frame."""
+        from app.imaging.aeic.text_transport import DEFAULT_MESSAGE_BUDGET
+
+        ctx = make_ctx(origin_is_dm=True, origin_sender_key="ab" * 32)
+        assert await ctx._resolve_split_budget() == DEFAULT_MESSAGE_BUDGET
+
+    async def test_reply_split_channel_budget_reserves_the_sender_prefix(self, test_db):
+        """The firmware prepends ``"<name>: "`` to a channel send, outside what
+        we hand it, so those bytes must come out of the split budget or every
+        part overruns the frame and its tail is silently dropped."""
+        from app.imaging.aeic.text_transport import DEFAULT_MESSAGE_BUDGET
+
+        ctx = make_ctx(origin_is_dm=False, origin_channel_key="AB" * 16)
+        budget = await ctx._resolve_split_budget()
+        assert budget < DEFAULT_MESSAGE_BUDGET
+
+        text = " ".join(f"word{i}" for i in range(120))
+        await ctx.reply_split(text)
+        parts = [s["text"] for s in ctx.captured_sends]
+        assert len(parts) > 1
+        for part in parts:
+            assert len(part.encode("utf-8")) <= budget
+
 
 class TestLibraryIntegrity:
     def test_every_library_bot_loads(self):

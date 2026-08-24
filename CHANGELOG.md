@@ -598,6 +598,7 @@
 * Bugfix: Add missing radio operation locks in a few spots
 * Bugfix: Fix dedupe for frontend raw packet delivery (mesh visualizer much more active now!)
 * Bugfix: Less aggressive dedupe for advert packets (we don't care about the payload, we care about the path, duh)
+* Bugfix: `ctx.reply_split` sized channel parts against a flat byte budget that ignored the `"<name>: "` prefix the firmware prepends, so every part overran the frame and had its tail silently dropped — an over-long MCMP part decodes short rather than erroring. It now uses the same per-target budget as image sends and the compose counter (a full frame on DMs, minus the radio name and separator on channels)
 * Misc: Visualizer layout refinement & option labels
 
 ## [1.10.0] - 2026-02-16

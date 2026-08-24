@@ -364,7 +364,7 @@ class TestLongReplySplitting:
 
     async def test_help_splits_a_long_command_list(self, test_db):
         """A command list past one frame goes out numbered, never cut with '…'."""
-        from app.bots.api import DEFAULT_SPLIT_BYTES
+        from app.imaging.aeic.text_transport import DEFAULT_MESSAGE_BUDGET
 
         entry = get_library_entry("help")
         assert entry is not None
@@ -395,7 +395,7 @@ class TestLongReplySplitting:
         assert [p.split("/")[0] for p in parts] == [f"({i}" for i in range(1, len(parts) + 1)]
         assert "…" not in " ".join(parts), "list must not be truncated any more"
         for part in parts:
-            assert len(part.encode("utf-8")) <= DEFAULT_SPLIT_BYTES
+            assert len(part.encode("utf-8")) <= DEFAULT_MESSAGE_BUDGET
         # Every keyword survives.
         joined = " ".join(p.split(") ", 1)[1] for p in parts)
         for i in range(40):
@@ -433,12 +433,15 @@ class TestMailbox:
         return run
 
     async def test_help_goes_out_as_numbered_parts(self, test_db, tmp_path):
+        from app.imaging.aeic.text_transport import DEFAULT_MESSAGE_BUDGET
+
         run = await self._mailbox(tmp_path)
         texts = await run("mbx help")
         assert len(texts) > 1, "the full guide does not fit one frame"
         assert [t.split("/")[0] for t in texts] == [f"({i}" for i in range(1, len(texts) + 1)]
         for text in texts:
-            assert len(text.encode("utf-8")) <= 155
+            # A DM carries a full frame -- no channel sender prefix to reserve.
+            assert len(text.encode("utf-8")) <= DEFAULT_MESSAGE_BUDGET
 
     async def test_bot_owns_no_message_sizing(self, test_db, tmp_path):
         """Sizing is ctx.reply_split's alone — no budget knob, no size math."""

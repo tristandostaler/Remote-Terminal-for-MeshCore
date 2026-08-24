@@ -31,9 +31,11 @@ logger = logging.getLogger(__name__)
 # Sentinel: distinguishes "region not passed" from an explicit None/"" (unscoped).
 _UNSET = object()
 
-# Default per-message byte budget for ctx.split_text / ctx.reply_split — a safe
-# MeshCore RF payload size once sender-name framing is added (the same default
-# the mailbox bot has always used).
+# Fallback per-message byte budget for the synchronous ctx.split_text, which
+# cannot ask the radio how much room the channel sender prefix takes. It is the
+# pessimistic case: a DM carries 156 bytes and a channel carries 156 minus the
+# radio name and its ": " separator, so 155 is only safe for a DM. ctx.reply_split
+# resolves the real budget instead -- see BotContext._resolve_split_budget.
 DEFAULT_SPLIT_BYTES = 155
 
 # Worst-case numbering prefix reserved when splitting compressed replies. The
@@ -496,25 +498,54 @@ class BotContext:
         return [f"({i}/{total}) {p}" for i, p in enumerate(parts, 1)]
 
     async def reply_split(
-        self, text: str, *, max_bytes: int = DEFAULT_SPLIT_BYTES, region: Any = _UNSET
+        self, text: str, *, max_bytes: Any = _UNSET, region: Any = _UNSET
     ) -> None:
         """Reply like :meth:`reply`, splitting long text into ``(i/n)`` parts.
 
-        Text that fits in ``max_bytes`` is sent as-is in one message; longer
-        text goes out as numbered parts, in order, each within the budget.
+        Text that fits the budget is sent as-is in one message; longer text goes
+        out as numbered parts, in order, each within the budget.
+
+        ``max_bytes`` defaults to what the reply target can actually carry: 156
+        bytes for a DM, and 156 minus the radio's own ``"<name>: "`` framing for
+        a channel, since the firmware prepends that outside what we hand it.
+        Pass an explicit value to override.
 
         When the reply target has MCMP compression enabled, parts are sized by
         their *compressed* wire length, so more text fits per message (fewer,
         larger parts) — otherwise by the raw byte length.
         """
+        budget = await self._resolve_split_budget() if max_bytes is _UNSET else int(max_bytes)
         version = await self._origin_mcmp_version()
         parts = (
-            split_text_compressed(text, max_bytes, version)
+            split_text_compressed(text, budget, version)
             if version is not None
-            else self.split_text(text, max_bytes)
+            else self.split_text(text, budget)
         )
         for part in parts:
             await self.reply(part, region=region)
+
+    async def _resolve_split_budget(self) -> int:
+        """Bytes one message to the reply target can carry.
+
+        A channel message carries ``"<name>: "`` inside the encrypted payload --
+        the firmware prepends it to whatever we send -- so the radio's own name
+        comes out of the budget. A DM does not. This is the same budget the
+        image transport and the frontend's compose counter use; sizing replies
+        against a flat number instead let channel parts overrun the frame, and
+        the tail was silently dropped (an MCMP part just decodes short).
+        """
+        from app.imaging.aeic.transport import resolve_message_budget
+
+        radio_manager = None
+        if not self.is_test:
+            from app.services.radio_runtime import radio_runtime
+
+            radio_manager = radio_runtime
+        # resolve_message_budget swallows its own radio errors and falls back to
+        # a pessimistic name length, so it always returns a usable number.
+        return await resolve_message_budget(
+            "PRIV" if self._origin_is_dm else "CHAN", radio_manager=radio_manager
+        )
 
     async def _origin_mcmp_version(self) -> int | None:
         """MCMP version for the reply target if compression is enabled, else None."""
