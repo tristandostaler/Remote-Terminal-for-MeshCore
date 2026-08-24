@@ -69,9 +69,9 @@ DEFAULT_PREFIX = "mbx"
 BOT_META = {
     "key": "mailbox",
     "name": "mailbox",
-    "category": "Custom",
+    "category": "Communication",
     "description": "Store-and-forward mailbox for offline nodes (DM 'mbx help')",
-    "version": "5.1.0",
+    "version": "5.1.1",
     "respond_to_dms": True,
     "settings_schema": [
         {
