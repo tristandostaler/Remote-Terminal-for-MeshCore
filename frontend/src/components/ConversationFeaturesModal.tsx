@@ -139,8 +139,9 @@ function AeicModelPanel({
   if (!status.runtime_available) {
     return (
       <p className="mt-2 text-xs leading-snug text-muted-foreground">
-        This server was installed without the optional <code>onnxruntime</code> dependency, so it
-        cannot run the AI codec. Reinstall with the <code>aeic</code> extra to enable it.
+        The AI codec is switched off on this server. Set <code>MESHCORE_ENABLE_AEIC=true</code> and
+        restart — it installs ~120 MB of dependencies on that first start, no rebuild needed.
+        Requires a 64-bit host (amd64 or aarch64).
       </p>
     );
   }

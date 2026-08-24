@@ -157,28 +157,46 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
   // than at send time: the preview has to show what will actually be encoded.
   // IE4 wants a downscaled greyscale AVIF/JPEG; AEIC wants the whole frame
   // stretched into a 512px RGB square.
-  const prepareImage = useCallback(
-    async (file: File, maxDimension: 64 | 128 | 256, codec: ImageCodecId) => {
-      setImagePreparing(true);
+  //
+  // Driven by an effect over (file, size, codec) rather than called from each
+  // control's onChange. When it was imperative, changing the codec on an
+  // already-attached photo left the old preparation in place and the send went
+  // out with the codec the user had just switched AWAY from — while the panel
+  // header claimed the new one.
+  useEffect(() => {
+    if (!imageFile) {
       setImagePreview(null);
       setAeicPreview(null);
+      setImagePreparing(false);
+      return;
+    }
+    let cancelled = false;
+    setImagePreparing(true);
+    setImagePreview(null);
+    setAeicPreview(null);
+    void (async () => {
       try {
-        if (codec === 'aeic') {
-          setAeicPreview(await prepareAeicImage(file));
+        if (imageCodec === 'aeic') {
+          const prepared = await prepareAeicImage(imageFile);
+          if (!cancelled) setAeicPreview(prepared);
         } else {
-          setImagePreview(await encodeMeshImage(file, maxDimension));
+          const encoded = await encodeMeshImage(imageFile, imageSize);
+          if (!cancelled) setImagePreview(encoded);
         }
       } catch (error) {
+        if (cancelled) return;
         setImageFile(null);
         toast.error('Image unavailable', {
           description: error instanceof Error ? error.message : String(error),
         });
       } finally {
-        setImagePreparing(false);
+        if (!cancelled) setImagePreparing(false);
       }
-    },
-    []
-  );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [imageFile, imageSize, imageCodec]);
 
   const clearImage = useCallback(() => {
     setImageFile(null);
@@ -191,14 +209,16 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
     if (!voiceConversation || imageSending) return;
     setImageSending(true);
     try {
-      if (aeicPreview) {
+      // Branch on the SELECTED codec, not on whichever preview happens to be
+      // populated: the two must agree, and the selection is the authority.
+      if (imageCodec === 'aeic') {
+        if (!aeicPreview) return;
         // The server does the ~0.3 s encode and then transmits one or two
         // aei1: messages; this POST is just the 768 KB of prepared pixels.
         await api.sendAeicImage(voiceConversation.type, voiceConversation.key, aeicPreview);
-      } else if (imagePreview) {
-        await api.sendImage(voiceConversation.type, voiceConversation.key, imagePreview);
       } else {
-        return;
+        if (!imagePreview) return;
+        await api.sendImage(voiceConversation.type, voiceConversation.key, imagePreview);
       }
       clearImage();
     } catch (error) {
@@ -208,7 +228,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
     } finally {
       setImageSending(false);
     }
-  }, [aeicPreview, clearImage, imagePreview, imageSending, voiceConversation]);
+  }, [aeicPreview, clearImage, imageCodec, imagePreview, imageSending, voiceConversation]);
 
   useEffect(() => {
     if (!recording) return;
@@ -570,9 +590,9 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
                     disabled={imagePreparing || imageSending}
                     className="rounded border border-input bg-background px-1.5 py-1"
                     onChange={(event) => {
-                      const size = Number(event.target.value) as 64 | 128 | 256;
-                      setImageSize(size);
-                      if (imageFile) void prepareImage(imageFile, size, imageCodec);
+                      // Re-preparation is the effect's job; setting the size is
+                      // all this has to do.
+                      setImageSize(Number(event.target.value) as 64 | 128 | 256);
                     }}
                   >
                     <option value={64}>64 px</option>
@@ -732,7 +752,6 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
                     const file = event.target.files?.[0];
                     if (!file) return;
                     setImageFile(file);
-                    void prepareImage(file, imageSize, imageCodec);
                   }}
                 />
                 <Button

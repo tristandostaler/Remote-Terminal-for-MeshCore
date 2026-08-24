@@ -307,7 +307,9 @@ class BotContext:
         locale: str = "en",
         is_test: bool = False,
         log_fn: Callable[[str, str], None] | None = None,
-        send_fn: Callable[..., Awaitable[None]] | None = None,
+        # Returns the stored Message (or None). Image sends need it to anchor
+        # their AEIC session; text sends ignore it.
+        send_fn: Callable[..., Awaitable[Any]] | None = None,
         translator: Any = None,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
@@ -360,9 +362,15 @@ class BotContext:
         channel_key: str | None,
         text: str,
         flood_scope_override: str | None,
-    ) -> None:
+    ) -> Any:
+        """Dispatch one send. Returns the stored ``Message``, or None.
+
+        Returning it matters only for image sends, which need the message row to
+        anchor their AEIC session to; ``reply``/``send`` ignore it. None in test
+        mode, where nothing is actually stored.
+        """
         if not text or not text.strip():
-            return
+            return None
         if self.is_test or self._send_fn is None:
             self.captured_sends.append(
                 {
@@ -374,8 +382,8 @@ class BotContext:
                 }
             )
             self.replies_sent += 1
-            return
-        await self._send_fn(
+            return None
+        sent = await self._send_fn(
             is_dm=is_dm,
             destination=destination,
             channel_key=channel_key,
@@ -383,6 +391,7 @@ class BotContext:
             flood_scope_override=flood_scope_override,
         )
         self.replies_sent += 1
+        return sent
 
     async def reply(self, text: str, *, region: Any = _UNSET) -> None:
         """Reply where the triggering message came from (DM sender or channel).
@@ -568,15 +577,17 @@ class BotContext:
 
         async def emit_text(chunk: str):
             # Straight through the bot's own send path, so image chunks obey the
-            # same TX spacing, moderation and test-capture rules as any reply.
-            await self._dispatch_send(
+            # same TX spacing and test-capture rules as any reply. The returned
+            # Message is what anchors the local AEIC session -- without it the
+            # operator's own conversation shows raw aei1: text while the
+            # recipient sees the photo.
+            return await self._dispatch_send(
                 is_dm=is_dm,
                 destination=destination,
                 channel_key=channel_key,
                 text=chunk,
                 flood_scope_override=flood_scope_override,
             )
-            return None
 
         target = AeicTarget(
             conversation_type=conversation_type,

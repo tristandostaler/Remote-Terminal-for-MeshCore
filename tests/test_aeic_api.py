@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from app.compression import decode_base91
 from app.imaging.aeic.ingest import aeic_body, note_inbound_chunk
+from app.imaging.aeic.service import aeic_service
 from app.imaging.aeic.text_transport import AeicStreamMetadata, aspect_code_for, encode_chunks
 from app.models import ImageCodecSelectionRequest
 from app.repository import (
@@ -26,6 +27,10 @@ from app.repository import (
     ChannelRepository,
     ContactRepository,
     MessageRepository,
+)
+from app.repository.aeic_image import (
+    OUTGOING_PREFIX,
+    outgoing_session_key,
 )
 from app.repository.aeic_image import session_key as make_session_key
 from app.routers.settings import set_image_codec
@@ -426,3 +431,143 @@ class TestSessionStorage:
         assert session["decode_error"] is None
         assert session["state"] == "decoded"
         assert bytes(session["png"]).startswith(b"\x89PNG")
+
+
+class TestOutgoingSessionKeys:
+    """Keys for images WE sent must not reuse the 2-base36 wire session id.
+
+    That id has 1296 values because all it has to be is unique per sender inside
+    one receiver's reassembly window. As a local storage key it collided at
+    roughly 14% for twenty photos a day, and the collision was silent: the
+    second send passed ``create_session``'s metadata check, overwrote the first's
+    bitstream, and ``COALESCE(message_id, ?)`` kept the first message on the row
+    -- so the older bubble rendered the newer picture.
+    """
+
+    def test_keys_are_distinct_per_message(self):
+        assert outgoing_session_key(11) != outgoing_session_key(12)
+
+    def test_the_key_is_stable_for_one_message(self):
+        assert outgoing_session_key(11) == outgoing_session_key(11)
+
+    def test_a_send_with_no_message_row_still_gets_a_unique_key(self):
+        """A bot send dropped before a row existed must still be storable."""
+        assert outgoing_session_key(None) != outgoing_session_key(None)
+
+    def test_outgoing_keys_cannot_collide_with_an_inbound_one(self):
+        """The ``self`` prefix is not hex, so no peer key can produce it."""
+        assert not set(OUTGOING_PREFIX) <= set("0123456789abcdef")
+
+    @pytest.mark.asyncio
+    async def test_two_sends_do_not_overwrite_each_other(self, test_db):
+        """The regression itself, at the storage layer."""
+        first = await _store_message("aei1000011first")
+        second = await _store_message("aei1000011second")
+        common = {
+            "direction": "outgoing",
+            "conversation_type": "PRIV",
+            "conversation_key": PEER,
+            "peer_public_key": PEER,
+            "square_size": 512,
+            "aspect_code": 2,
+            "rate_code": 0,
+            "total_chunks": 1,
+            "state": "complete",
+        }
+        for message_id, payload in ((first, b"FIRST"), (second, b"SECOND")):
+            key = outgoing_session_key(message_id)
+            await AeicImageRepository.create_session(key=key, message_id=message_id, **common)
+            await AeicImageRepository.store_bitstream(key, payload)
+
+        one = await AeicImageRepository.get_by_message(first)
+        two = await AeicImageRepository.get_by_message(second)
+        assert one is not None and two is not None
+        assert bytes(one["bitstream"]) == b"FIRST"
+        assert bytes(two["bitstream"]) == b"SECOND"
+
+
+class TestUndecodableSessionsExplainThemselves:
+    """A session that CANNOT be decoded must say so on the row.
+
+    Without it the row reads ``decoded=false, decode_error=null``, which the UI
+    cannot distinguish from "the 5 s synthesis pass is still running" -- so a
+    server without onnxruntime left every received image polling once a second
+    for a full minute before giving up.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_reason_is_stored_when_the_codec_is_unavailable(self, test_db, monkeypatch):
+        monkeypatch.setattr(
+            aeic_service, "unavailable_reason", lambda *, for_decode: "no onnxruntime here"
+        )
+        message_id = await _store_message("aei1")
+        chunks = _chunks(b"x" * 40, session_id=40)
+        assert len(chunks) == 1
+        await note_inbound_chunk(
+            text=chunks[0],
+            message_id=message_id,
+            conversation_type="PRIV",
+            conversation_key=PEER,
+            peer_public_key=PEER,
+        )
+        session = await AeicImageRepository.get(make_session_key(PEER, 40))
+        assert session is not None
+        # The bitstream is still kept: it can be decoded later, from this row.
+        assert session["bitstream"] is not None
+        assert session["decode_error"] == "no onnxruntime here"
+
+
+class TestDecodeReleasesSessionsOnFailure:
+    """The synthesis session must be released even when the decode raises.
+
+    This is the memory contract, not tidy-up. ``ingest.decode_session`` swallows
+    a decode failure, so anything still held stays held for the life of the
+    process -- and the next decode then allocates the 0.35 GiB entropy graph on
+    top of the 2.16 GiB synthesis session, which is exactly the 2.44 GiB the
+    contract forbids.
+    """
+
+    class _Backend:
+        def __init__(self, fail: bool) -> None:
+            self.fail = fail
+            self.released_entropy = 0
+            self.released_decoder = 0
+
+        def release_entropy_sessions(self) -> None:
+            self.released_entropy += 1
+
+        def release_decoder_session(self) -> None:
+            self.released_decoder += 1
+
+        def decode_latent_to_rgb(self, y_hat):
+            if self.fail:
+                raise RuntimeError("synthesis blew up")
+            return b"\x00" * (512 * 512 * 3)
+
+    class _Codec:
+        def decode_to_latent(self, bitstream: bytes):
+            return object()
+
+    def _wire(self, monkeypatch, *, fail: bool):
+        backend = self._Backend(fail)
+        monkeypatch.setattr(aeic_service, "_require_ready", lambda **_: None)
+        monkeypatch.setattr(aeic_service, "_get_backend", lambda: backend)
+        monkeypatch.setattr(aeic_service, "_codec", lambda **_: self._Codec())
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_a_failed_synthesis_still_releases_the_decoder(self, monkeypatch):
+        backend = self._wire(monkeypatch, fail=True)
+        with pytest.raises(RuntimeError, match="synthesis blew up"):
+            await aeic_service.decode_to_png(b"whatever")
+        assert backend.released_decoder == 1
+        assert backend.released_entropy >= 1
+
+    @pytest.mark.asyncio
+    async def test_a_successful_decode_releases_both_halves(self, monkeypatch):
+        backend = self._wire(monkeypatch, fail=False)
+        png = await aeic_service.decode_to_png(b"whatever")
+        assert png.startswith(b"\x89PNG")
+        assert backend.released_decoder == 1
+        # Released before synthesis is created, and again in the finally.
+        assert backend.released_entropy == 2

@@ -14,23 +14,54 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from uuid import uuid4
 
 from app.database import db
 
 SESSION_TTL_SECONDS = 86_400
 MAX_CACHED_SESSIONS = 500
 
+OUTGOING_PREFIX = "self"
+"""Key prefix for images WE sent. Not a hex prefix, so it cannot collide with
+the ``peer_key[:12]`` prefix an inbound session gets."""
+
 
 def session_key(peer_key: str | None, session_id: int) -> str:
-    """Compose the primary key.
+    """Compose the primary key for an INBOUND session.
 
     The wire session id is only 2 base36 characters, so it is unique per
     *sender*, not globally. Keying on the sender prefix as well is what stops two
     peers who happen to pick the same id inside one TTL from merging their images
     into one corrupt picture -- the failure mode no lower layer can see.
+
+    Outbound sessions must NOT use this: see :func:`outgoing_session_key`.
     """
     prefix = (peer_key or "unknown")[:12].lower()
     return f"{prefix}:{session_id:04d}"
+
+
+def outgoing_session_key(message_id: int | None = None) -> str:
+    """The primary key for an image we sent ourselves.
+
+    Deliberately NOT derived from the wire session id. That id is two base36
+    characters -- 1296 values -- because all it has to be is unique per sender
+    inside one receiver's reassembly window. Reusing it as a local storage key
+    put every outgoing image into a 1296-slot namespace with a 24 h TTL, which
+    collides at roughly 14% for twenty photos a day: two sends of the same shape
+    hit :meth:`AeicImageRepository.create_session`'s existing-row branch, pass
+    its metadata check, and the second silently overwrote the first's bitstream
+    while ``COALESCE(message_id, ?)`` kept the first message on the row. The
+    older bubble then rendered the newer picture and the newer message had no
+    session at all.
+
+    Keyed on the sent message's id when there is one, so the key is stable and
+    reproducible; otherwise a random id, because a send that produced no message
+    row (a bot whose send was dropped by moderation, for instance) still has to
+    be storable without stepping on anything.
+    """
+    if message_id is not None:
+        return f"{OUTGOING_PREFIX}:m{message_id}"
+    return f"{OUTGOING_PREFIX}:{uuid4().hex[:16]}"
 
 
 class AeicImageRepository:

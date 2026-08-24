@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from app.config import settings
@@ -220,11 +221,22 @@ class AeicService:
             from app.imaging.aeic.png import encode_png
 
             backend = self._get_backend()
-            y_hat = self._codec(for_decode=True).decode_to_latent(bitstream)
-            # Mandatory, not tidy-up: see the memory contract in onnx_backend.
-            backend.release_entropy_sessions()
-            rgb = backend.decode_latent_to_rgb(y_hat)
-            backend.release_decoder_session()
+            try:
+                y_hat = self._codec(for_decode=True).decode_to_latent(bitstream)
+                # Mandatory, not tidy-up: see the memory contract in onnx_backend.
+                backend.release_entropy_sessions()
+                rgb = backend.decode_latent_to_rgb(y_hat)
+            finally:
+                # Both releases repeat in the finally because a raise here is
+                # SWALLOWED by the caller (ingest.decode_session logs and moves
+                # on), so anything still held stays held for the life of the
+                # process -- and the next decode would then allocate the entropy
+                # graph on top of the 2.16 GiB synthesis session, which is
+                # exactly the 2.44 GiB the memory contract exists to prevent.
+                # Both calls are idempotent, so repeating the success-path
+                # release above costs nothing.
+                backend.release_entropy_sessions()
+                backend.release_decoder_session()
             return encode_png(rgb, SQUARE_SIZE, SQUARE_SIZE)
 
         async with self._inference_lock:
@@ -267,8 +279,8 @@ class AeicService:
         )
         chosen = transport or select_transport()
         result = await chosen.send(bitstream, metadata, target, session_id=session_id)
-        await self._record_outgoing(result, metadata, target, bitstream)
-        return result, bitstream, metadata
+        storage_key = await self._record_outgoing(result, metadata, target, bitstream)
+        return replace(result, storage_key=storage_key), bitstream, metadata
 
     async def _record_outgoing(
         self,
@@ -276,22 +288,30 @@ class AeicService:
         metadata: AeicStreamMetadata,
         target: AeicTarget,
         bitstream: bytes,
-    ) -> None:
+    ) -> str | None:
         """Store the sent image as a session so the UI renders it as a picture.
 
         Without this the sender's own outgoing message shows as raw ``aei1:``
         text in their conversation while the recipient sees the photo. Done here
         rather than in each caller so the route and the bot path cannot drift.
+
+        Returns the row key, or None if recording failed.
         """
         from app.repository import AeicImageRepository
-        from app.repository.aeic_image import session_key as make_session_key
+        from app.repository.aeic_image import outgoing_session_key
 
-        key = make_session_key("self", result.session_id)
+        # The message id has to be resolved BEFORE the key, because the key is
+        # derived from it -- see outgoing_session_key for why it is not the wire
+        # session id. Written straight into the row rather than through a later
+        # set_message_id, so there is no COALESCE that could pin a stale id.
+        first = next((m for m in result.emitted if m is not None and getattr(m, "id", None)), None)
+        message_id = getattr(first, "id", None) if first is not None else None
+        key = outgoing_session_key(message_id)
         try:
             await AeicImageRepository.enforce_cache_limit()
             await AeicImageRepository.create_session(
                 key=key,
-                message_id=None,
+                message_id=message_id,
                 direction="outgoing",
                 conversation_type=target.conversation_type,
                 conversation_key=target.conversation_key,
@@ -305,15 +325,12 @@ class AeicService:
                 state="complete",
             )
             await AeicImageRepository.store_bitstream(key, bitstream)
-            first = next(
-                (m for m in result.emitted if m is not None and getattr(m, "id", None)), None
-            )
-            if first is not None:
-                await AeicImageRepository.set_message_id(key, first.id)
         except Exception:
             # The image is already on air; failing to record it locally must not
             # turn a delivered photo into a raised error for the caller.
             logger.exception("Could not record the outgoing AEIC session %s", key)
+            return None
+        return key
 
     async def frame_for_send(
         self,

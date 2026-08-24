@@ -41,7 +41,6 @@ from app.repository import (
     ContactRepository,
     MessageRepository,
 )
-from app.repository.aeic_image import session_key as make_session_key
 from app.services.message_send import (
     send_channel_message_to_channel,
     send_direct_message_to_contact,
@@ -182,9 +181,11 @@ async def send_aeic_image(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     # The session row is written by aeic_service.send_image, so both this route
-    # and the bot send path record an outgoing image identically.
+    # and the bot send path record an outgoing image identically. Its key comes
+    # back on the result rather than being recomputed here: it is derived from
+    # the sent message's id, not from the 1296-value wire session id.
     return {
-        "session_key": make_session_key("self", result.session_id),
+        "session_key": result.storage_key,
         "transport": result.transport,
         "bitstream_bytes": result.payload_bytes,
         "chunk_count": result.chunk_count,

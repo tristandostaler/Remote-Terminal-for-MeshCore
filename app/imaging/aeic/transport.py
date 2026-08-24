@@ -95,6 +95,15 @@ class AeicSendResult:
     """Whatever ``emit_text`` returned per chunk. Empty for a binary transport,
     which creates no message rows."""
 
+    storage_key: str | None = None
+    """Row key of the local session recording this send.
+
+    Filled in by :meth:`app.imaging.aeic.service.AeicService.send_image` after it
+    records the send; transports never set it, because how a send is stored
+    locally is not a transport's concern. ``None`` when the recording failed --
+    the image is on air either way.
+    """
+
 
 class AeicTransport(ABC):
     """One way of putting an AEIC bitstream on air."""

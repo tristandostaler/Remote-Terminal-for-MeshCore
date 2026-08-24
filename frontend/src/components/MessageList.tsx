@@ -161,41 +161,60 @@ function AeicImageMessage({ message, chunk }: { message: Message; chunk: AeicChu
   const [detail, setDetail] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
 
-  const poll = useCallback(async () => {
-    setState('loading');
-    setDetail(null);
-    try {
-      let current = await api.getAeicSessionForMessage(message.id);
-      setSession(current);
-      // The synthesis pass is seconds, not milliseconds, and it is queued behind
-      // any other decode on the server.
-      for (let attempt = 0; !current.decoded && attempt < 60; attempt += 1) {
-        if (current.decode_error) break;
-        await new Promise((resolve) => window.setTimeout(resolve, 1000));
-        current = await api.getAeicSession(current.session_key);
+  // Every poll carries a cancellation token owned by the effect that started
+  // it. The list is virtualized, so these bubbles unmount whenever they scroll
+  // out of view — without a token the 60-iteration loop below kept running,
+  // firing a request a second per off-screen image and setting state on a dead
+  // component, and scrolling back in started a second loop on top.
+  const tokenRef = useRef<{ cancelled: boolean }>({ cancelled: false });
+
+  const poll = useCallback(
+    async (token: { cancelled: boolean }) => {
+      setState('loading');
+      setDetail(null);
+      try {
+        let current = await api.getAeicSessionForMessage(message.id);
+        if (token.cancelled) return;
         setSession(current);
+        // The synthesis pass is seconds, not milliseconds, and it is queued behind
+        // any other decode on the server.
+        for (let attempt = 0; !current.decoded && attempt < 60; attempt += 1) {
+          if (current.decode_error) break;
+          await new Promise((resolve) => window.setTimeout(resolve, 1000));
+          if (token.cancelled) return;
+          current = await api.getAeicSession(current.session_key);
+          if (token.cancelled) return;
+          setSession(current);
+        }
+        if (current.decoded) {
+          setState('decoded');
+          return;
+        }
+        setState('unavailable');
+        setDetail(
+          current.decode_error ??
+            (current.received_chunks < current.total_chunks
+              ? `Waiting for part ${current.received_chunks + 1} of ${current.total_chunks}`
+              : 'Not decoded yet')
+        );
+      } catch (error) {
+        if (token.cancelled) return;
+        setState('unavailable');
+        setDetail(error instanceof Error ? error.message : String(error));
       }
-      if (current.decoded) {
-        setState('decoded');
-        return;
-      }
-      setState('unavailable');
-      setDetail(
-        current.decode_error ??
-          (current.received_chunks < current.total_chunks
-            ? `Waiting for part ${current.received_chunks + 1} of ${current.total_chunks}`
-            : 'Not decoded yet')
-      );
-    } catch (error) {
-      setState('unavailable');
-      setDetail(error instanceof Error ? error.message : String(error));
-    }
-  }, [message.id]);
+    },
+    [message.id]
+  );
 
   // An inbound image decodes on its own as soon as it is reassembled, so look
   // once on mount rather than making the reader tap to find out.
   useEffect(() => {
-    void poll();
+    const token = { cancelled: false };
+    tokenRef.current = token;
+    void poll(token);
+    return () => {
+      token.cancelled = true;
+    };
   }, [poll]);
 
   const retryDecode = useCallback(async () => {
@@ -239,7 +258,9 @@ function AeicImageMessage({ message, chunk }: { message: Message; chunk: AeicChu
       ) : (
         <button
           type="button"
-          onClick={() => void (state === 'unavailable' && session ? retryDecode() : poll())}
+          onClick={() =>
+            void (state === 'unavailable' && session ? retryDecode() : poll(tokenRef.current))
+          }
           disabled={state === 'loading'}
           aria-label="Reconstruct image"
           className="flex aspect-square w-48 flex-col items-center justify-center gap-2 rounded-md bg-muted/60 px-2 text-center text-muted-foreground"

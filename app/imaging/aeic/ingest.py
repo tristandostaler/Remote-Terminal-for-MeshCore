@@ -132,20 +132,30 @@ async def note_inbound_chunk(
             total,
             key,
         )
-        _schedule_decode(key, bitstream, broadcast_fn)
+        await _schedule_decode(key, bitstream, broadcast_fn)
     return True
 
 
-def _schedule_decode(key: str, bitstream: bytes, broadcast_fn) -> None:
+async def _schedule_decode(key: str, bitstream: bytes, broadcast_fn) -> None:
     """Decode in the background if the model is ready; otherwise leave it stored.
 
     A stored bitstream is not a failure state: the picture is 150 bytes that
     already crossed the mesh, and it will render as soon as the bundle is
     installed. That is why :func:`decode_session` is a separate, retryable step.
+
+    When it CANNOT be decoded, the reason is written onto the session rather than
+    only logged. Otherwise the row reads ``decoded=false, decode_error=null``,
+    which the UI cannot tell apart from "the 5 s synthesis pass is still
+    running" -- so every received image sat there polling once a second for a
+    full minute before giving up. ``store_png`` clears the field, so recording
+    it costs nothing once the model does arrive.
     """
     reason = aeic_service.unavailable_reason(for_decode=True)
     if reason is not None:
         logger.info("Holding AEIC image %s undecoded: %s", key, reason)
+        await AeicImageRepository.store_decode_error(key, reason)
+        if broadcast_fn is not None:
+            broadcast_fn("aeic_image_session", {"session_key": key, "error": reason})
         return
     task = asyncio.create_task(decode_session(key, bitstream, broadcast_fn))
     _decode_tasks.add(task)

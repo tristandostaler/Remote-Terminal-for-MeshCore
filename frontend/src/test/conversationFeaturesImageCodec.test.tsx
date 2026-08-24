@@ -151,13 +151,18 @@ describe('photo codec selector', () => {
       await waitFor(() => expect(api.getAeicStatus).toHaveBeenCalledTimes(2));
     });
 
-    it('explains a missing onnxruntime instead of offering a download', async () => {
+    it('names the env var to set when the codec is switched off', async () => {
+      // Not "reinstall with the aeic extra": the runtime is enabled with an
+      // environment variable and a restart, and run.sh installs the
+      // dependencies on that start. Telling the operator to rebuild sends them
+      // down a path they do not need.
       vi.mocked(api.getAeicStatus).mockResolvedValue(
         status({ runtime_available: false, supports_encode: false, supports_decode: false })
       );
       renderModal();
-      expect(await screen.findByText(/without the optional/)).toBeVisible();
-      expect(screen.getByText('onnxruntime')).toBeVisible();
+      expect(await screen.findByText('MESHCORE_ENABLE_AEIC=true')).toBeVisible();
+      expect(screen.getByText(/switched off on this server/)).toBeVisible();
+      expect(screen.getByText(/no rebuild needed/)).toBeVisible();
       expect(screen.queryByRole('button', { name: /Download model/ })).not.toBeInTheDocument();
     });
 

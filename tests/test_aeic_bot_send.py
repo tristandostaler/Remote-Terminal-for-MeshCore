@@ -210,3 +210,141 @@ class TestRealSend:
             assert capture["is_dm"] is False
             # Budget is reduced for the "sender: " prefix the firmware adds.
             assert len(capture["text"].encode()) < DEFAULT_MESSAGE_BUDGET
+
+
+class TestTheSentImageIsRecordedLocally:
+    """A bot's own photo has to render as a picture in the operator's view too.
+
+    The local AEIC session is anchored to the sent message's id, so the send path
+    has to hand that id back. When ``_dispatch_send`` returned None
+    unconditionally the session was written with ``message_id=NULL``, nothing
+    could look it up by message, and the operator's own conversation showed raw
+    ``aei1:`` basE91 while the recipient saw the photo.
+    """
+
+    class _Sent:
+        """Stands in for the stored ``Message`` the real send path returns."""
+
+        def __init__(self, message_id: int) -> None:
+            self.id = message_id
+
+    @pytest.mark.asyncio
+    async def test_dispatch_send_hands_back_the_stored_message(self):
+        sent: list[str] = []
+        counter = {"next": 100}
+
+        async def send_fn(**kwargs):
+            sent.append(kwargs["text"])
+            counter["next"] += 1
+            return self._Sent(counter["next"])
+
+        ctx = BotContext(
+            bot_id="b",
+            bot_name="b",
+            settings={},
+            state={},
+            origin_is_dm=True,
+            origin_sender_key=PEER,
+            is_test=False,
+            send_fn=send_fn,
+        )
+        result = await ctx._dispatch_send(
+            is_dm=True,
+            destination=PEER,
+            channel_key=None,
+            text="aei1000011abc",
+            flood_scope_override=None,
+        )
+        assert result is not None and result.id == 101
+        assert sent == ["aei1000011abc"]
+
+    @pytest.mark.asyncio
+    async def test_the_session_row_carries_the_message_id(self, test_db, monkeypatch):
+        """End to end through send_image, with a stub transport and a fake send."""
+        from app.imaging.aeic.service import aeic_service
+        from app.repository import AeicImageRepository, MessageRepository
+
+        # message_id is a foreign key into messages, so the row has to exist.
+        message_id = await MessageRepository.create(
+            msg_type="PRIV",
+            text="aei1000011payload",
+            received_at=1_700_000_000,
+            conversation_key=PEER,
+            sender_key=PEER,
+        )
+        assert message_id is not None
+
+        class _Target:
+            conversation_type = "PRIV"
+            conversation_key = PEER
+
+        class _Transport(AeicTransport):
+            name = "test"
+
+            @property
+            def available(self) -> bool:
+                return True
+
+            async def send(self, bitstream, metadata, target, *, session_id=None):
+                message = TestTheSentImageIsRecordedLocally._Sent(message_id)
+                return AeicSendResult(
+                    transport=self.name,
+                    session_id=session_id or 1,
+                    chunk_count=1,
+                    payload_bytes=len(bitstream),
+                    emitted=[message],
+                )
+
+        async def fake_encode(rgb):
+            return b"bitstream-bytes"
+
+        # monkeypatch rather than assigning on the singleton: these tests share
+        # one process-wide aeic_service and can run in any order.
+        monkeypatch.setattr(aeic_service, "encode_rgb", fake_encode)
+        result, _bits, _meta = await aeic_service.send_image(
+            bytes(RGB_BYTES_EXPECTED),
+            _Target(),  # type: ignore[arg-type]
+            transport=_Transport(),
+        )
+
+        assert result.storage_key is not None
+        session = await AeicImageRepository.get_by_message(message_id)
+        assert session is not None, "the sent photo has no session anchored to its message"
+        assert session["session_key"] == result.storage_key
+        assert session["direction"] == "outgoing"
+        assert bytes(session["bitstream"]) == b"bitstream-bytes"
+
+
+class TestModerationLeavesImageChunksAlone:
+    """The profanity filter must not rewrite a framed image chunk.
+
+    The word list is ``\\b``-anchored and basE91's alphabet is full of non-word
+    characters, so a payload CAN contain a bare match. Censoring substitutes
+    bytes inside the stream -- same length, different bytes -- and the receiver
+    decodes a garbage image with nothing raised. "Drop" mode is worse: it removes
+    one chunk of an image whose other chunk already went out.
+    """
+
+    def test_censoring_would_corrupt_a_chunk_that_happens_to_match(self):
+        """Establishes the hazard is real, not theoretical."""
+        from app.bots.moderation import apply_profanity_mode
+
+        chunk = "aei10501" + "AB!shit!CD" + "E" * 130
+        assert apply_profanity_mode(chunk, "censor") != chunk
+        assert apply_profanity_mode(chunk, "drop") is None
+
+    def test_the_guard_recognises_a_chunk_as_framed(self):
+        from app.compression import is_framed_payload
+
+        chunk = "aei10501" + "AB!shit!CD" + "E" * 130
+        assert is_framed_payload(chunk)
+
+    @pytest.mark.parametrize("mode", ["censor", "drop"])
+    def test_prose_is_still_moderated(self, mode):
+        """The guard must not become a hole in moderation for ordinary replies."""
+        from app.bots.moderation import apply_profanity_mode
+        from app.compression import is_framed_payload
+
+        prose = "that is some shit weather"
+        assert not is_framed_payload(prose)
+        assert apply_profanity_mode(prose, mode) != prose

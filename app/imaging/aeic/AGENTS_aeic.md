@@ -106,6 +106,11 @@ both resident **2.44 GiB**. RemoteTerm often runs on a Pi or a small VPS.
   photo is then free. The synthesis session is never touched.
 * `decode` runs the entropy loop, then **releases the entropy sessions before**
   creating the synthesis session. This release is mandatory.
+* Both releases also sit in a `finally`. A decode failure is *swallowed* by
+  `ingest.decode_session`, so a session still held after a raise stays held for
+  the life of the process — and the next decode then stacks the entropy graph on
+  top of the 2.16 GiB synthesis one, which is the 2.44 GiB this contract exists
+  to prevent. Do not move them back onto the success path.
 * Only one entropy direction is ever resident.
 * Memory pressure drops the synthesis half first — it is 86% of the cost and the
   send path does not need it.
@@ -179,12 +184,35 @@ a chunk sized exactly to the 156-byte radio budget and get it truncated,
 corrupting the image with nothing raised. `encode_outbound` therefore skips any
 already-framed payload (`is_framed_payload`: `aei1`, `IE4:`, `mcmp2:`, `mcmp3:`).
 
+The bot engine's **profanity filter** needs the same guard, for the same reason.
+Its word list is `\b`-anchored and basE91 is full of non-word characters, so a
+payload can contain a bare match: censoring substitutes bytes inside the stream
+(same length, different bytes → garbage image), and "drop" mode removes one chunk
+of an image whose other chunk already went out. `send_bot_message` skips
+moderation for a framed payload and moderates prose exactly as before.
+
 Two things are deliberately absent: **no parity chunk** (upstream spends a third
 packet on XOR parity; here an image is 1–2 messages, so parity would cost
 +50–100% airtime, and DMs are ACKed) and **no app-level checksum** (the LoRa PHY
 CRCs every packet and MeshCore verifies an HMAC, so a corrupt chunk never reaches
 this layer). What *is* defended against is two senders colliding on one session
-id, which no lower layer can see — hence sessions are keyed by sender **and** id.
+id, which no lower layer can see — hence inbound sessions are keyed by sender
+**and** id.
+
+**Outbound sessions must not use that key.** The wire id is 1296 values because
+all it has to be is unique per sender inside one receiver's reassembly window; as
+a local storage key under a constant `self` prefix it collided at roughly 14% for
+twenty photos a day, and silently — the second send passed `create_session`'s
+metadata check, overwrote the first's bitstream, and `COALESCE(message_id, ?)`
+kept the first message on the row, so the older bubble rendered the newer
+picture. `outgoing_session_key` keys on the sent message's id instead.
+
+A session that **cannot** be decoded records the reason via
+`store_decode_error`. Without it the row reads `decoded=false,
+decode_error=null`, which the UI cannot tell apart from "the 5 s synthesis pass
+is still running" — so a server without onnxruntime left every received image
+polling once a second for a full minute. `store_png` clears the field, so the
+retry path is unaffected.
 
 ## Interop caveat
 

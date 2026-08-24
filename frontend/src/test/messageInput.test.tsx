@@ -454,6 +454,78 @@ describe('MessageInput', () => {
       expect(screen.queryByLabelText('Maximum image dimension')).not.toBeInTheDocument();
     });
 
+    /**
+     * Switching the codec on an already-attached photo has to re-prepare it.
+     *
+     * When preparation was imperative -- fired from the file input's onChange --
+     * the old pixels survived the switch, and the send went out with the codec
+     * the user had just switched AWAY from while the panel header claimed the
+     * new one. Preparation is now an effect over (file, size, codec).
+     */
+    it('re-prepares and sends via IE4 when the codec switches away from AI', async () => {
+      const { rerender } = renderInput({
+        conversationType: 'contact',
+        voice: true,
+        imageCodec: 'aeic',
+      });
+      const file = new File(['source'], 'photo.jpg', { type: 'image/jpeg' });
+      fireEvent.change(screen.getByLabelText('Choose image'), { target: { files: [file] } });
+      await screen.findByText(/512×512 colour/);
+      expect(prepareAeicImage).toHaveBeenCalledWith(file);
+      expect(encodeMeshImage).not.toHaveBeenCalled();
+
+      rerender(
+        <MessageInput
+          onSend={onSend}
+          disabled={false}
+          conversationType="contact"
+          imageCodec="ie4"
+          placeholder="Type a message..."
+          voiceConversation={{ type: 'PRIV', key: 'aa'.repeat(32) }}
+        />
+      );
+
+      // The IE4 preparation runs, and the AI-specific preview line is gone.
+      await waitFor(() => expect(encodeMeshImage).toHaveBeenCalledWith(file, 256));
+      await waitFor(() => expect(screen.queryByText(/512×512 colour/)).not.toBeInTheDocument());
+
+      fireEvent.click(screen.getByRole('button', { name: 'Send image' }));
+      await waitFor(() =>
+        expect(api.sendImage).toHaveBeenCalledWith('PRIV', 'aa'.repeat(32), encodedImage)
+      );
+      expect(api.sendAeicImage).not.toHaveBeenCalled();
+    });
+
+    it('re-prepares and sends via the AI codec when the codec switches to it', async () => {
+      const { rerender } = renderInput({
+        conversationType: 'contact',
+        voice: true,
+        imageCodec: 'ie4',
+      });
+      const file = new File(['source'], 'photo.jpg', { type: 'image/jpeg' });
+      fireEvent.change(screen.getByLabelText('Choose image'), { target: { files: [file] } });
+      await screen.findByAltText('Image attachment preview');
+      expect(encodeMeshImage).toHaveBeenCalledWith(file, 256);
+
+      rerender(
+        <MessageInput
+          onSend={onSend}
+          disabled={false}
+          conversationType="contact"
+          imageCodec="aeic"
+          placeholder="Type a message..."
+          voiceConversation={{ type: 'PRIV', key: 'aa'.repeat(32) }}
+        />
+      );
+
+      await waitFor(() => expect(prepareAeicImage).toHaveBeenCalledWith(file));
+      fireEvent.click(screen.getByRole('button', { name: 'Send photo' }));
+      await waitFor(() =>
+        expect(api.sendAeicImage).toHaveBeenCalledWith('PRIV', 'aa'.repeat(32), preparedAeicImage)
+      );
+      expect(api.sendImage).not.toHaveBeenCalled();
+    });
+
     it('rejects an invalid image cleanly', async () => {
       vi.mocked(encodeMeshImage).mockRejectedValueOnce(new Error('Invalid image data'));
       renderInput({ conversationType: 'contact', voice: true });
