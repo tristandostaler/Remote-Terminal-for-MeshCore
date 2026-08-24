@@ -14,6 +14,7 @@ BOT_META = {
 }
 
 
+@bot.on_keyword()
 @bot.on_keyword("schedule")
 async def list_schedule(ctx, msg):
     # Read-only lookup against this app's own schedules table (allowed for

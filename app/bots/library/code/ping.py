@@ -27,6 +27,7 @@ BOT_META = {
 CLOCK_OFFSET_THRESHOLD_SECONDS = 120
 
 
+@bot.on_keyword()
 @bot.on_keyword("ping", "test")
 async def signal_report(ctx, msg):
     parts = []

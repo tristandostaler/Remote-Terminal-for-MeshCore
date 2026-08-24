@@ -13,6 +13,7 @@ BOT_META = {
 }
 
 
+@bot.on_keyword()
 @bot.on_keyword("status")
 async def status(ctx, msg):
     if not msg.is_dm:

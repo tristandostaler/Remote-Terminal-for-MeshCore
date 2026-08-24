@@ -11,6 +11,7 @@ BOT_META = {
 }
 
 
+@bot.on_keyword()
 @bot.on_keyword("stats")
 async def mesh_stats(ctx, msg):
     stats = await ctx.mesh_stats()

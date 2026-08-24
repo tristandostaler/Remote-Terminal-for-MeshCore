@@ -7,8 +7,9 @@ Two handlers, one job each:
   companion has heard. It never replies and never runs a command.
 * ``mailbox_command`` (``@bot.on_keyword``) is the command itself. A real
   keyword trigger is what makes the node's ``help`` bot list ``mbx`` alongside
-  every other command. The trigger word lives in this file and nowhere else;
-  replies quote back the word that matched, so an alias costs one argument.
+  every other command, and the bare decorator beside it carries whatever the
+  operator adds on the Triggers tab. Replies quote back the word that matched,
+  so both an alias declared here and an operator's own word read correctly.
 
 Commands (DM-only; ``mbx`` below stands for the trigger word that was used):
 
@@ -60,7 +61,7 @@ from remoteterm import bot
 
 HARD_MAX_BODY = 2000
 
-# The one word this bot answers to. Pass more to @bot.on_keyword below to add
+# The word this bot declares. Pass more to @bot.on_keyword below to add
 # aliases; it also stands in as the prefix quoted back in replies when a caller
 # leaves no matched keyword to echo.
 DEFAULT_PREFIX = "mbx"
@@ -856,13 +857,15 @@ async def mailbox_learn(ctx, msg):
             ctx.log(f"mailbox learn error (logged once): {detail}", level="WARNING")
 
 
+@bot.on_keyword()
 @bot.on_keyword(DEFAULT_PREFIX)
 async def mailbox_command(ctx, msg):
-    """The mailbox command, on the word this file declares and no other.
+    """The mailbox command: ``mbx``, plus any keyword on the Triggers tab.
 
     Declaring the trigger as a keyword is what puts mailbox in the node's
     ``help`` command list. Replies quote back the word that was matched rather
-    than the constant, so adding an alias here is all an alias takes.
+    than the constant, so an alias declared here and an operator's own word
+    both read correctly.
 
     Mailbox itself stays DM-only; on a channel the command starts the
     advert-then-DM handoff instead of answering there.

@@ -476,6 +476,12 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
     const kw = newKeyword.trim().toLowerCase();
     if (!kw) return;
     if (uiTriggers.some((t) => t.kind === 'keyword' && t.spec === kw)) return;
+    // The code owns the words it declares — the engine ignores an extra keyword
+    // that collides with one, so say why instead of saving a chip that is inert.
+    if (bot?.declared_keywords.some((declared) => declared.toLowerCase() === kw)) {
+      toast.error(`'${kw}' is already declared in this bot's code`);
+      return;
+    }
     setUiTriggers((prev) => [...prev, { kind: 'keyword', spec: kw }]);
     setNewKeyword('');
     markDirty();

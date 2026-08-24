@@ -647,15 +647,13 @@ class TestMailbox:
         assert entry is not None
         loaded = load_bot_code(entry["code"])
         assert loaded.declared_keywords == ["mbx"]
-        # The trigger word comes from the code alone. A no-argument decorator
-        # would also route whatever is typed on the Triggers tab into the same
-        # handler; mailbox deliberately does not, so `mbx` is the whole answer.
-        assert not loaded.has_generic_keyword_handler
-        # And exactly one catch-all, for passive name -> key learning.
+        # Exactly one catch-all, for passive name -> key learning. (The generic
+        # keyword handler beside `mbx` is the library-wide convention —
+        # TestGenericKeywordHandler covers it.)
         assert len(loaded.collector.messages) == 1
 
     def test_replies_quote_the_matched_word_not_the_constant(self):
-        """So declaring an alias in the code is all an alias needs to take."""
+        """So an alias — declared or operator-added — reads correctly."""
         ns = _load_namespace("mailbox")
         assert ns["_Cfg"]({}, "mail").prefix == "mail"
         # Nothing matched (a caller with no keyword) falls back to the constant.
@@ -954,3 +952,89 @@ class TestRetireMergedBots:
         record = await self._seed_retired("hfcond")
         await ensure_seeded()
         assert await BotRepository.get(record.id) is None
+
+
+class TestGenericKeywordHandler:
+    """Every keyword bot in the library also carries a bare @bot.on_keyword().
+
+    The Bots editor has always shown an "Extra keywords" box on the Triggers
+    tab, but ``ui_triggers`` only reach handlers declared with the no-argument
+    decorator — so before this convention an operator could add a keyword to
+    any built-in, watch it save, and get silence. One bare decorator per bot
+    makes that box do what it says.
+    """
+
+    def _loaded(self):
+        from app.bots.library import list_library
+
+        return {entry["key"]: load_bot_code(entry["code"]) for entry in list_library()}
+
+    def test_every_keyword_bot_routes_the_triggers_tab_somewhere(self):
+        missing = [
+            key
+            for key, code in self._loaded().items()
+            if code.declared_keywords and not code.has_generic_keyword_handler
+        ]
+        assert missing == [], f"no generic @bot.on_keyword() in: {', '.join(sorted(missing))}"
+
+    def test_bots_with_no_command_stay_without_one(self):
+        """A cron/webhook/event bot has no command, so it must not grow a bare
+        keyword handler — that would answer with nothing to say."""
+        for key, code in self._loaded().items():
+            if code.declared_keywords:
+                continue
+            assert not code.has_generic_keyword_handler, f"{key} has a command-less keyword handler"
+
+    def test_exactly_one_handler_takes_the_extra_keywords(self):
+        """Two generic handlers in one bot would both be fed the same word and
+        the first registered would win — an arbitrary choice, so pick one."""
+        for key, code in self._loaded().items():
+            generic = [t for t in code.collector.keywords if not t.keywords]
+            assert len(generic) <= 1, f"{key} declares {len(generic)} generic keyword handlers"
+
+    def test_declared_words_are_matched_before_an_operators_own(self):
+        """A bot's generic pair can sit ahead of a *later* handler's declared
+        words — solar's is on the first handler, aurora declares `kp` further
+        down — so the engine drops a UI keyword the code already claims rather
+        than letting it answer for the wrong command."""
+        from app.bots.engine import LoadedBot
+        from app.models import Bot
+
+        entry = get_library_entry("solar")
+        assert entry is not None
+        code = load_bot_code(entry["code"])
+
+        def mapped(spec: str):
+            record = Bot(
+                id=f"solar-{spec}",
+                name="solar",
+                code=entry["code"],
+                ui_triggers=[{"kind": "keyword", "spec": spec}],
+            )
+            return [kws for kws, _ in LoadedBot(record=record, code=code).keyword_map]
+
+        # `kp` belongs to the aurora handler, so the extra keyword is ignored.
+        assert ("kp",) not in mapped("kp")
+        assert ("aurora", "kp") in mapped("kp")
+        # A word the code does not claim is routed as normal.
+        assert ("flux",) in mapped("flux")
+
+    async def test_an_extra_keyword_actually_answers(self, test_db):
+        """End to end: a word only the Triggers tab knows reaches the handler."""
+        from app.repository.bots import BotRepository
+
+        entry = get_library_entry("dice")
+        assert entry is not None
+        record = await BotRepository.create(
+            name="dice-generictest",
+            code=entry["code"],
+            ui_triggers=[{"kind": "keyword", "spec": "d20"}],
+        )
+        response = await BotEngine().test_run(
+            record, BotTestRequest(text="d20 2d6", is_dm=True, sender_name="K0PHX")
+        )
+        assert response.error is None, response.error
+        assert response.replies, "the extra keyword reached no handler"
+        # `roll_dice` is this bot's primary handler, so `d20 2d6` rolls a spec
+        # rather than taking the 1..N path the `roll` keyword owns.
+        assert response.replies[0]["text"].startswith("2d6: ")

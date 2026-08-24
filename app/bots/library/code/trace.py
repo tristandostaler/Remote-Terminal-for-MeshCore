@@ -31,6 +31,7 @@ BOT_META = {
 }
 
 
+@bot.on_keyword()
 @bot.on_keyword("trace", "tracer")
 async def run_trace(ctx, msg):
     arg = msg.arg_text.strip().lower().replace(":", "").replace(" ", "").removeprefix("0x")

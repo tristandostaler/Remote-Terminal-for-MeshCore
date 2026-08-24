@@ -118,7 +118,16 @@ token gate only.
   their stored permission flag during version refreshes.
 - `ui_triggers` only feed handlers declared with **no-argument** decorators
   (`@bot.on_keyword()` / `@bot.on_cron()`); code-declared triggers are derived
-  at load time and never stored.
+  at load time and never stored. Every library bot that has a command therefore
+  carries **exactly one** bare `@bot.on_keyword()`, on its primary handler and
+  written *above* the declared decorator — the editor's "Extra keywords" box is
+  always shown, so a bot without one accepts keywords that silently never fire.
+  A bot with no command (cron/webhook/event only) must not have one: there would
+  be nothing for the word to answer. Keep the count at one per bot — two generic
+  handlers are both fed the same word and the first registered wins.
+  `LoadedBot.keyword_map` drops a UI keyword the code already declares, so an
+  extra keyword can never answer for a command the code owns
+  (`tests/test_bots_library_ports.py::TestGenericKeywordHandler` pins all of it).
 - The engine never raises into `broadcast_event` — every handler run is
   wrapped, recorded, and logged.
 - Frontend: the Bots view lives at `#bots` / `#bots/{botId}`

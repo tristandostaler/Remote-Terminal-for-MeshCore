@@ -51,6 +51,7 @@ def _parse_spec(spec):
     return count, sides
 
 
+@bot.on_keyword()
 @bot.on_keyword("dice")
 async def roll_dice(ctx, msg):
     max_dice = int(ctx.settings.get("max_dice", 10))

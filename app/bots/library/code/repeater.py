@@ -34,6 +34,7 @@ def _ago(now: int, then: int | None) -> str:
     return f"{delta // SECONDS_24H}d"
 
 
+@bot.on_keyword()
 @bot.on_keyword("repeater", "rp")
 async def repeater_cmd(ctx, msg):
     if not msg.is_dm:

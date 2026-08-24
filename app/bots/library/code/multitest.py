@@ -64,6 +64,7 @@ def _maximal_routes(message) -> tuple[set[str], bool]:
     return routes, direct
 
 
+@bot.on_keyword()
 @bot.on_keyword("multitest", "mt")
 async def multitest(ctx, msg):
     start = int(time.time())

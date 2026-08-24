@@ -62,20 +62,31 @@ class LoadedBot:
 
     @property
     def keyword_map(self) -> list[tuple[tuple[str, ...], Any]]:
-        """(keywords, handler) pairs — UI keywords route to generic handlers."""
+        """(keywords, handler) pairs — UI keywords route to generic handlers.
+
+        A UI keyword the code already declares is dropped rather than mapped:
+        dispatch stops at the first matching pair, and a bot's generic pair can
+        sit ahead of a *later* handler's declared words, so mapping it would let
+        an extra keyword hijack a sibling command (adding ``kp`` to solar would
+        answer with the solar summary instead of the aurora handler's report).
+        The code owns the words it declares.
+        """
         if self.code is None:
             return []
         pairs: list[tuple[tuple[str, ...], Any]] = []
-        ui_keywords = tuple(
-            t["spec"].strip().lower()
-            for t in self.record.ui_triggers
-            if t.get("kind") == "keyword" and t.get("spec", "").strip()
-        )
+        declared = {kw for trig in self.code.collector.keywords for kw in trig.keywords}
+        ui_keywords: list[str] = []
+        for trig in self.record.ui_triggers:
+            if trig.get("kind") != "keyword":
+                continue
+            spec = trig.get("spec", "").strip().lower()
+            if spec and spec not in declared and spec not in ui_keywords:
+                ui_keywords.append(spec)
         for trig in self.code.collector.keywords:
             if trig.keywords:
                 pairs.append((trig.keywords, trig.handler))
             elif ui_keywords:
-                pairs.append((ui_keywords, trig.handler))
+                pairs.append((tuple(ui_keywords), trig.handler))
         return pairs
 
     def cron_entries(self) -> list[tuple[str, str, Any]]:

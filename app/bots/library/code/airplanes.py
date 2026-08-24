@@ -98,6 +98,7 @@ def _altitude_text(alt) -> str:
     return "?ft"
 
 
+@bot.on_keyword()
 @bot.on_keyword("airplanes", "adsb", "aircraft")
 async def airplanes(ctx, msg):
     query = msg.arg_text.strip()
