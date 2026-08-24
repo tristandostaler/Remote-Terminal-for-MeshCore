@@ -61,7 +61,7 @@ BOT_META = {
     "name": "mailbox",
     "category": "Custom",
     "description": "Store-and-forward mailbox for offline nodes (DM 'mbx help')",
-    "version": "4.3.0",
+    "version": "4.4.0",
     "respond_to_dms": True,
     "settings_schema": [
         {
@@ -75,12 +75,6 @@ BOT_META = {
             "label": "The mailbox command prefix",
             "type": "text",
             "default": "mbx",
-        },
-        {
-            "key": "response_budget",
-            "label": "Maximum allowed chars per message",
-            "type": "int",
-            "default": 155,
         },
         {
             "key": "max_body",
@@ -100,7 +94,6 @@ BOT_META = {
     "settings": {
         "db_path": "data/mailbox.db",
         "prefix": "mbx",
-        "response_budget": 155,
         "max_body": 2000,
         "debug_password": "CHANGE-ME-s3cret",
     },
@@ -141,13 +134,16 @@ def _prefix(settings):
     return str(_cfg(settings, "prefix") or "").strip()
 
 
-def _response_budget(settings):
-    # Never raise: _send() consults this even on the error path, and a
-    # non-numeric setting must not swallow the notice it is trying to deliver.
-    try:
-        return int(_cfg(settings, "response_budget"))
-    except (TypeError, ValueError):
-        return int(BOT_META["settings"]["response_budget"])
+def _split_budget():
+    """The engine's per-message byte budget, for user-facing hints only.
+
+    Splitting itself belongs to ``ctx.reply_split`` — this bot no longer carries
+    a budget setting. Two replies still want a number to quote: the "~N parts at
+    playback" estimate and the default size of the ``mbx test`` probe.
+    """
+    from remoteterm import DEFAULT_SPLIT_BYTES
+
+    return int(DEFAULT_SPLIT_BYTES)
 
 
 def _max_body(settings):
@@ -344,7 +340,9 @@ def _cmd_store(settings, conn, recipient, body, key, name):
     )
     conn.commit()
     size = len(body.encode("utf-8"))
-    n_parts = max(1, -(-size // (_response_budget(settings) - 60)))
+    # Rough hint only: the real part count is ctx.reply_split's call at
+    # playback time, and MCMP conversations fit more per part.
+    n_parts = max(1, -(-size // (_split_budget() - 60)))
     extra = (
         f" NOTE: cut at {_max_body(settings)}B limit."
         if truncated
@@ -578,9 +576,9 @@ def _cmd_help(settings):
 def _cmd_size_test(settings, arg):
     """Exactly-N-byte probe. _Raw so reply_split never renumbers or cuts it."""
     try:
-        n = int(arg) if arg else _response_budget(settings)
+        n = int(arg) if arg else _split_budget()
     except ValueError:
-        n = _response_budget(settings)
+        n = _split_budget()
     n = max(20, min(n, 500))
     prefix = f"TEST {n}B "
     ruler = "".join(f"{i:.>10}" for i in range(10, n + 20, 10))
@@ -671,20 +669,20 @@ async def _redirect_channel_mailbox_to_dm(ctx, sender_name):
             _redirect_pending.discard(pending_key)
 
 
-async def _send(ctx, settings, reply):
+async def _send(ctx, reply):
     """Put one command's reply on the air.
 
     ``_bot_inner`` and its ``_cmd_*`` helpers return a single unsplit string (or
-    None); ``ctx.reply_split`` turns it into as many ``(i/n)`` parts as the
-    per-message budget needs. A ``_Raw`` reply is sent verbatim so ``mbx test``
-    keeps its exact byte count.
+    None); ``ctx.reply_split`` owns the sizing entirely and turns it into as many
+    ``(i/n)`` parts as the link needs — no per-bot budget setting. A ``_Raw``
+    reply is sent verbatim so ``mbx test`` keeps its exact byte count.
     """
     if reply is None:
         return
     if isinstance(reply, _Raw):
         await ctx.reply(str(reply))
         return
-    await ctx.reply_split(reply, max_bytes=_response_budget(settings))
+    await ctx.reply_split(reply)
 
 
 @bot.on_message()
@@ -771,7 +769,7 @@ async def mailbox(ctx, msg):
                 )
             )
             if authed:
-                await _send(ctx, settings, f"MBX ERR: {type(e).__name__}: {e}")
+                await _send(ctx, f"MBX ERR: {type(e).__name__}: {e}")
                 return None
         except Exception:
             pass
@@ -779,13 +777,12 @@ async def mailbox(ctx, msg):
         ctx.log(f"mailbox error: {type(e).__name__}: {e}", level="WARNING")
         await _send(
             ctx,
-            settings,
             f"An error occurred. Authenticate with "
             f"'{_prefix(settings)} debug <password>' to see error details.",
         )
         return None
 
-    await _send(ctx, settings, reply)
+    await _send(ctx, reply)
     return None
 
 
@@ -850,7 +847,7 @@ def _bot_inner(settings, **kwargs) -> "str | None":
         n_dir = conn.execute("SELECT COUNT(*) FROM directory").fetchone()[0]
         return (
             f"db={_db_path(settings)} "
-            f"budget={_response_budget(settings)} body={_max_body(settings)} "
+            f"split={_split_budget()} body={_max_body(settings)} "
             f"(hard {HARD_MAX_BODY}) dir={n_dir} names"
             # f"env: {env_dump or '(none)'}"
         )
