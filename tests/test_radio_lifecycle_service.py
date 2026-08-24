@@ -216,3 +216,53 @@ class TestRunPostConnectSetup:
         assert radio_manager.firmware_version == "1.2.3"
         assert radio_manager.path_hash_mode == 2
         assert radio_manager.path_hash_mode_supported is True
+        assert radio_manager.repeat_supported is False
+
+    @pytest.mark.asyncio
+    async def test_caches_repeat_mode_and_allowed_frequencies(self):
+        mc = MagicMock()
+        mc.commands.send_device_query = AsyncMock(
+            return_value=MagicMock(payload={"fw ver": 9, "max_channels": 64, "repeat": True})
+        )
+        mc.commands.get_allowed_repeat_freq = AsyncMock(
+            return_value=MagicMock(payload={"freqs": [{"min": 869_000, "max": 869_000}]})
+        )
+        mc.commands.set_flood_scope = AsyncMock(return_value=None)
+        mc.commands.send = AsyncMock(return_value=None)
+        mc._reader = MagicMock()
+        mc._reader.handle_rx = AsyncMock()
+        mc.start_auto_message_fetching = AsyncMock()
+
+        radio_manager = MagicMock()
+        radio_manager.meshcore = mc
+        radio_manager._setup_lock = None
+        radio_manager._setup_in_progress = False
+        radio_manager._setup_complete = False
+        radio_manager.repeat_supported = False
+        radio_manager.repeat_enabled = False
+        radio_manager.allowed_repeat_freqs = []
+        radio_manager._acquire_operation_lock = AsyncMock()
+        radio_manager._release_operation_lock = MagicMock()
+
+        with (
+            patch("app.event_handlers.register_event_handlers"),
+            patch("app.keystore.export_and_store_private_key", new=AsyncMock()),
+            patch("app.radio_sync.sync_radio_time", new=AsyncMock()),
+            patch(
+                "app.repository.AppSettingsRepository.get",
+                new=AsyncMock(return_value=MagicMock(flood_scope=None)),
+            ),
+            patch("app.radio_sync.sync_and_offload_all", new=AsyncMock(return_value={"synced": 0})),
+            patch("app.radio_sync.send_advertisement", new=AsyncMock(return_value=False)),
+            patch("app.radio_sync.drain_pending_messages", new=AsyncMock(return_value=0)),
+            patch("app.radio_sync.start_periodic_sync"),
+            patch("app.radio_sync.start_periodic_advert"),
+            patch("app.radio_sync.start_message_polling"),
+        ):
+            await run_post_connect_setup(radio_manager)
+
+        assert radio_manager.repeat_supported is True
+        assert radio_manager.repeat_enabled is True
+        assert [(r.min_mhz, r.max_mhz) for r in radio_manager.allowed_repeat_freqs] == [
+            (869.0, 869.0)
+        ]

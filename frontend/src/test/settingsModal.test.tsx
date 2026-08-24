@@ -431,6 +431,55 @@ describe('SettingsModal', () => {
     });
   });
 
+  it('hides the repeat toggle when firmware does not support it', () => {
+    renderModal();
+    openRadioSection();
+
+    expect(screen.queryByLabelText('Repeat Mesh Packets')).toBeNull();
+  });
+
+  it('saves repeat mode through radio config save', async () => {
+    const { onSave } = renderModal({
+      config: {
+        ...baseConfig,
+        radio: { ...baseConfig.radio, freq: 869 },
+        repeat_supported: true,
+        repeat_enabled: false,
+        allowed_repeat_freqs: [{ min_mhz: 869, max_mhz: 869 }],
+      },
+    });
+    openRadioSection();
+
+    fireEvent.click(screen.getByLabelText('Repeat Mesh Packets'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Radio Config' }));
+
+    await waitFor(() => {
+      expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ repeat_enabled: true }));
+    });
+  });
+
+  it('blocks saving repeat mode on a frequency the radio will not repeat on', async () => {
+    const { onSave } = renderModal({
+      config: {
+        ...baseConfig,
+        repeat_supported: true,
+        repeat_enabled: false,
+        allowed_repeat_freqs: [{ min_mhz: 869, max_mhz: 869 }],
+      },
+    });
+    openRadioSection();
+
+    fireEvent.click(screen.getByLabelText('Repeat Mesh Packets'));
+    expect(screen.getByText('Frequency Not Allowed')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Radio Config' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Repeat mode requires one of: 869 MHz')).toBeTruthy();
+    });
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it('saves changed max contacts value through onSaveAppSettings', async () => {
     const { onSaveAppSettings } = renderModal();
     openRadioSection();

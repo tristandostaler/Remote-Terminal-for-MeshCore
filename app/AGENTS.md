@@ -111,6 +111,13 @@ app/
 
 ## Important Behaviors
 
+### Companion repeat mode
+
+- Companion firmware (protocol version 9+) can relay mesh packets for other nodes. The flag is reported in the `DEVICE_INFO` frame (byte 80, parsed as `repeat`) and written through the `SET_RADIO_PARAMS` command's trailing repeat byte, so toggling it always re-sends the full radio parameter set (`app/services/repeat_mode.py`).
+- Every `set_radio(...)` call carries the current repeat flag when firmware supports it, so a plain frequency change never clears repeat by omission.
+- Firmware only relays on the shared off-grid frequencies. Devices that implement `GET_ALLOWED_REPEAT_FREQ` report the permitted ranges (units vary between Hz/kHz/MHz across builds and are normalized by magnitude); older ones fall back to 433/869/918 MHz, matching the official apps.
+- `app/services/device_query.py` is the shared device-query seam: it returns the parsed payload *and* the raw frame, because stale `.pyc` copies of the meshcore reader silently drop the newest fields (`repeat`, `path_hash_mode`) from an otherwise healthy response.
+
 ### Multibyte routing
 
 - Packet `path_len` values are hop counts, not byte counts.
@@ -245,8 +252,8 @@ Web Push is a standalone subsystem in `app/push/`, separate from the fanout modu
 - `GET /debug` — support snapshot with recent logs, live radio probe, slot/contact audits, and version/git info
 
 ### Radio
-- `GET /radio/config` — includes `path_hash_mode`, `path_hash_mode_supported`, advert-location on/off, and `multi_acks_enabled`
-- `PATCH /radio/config` — may update `path_hash_mode` (`0..2`) when firmware supports it, and `multi_acks_enabled`
+- `GET /radio/config` — includes `path_hash_mode`, `path_hash_mode_supported`, advert-location on/off, `multi_acks_enabled`, and companion repeat state (`repeat_enabled`, `repeat_supported`, `allowed_repeat_freqs`)
+- `PATCH /radio/config` — may update `path_hash_mode` (`0..2`) when firmware supports it, `multi_acks_enabled`, and `repeat_enabled` (400 when firmware lacks repeat support, 422 when the frequency is not one the radio repeats on)
 - `GET /radio/private-key` — export in-memory private key as hex (requires `MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT=true`)
 - `PUT /radio/private-key`
 - `POST /radio/advertise` — manual advert send; request body may set `mode` to `flood` or `zero_hop` (defaults to `flood`)

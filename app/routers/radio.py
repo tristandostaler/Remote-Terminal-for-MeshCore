@@ -37,6 +37,8 @@ from app.services.radio_commands import (
     KeystoreRefreshError,
     PathHashModeUnsupportedError,
     RadioCommandRejectedError,
+    RepeatFrequencyNotAllowedError,
+    RepeatModeUnsupportedError,
     apply_radio_config_update,
     import_private_key_and_refresh_keystore,
 )
@@ -84,6 +86,11 @@ class RadioSettings(BaseModel):
     cr: int = Field(description="Coding rate (1-4)")
 
 
+class RepeatFreqRangeResponse(BaseModel):
+    min_mhz: float = Field(description="Lowest frequency of the range in MHz")
+    max_mhz: float = Field(description="Highest frequency of the range in MHz")
+
+
 class RadioConfigResponse(BaseModel):
     public_key: str = Field(description="Public key (64-char hex)")
     name: str
@@ -118,6 +125,18 @@ class RadioConfigResponse(BaseModel):
         default=0,
         description="Environment sensor sharing mode (0=deny, 1=per-contact, 2=allow-all)",
     )
+    repeat_enabled: bool = Field(
+        default=False,
+        description="Whether the companion relays mesh packets for other nodes",
+    )
+    repeat_supported: bool = Field(
+        default=False,
+        description="Whether firmware supports companion repeat mode",
+    )
+    allowed_repeat_freqs: list[RepeatFreqRangeResponse] = Field(
+        default_factory=list,
+        description="Frequency ranges (MHz) the radio will repeat on",
+    )
 
 
 class RadioConfigUpdate(BaseModel):
@@ -148,6 +167,10 @@ class RadioConfigUpdate(BaseModel):
     )
     telemetry_mode_env: int | None = Field(
         default=None, ge=0, le=2, description="Environment sensor sharing mode"
+    )
+    repeat_enabled: bool | None = Field(
+        default=None,
+        description="Whether the companion relays mesh packets for other nodes",
     )
 
 
@@ -389,6 +412,12 @@ async def get_radio_config() -> RadioConfigResponse:
         telemetry_mode_base=info.get("telemetry_mode_base", 0),
         telemetry_mode_loc=info.get("telemetry_mode_loc", 0),
         telemetry_mode_env=info.get("telemetry_mode_env", 0),
+        repeat_enabled=radio_manager.repeat_enabled,
+        repeat_supported=radio_manager.repeat_supported,
+        allowed_repeat_freqs=[
+            RepeatFreqRangeResponse(min_mhz=freq_range.min_mhz, max_mhz=freq_range.max_mhz)
+            for freq_range in radio_manager.allowed_repeat_freqs
+        ],
     )
 
 
@@ -405,9 +434,17 @@ async def update_radio_config(update: RadioConfigUpdate) -> RadioConfigResponse:
                 path_hash_mode_supported=radio_manager.path_hash_mode_supported,
                 set_path_hash_mode=lambda mode: setattr(radio_manager, "path_hash_mode", mode),
                 sync_radio_time_fn=sync_radio_time,
+                repeat_supported=radio_manager.repeat_supported,
+                repeat_enabled=radio_manager.repeat_enabled,
+                allowed_repeat_freqs=radio_manager.allowed_repeat_freqs,
+                set_repeat_enabled=lambda enabled: setattr(
+                    radio_manager, "repeat_enabled", enabled
+                ),
             )
-        except PathHashModeUnsupportedError as exc:
+        except (PathHashModeUnsupportedError, RepeatModeUnsupportedError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RepeatFrequencyNotAllowedError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except RadioCommandRejectedError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

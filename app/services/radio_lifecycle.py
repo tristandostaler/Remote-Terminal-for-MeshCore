@@ -2,6 +2,13 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
+from app.services.device_query import query_device_info
+from app.services.repeat_mode import (
+    describe_allowed_repeat_freqs,
+    extract_repeat_flag,
+    query_allowed_repeat_freqs,
+)
+
 logger = logging.getLogger(__name__)
 
 POST_CONNECT_SETUP_TIMEOUT_SECONDS = 300
@@ -68,21 +75,10 @@ async def run_post_connect_setup(radio_manager) -> None:
                 # Sync radio clock with system time
                 await sync_radio_time(mc)
 
-                # Query path hash mode support (best-effort; older firmware won't report it).
-                # If the library's parsed payload is missing path_hash_mode (e.g. stale
-                # .pyc on WSL2 Windows mounts), fall back to raw-frame extraction.
-                reader = mc._reader
-                _original_handle_rx = reader.handle_rx
-                _captured_frame: list[bytes] = []
-
-                async def _capture_handle_rx(data: bytearray) -> None:
-                    from meshcore.packets import PacketType
-
-                    if len(data) > 0 and data[0] == PacketType.DEVICE_INFO.value:
-                        _captured_frame.append(bytes(data))
-                    return await _original_handle_rx(data)
-
-                reader.handle_rx = _capture_handle_rx
+                # Query device capabilities (best-effort; older firmware won't report
+                # path hash mode or repeat support).  If the library's parsed payload
+                # is missing those fields (e.g. stale .pyc on WSL2 Windows mounts),
+                # fall back to raw-frame extraction.
                 radio_manager.device_info_loaded = False
                 radio_manager.max_contacts = None
                 radio_manager.device_model = None
@@ -92,13 +88,13 @@ async def run_post_connect_setup(radio_manager) -> None:
                 radio_manager.max_channels = 40
                 radio_manager.path_hash_mode = 0
                 radio_manager.path_hash_mode_supported = False
+                radio_manager.repeat_enabled = False
+                radio_manager.repeat_supported = False
+                radio_manager.allowed_repeat_freqs = []
                 try:
-                    device_query = await mc.commands.send_device_query()
-                    payload = (
-                        device_query.payload
-                        if device_query is not None and isinstance(device_query.payload, dict)
-                        else {}
-                    )
+                    device_query = await query_device_info(mc)
+                    payload = device_query.payload
+                    raw = device_query.raw_frame
 
                     payload_max_contacts = payload.get("max_contacts")
                     if isinstance(payload_max_contacts, int):
@@ -122,11 +118,11 @@ async def run_post_connect_setup(radio_manager) -> None:
                         radio_manager.path_hash_mode = payload["path_hash_mode"]
                         radio_manager.path_hash_mode_supported = True
 
-                    if _captured_frame:
+                    if raw:
                         # Raw-frame fallback / completion:
                         # byte 1 = fw_ver, byte 2 = max_contacts/2, byte 3 = max_channels,
-                        # bytes 8:20 = fw_build, 20:60 = model, 60:80 = ver, byte 81 = path_hash_mode
-                        raw = _captured_frame[-1]
+                        # bytes 8:20 = fw_build, 20:60 = model, 60:80 = ver,
+                        # byte 80 = repeat, byte 81 = path_hash_mode
                         fw_ver = raw[1] if len(raw) > 1 else 0
                         if fw_ver >= 3:
                             radio_manager.device_info_loaded = True
@@ -162,6 +158,20 @@ async def run_post_connect_setup(radio_manager) -> None:
                         logger.info("Path hash mode: %d (supported)", radio_manager.path_hash_mode)
                     else:
                         logger.debug("Firmware does not report path_hash_mode")
+
+                    repeat_flag = extract_repeat_flag(payload, raw)
+                    if repeat_flag is None:
+                        logger.debug("Firmware does not report repeat mode")
+                    else:
+                        radio_manager.repeat_supported = True
+                        radio_manager.repeat_enabled = repeat_flag
+                        radio_manager.allowed_repeat_freqs = await query_allowed_repeat_freqs(mc)
+                        logger.info(
+                            "Companion repeat mode: %s (allowed: %s)",
+                            "on" if repeat_flag else "off",
+                            describe_allowed_repeat_freqs(radio_manager.allowed_repeat_freqs)
+                            or "unrestricted",
+                        )
                     if radio_manager.device_info_loaded:
                         logger.info(
                             "Radio device info: model=%s build=%s version=%s max_contacts=%s max_channels=%d",
@@ -193,8 +203,6 @@ async def run_post_connect_setup(radio_manager) -> None:
                     logger.info("Max channel slots: %d", radio_manager.max_channels)
                 except Exception as exc:
                     logger.debug("Failed to query device info capabilities: %s", exc)
-                finally:
-                    reader.handle_rx = _original_handle_rx
 
                 # Apply flood scope from settings (best-effort; older firmware may
                 # not support the mode-1 unscoped command). Done after the device

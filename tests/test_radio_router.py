@@ -38,6 +38,7 @@ from app.routers.radio import (
     update_radio_config,
 )
 from app.services.radio_runtime import RadioRuntime
+from app.services.repeat_mode import RepeatFreqRange
 
 
 def _radio_result(event_type=EventType.OK, payload=None):
@@ -117,6 +118,38 @@ class TestGetRadioConfig:
         assert response.radio.cr == 5
         assert response.advert_location_source == "current"
         assert response.multi_acks_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_maps_repeat_mode_from_runtime_state(self):
+        mc = _mock_meshcore_with_info()
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "repeat_supported", True),
+            patch.object(radio_manager, "repeat_enabled", True),
+            patch.object(radio_manager, "allowed_repeat_freqs", [RepeatFreqRange(869.0, 869.0)]),
+        ):
+            response = await get_radio_config()
+
+        assert response.repeat_supported is True
+        assert response.repeat_enabled is True
+        assert [(r.min_mhz, r.max_mhz) for r in response.allowed_repeat_freqs] == [(869.0, 869.0)]
+
+    @pytest.mark.asyncio
+    async def test_defaults_repeat_mode_to_unsupported(self):
+        mc = _mock_meshcore_with_info()
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "repeat_supported", False),
+            patch.object(radio_manager, "repeat_enabled", False),
+            patch.object(radio_manager, "allowed_repeat_freqs", []),
+        ):
+            response = await get_radio_config()
+
+        assert response.repeat_supported is False
+        assert response.repeat_enabled is False
+        assert response.allowed_repeat_freqs == []
 
     @pytest.mark.asyncio
     async def test_maps_multi_acks_to_response(self):
@@ -290,6 +323,81 @@ class TestUpdateRadioConfig:
         assert "Failed to set path hash mode" in str(exc.value.detail)
         assert radio_manager.path_hash_mode == 0
         mc.commands.send_appstart.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_toggles_repeat_mode_and_updates_runtime_state(self):
+        mc = _mock_meshcore_with_info()
+        mc.self_info["radio_freq"] = 869.0
+        mc.self_info["radio_bw"] = 250.0
+        mc.self_info["radio_sf"] = 11
+        mc.commands.send_device_query = AsyncMock(
+            return_value=_radio_result(payload={"fw ver": 9, "repeat": True})
+        )
+        expected = RadioConfigResponse(
+            public_key="aa" * 32,
+            name="NodeA",
+            lat=10.0,
+            lon=20.0,
+            tx_power=17,
+            max_tx_power=22,
+            radio=RadioSettings(freq=869.0, bw=250.0, sf=11, cr=5),
+            repeat_enabled=True,
+            repeat_supported=True,
+        )
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "repeat_supported", True),
+            patch.object(radio_manager, "repeat_enabled", False),
+            patch.object(radio_manager, "allowed_repeat_freqs", [RepeatFreqRange(869.0, 869.0)]),
+            patch("app.routers.radio.sync_radio_time", new_callable=AsyncMock),
+            patch(
+                "app.routers.radio.get_radio_config", new_callable=AsyncMock, return_value=expected
+            ),
+        ):
+            result = await update_radio_config(RadioConfigUpdate(repeat_enabled=True))
+
+            assert radio_manager.repeat_enabled is True
+
+        mc.commands.set_radio.assert_awaited_once_with(freq=869.0, bw=250.0, sf=11, cr=5, repeat=1)
+        assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_rejects_repeat_mode_when_firmware_does_not_support_it(self):
+        mc = _mock_meshcore_with_info()
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "repeat_supported", False),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await update_radio_config(RadioConfigUpdate(repeat_enabled=True))
+
+        assert exc.value.status_code == 400
+        mc.commands.set_radio.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rejects_repeat_mode_on_disallowed_frequency(self):
+        mc = _mock_meshcore_with_info()
+        mc.self_info["radio_freq"] = 910.525
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "repeat_supported", True),
+            patch.object(radio_manager, "repeat_enabled", False),
+            patch.object(radio_manager, "allowed_repeat_freqs", [RepeatFreqRange(869.0, 869.0)]),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await update_radio_config(RadioConfigUpdate(repeat_enabled=True))
+
+            assert radio_manager.repeat_enabled is False
+
+        assert exc.value.status_code == 422
+        assert "869 MHz" in str(exc.value.detail)
+        mc.commands.set_radio.assert_not_awaited()
 
 
 class TestPrivateKeyExport:
