@@ -440,10 +440,8 @@ class TestMailbox:
         for text in texts:
             assert len(text.encode("utf-8")) <= 155
 
-    async def test_no_per_bot_budget_setting_remains(self, test_db, tmp_path):
-        """Sizing is ctx.reply_split's job; the bot exposes no budget knob."""
-        from app.bots.api import DEFAULT_SPLIT_BYTES
-
+    async def test_bot_owns_no_message_sizing(self, test_db, tmp_path):
+        """Sizing is ctx.reply_split's alone — no budget knob, no size math."""
         entry = get_library_entry("mailbox")
         assert entry is not None
         keys = {field["key"] for field in entry["settings_schema"]}
@@ -455,8 +453,6 @@ class TestMailbox:
         assert max(len(t.encode("utf-8")) for t in texts) > 60, (
             "a stale response_budget setting must no longer size the parts"
         )
-        for text in texts:
-            assert len(text.encode("utf-8")) <= DEFAULT_SPLIT_BYTES
 
     async def test_short_reply_is_a_single_unnumbered_message(self, test_db, tmp_path):
         run = await self._mailbox(tmp_path)
@@ -482,16 +478,14 @@ class TestMailbox:
         assert len(texts[0].encode("utf-8")) == 300
         assert texts[0].startswith("TEST 300B ")
 
-    async def test_size_probe_defaults_to_the_engine_budget(self, test_db, tmp_path):
-        """With no N, the probe measures one ctx.reply_split-sized frame."""
-        from app.bots.api import DEFAULT_SPLIT_BYTES
-
+    async def test_size_probe_requires_an_explicit_size(self, test_db, tmp_path):
+        """No frame size is baked in, so a bare `mbx test` asks for N."""
         run = await self._mailbox(tmp_path)
         assert "unlocked" in (await run("mbx debug CHANGE-ME-s3cret"))[0]
 
         texts = await run("mbx test")
         assert len(texts) == 1
-        assert len(texts[0].encode("utf-8")) == DEFAULT_SPLIT_BYTES
+        assert texts[0] == "Usage: mbx test <bytes> (20-500)"
 
     async def test_stored_message_plays_back_whole(self, test_db, tmp_path):
         run = await self._mailbox(tmp_path)

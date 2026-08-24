@@ -15,10 +15,10 @@ DM-only commands (prefix configurable via MAILBOX_PREFIX, default "mbx"):
   mbx clear              Delete all heard (kept) messages
   mbx accept             Accept the privacy notice (once, stored per key)
   mbx ?                  Quick one-message reference
-  mbx help / mbx         Full multi-message guide
+  mbx help / mbx         Full command guide
   mbx debug <password>   Unlock debug once (per key), then `mbx debug` works
   mbx debug              Dump MAILBOX_* env (debug-gated)
-  mbx test [N]           Size probe of exactly N bytes (debug-gated, raw)
+  mbx test <N>           Size probe of exactly N bytes (debug-gated, raw)
 
 Converted from a legacy `def bot(**kwargs)` fanout script:
 - the bot()/_bot_inner() hook is one @bot.on_message() catch-all; blocking
@@ -31,14 +31,13 @@ Converted from a legacy `def bot(**kwargs)` fanout script:
 
 Runs on ALL messages. Normal Mailbox commands still execute only in DMs. If an
 `mbx ...` command is sent on a channel, the bot sends a flood advert, waits
-about 30 seconds, then opens Mailbox help in a DM when the contact resolves
-uniquely. Keep scope at "All channels" so passive directory learning works.
+about 30 seconds, then DMs the sender to carry on there when the contact
+resolves uniquely. Keep scope at "All channels" so passive directory learning works.
 
-Replies are NEVER truncated: command handlers return one unsplit string and the
-async entrypoint hands it to ``ctx.reply_split``, which sends numbered
-"(1/n) ..." parts in order — sized by the *compressed* wire length when the
-conversation has MCMP enabled, so more text fits per part. ``mbx test`` is the
-one exception: its size probe must go out verbatim, so it is tagged ``_Raw``.
+Replies are NEVER truncated and this bot never sizes them: command handlers
+return one plain string and the async entrypoint hands it to ``ctx.reply_split``,
+which owns delivery entirely. ``mbx test`` is the one exception: its size probe
+must go out verbatim, so it is tagged ``_Raw``.
 
 Body size: hard ceiling HARD_MAX_BODY (2000B) per stored message. MAILBOX_MAX_BODY
 can lower it (0 = ceiling), never raise it. Retention: unread 7d, kept 30d.
@@ -132,18 +131,6 @@ def _db_path(settings):
 
 def _prefix(settings):
     return str(_cfg(settings, "prefix") or "").strip()
-
-
-def _split_budget():
-    """The engine's per-message byte budget, for user-facing hints only.
-
-    Splitting itself belongs to ``ctx.reply_split`` — this bot no longer carries
-    a budget setting. Two replies still want a number to quote: the "~N parts at
-    playback" estimate and the default size of the ``mbx test`` probe.
-    """
-    from remoteterm import DEFAULT_SPLIT_BYTES
-
-    return int(DEFAULT_SPLIT_BYTES)
 
 
 def _max_body(settings):
@@ -340,14 +327,7 @@ def _cmd_store(settings, conn, recipient, body, key, name):
     )
     conn.commit()
     size = len(body.encode("utf-8"))
-    # Rough hint only: the real part count is ctx.reply_split's call at
-    # playback time, and MCMP conversations fit more per part.
-    n_parts = max(1, -(-size // (_split_budget() - 60)))
-    extra = (
-        f" NOTE: cut at {_max_body(settings)}B limit."
-        if truncated
-        else (f" (~{n_parts} parts at playback)" if n_parts > 1 else "")
-    )
+    extra = f" NOTE: cut at {_max_body(settings)}B limit." if truncated else ""
     return (
         f"Saved for {recipient[:20]} ({size}B). "
         f"Tell them to DM me '{_prefix(settings)} inbox'.{extra}"
@@ -558,7 +538,7 @@ def _cmd_help_short(settings):
 
 
 def _cmd_help(settings):
-    """Condensed guide, ~3 parts. Newlines are preferred split points."""
+    """Condensed guide. Newlines keep the wording readable as it goes out."""
     p = _prefix(settings)
     return (
         f"MAILBOX: Hold messages for offline nodes (unread 7d, read 30d).\n"
@@ -574,11 +554,15 @@ def _cmd_help(settings):
 
 
 def _cmd_size_test(settings, arg):
-    """Exactly-N-byte probe. _Raw so reply_split never renumbers or cuts it."""
+    """Exactly-N-byte probe. _Raw so reply_split never renumbers or cuts it.
+
+    N is required: the bot knows nothing about frame sizes, so there is no
+    default to fall back on.
+    """
     try:
-        n = int(arg) if arg else _split_budget()
-    except ValueError:
-        n = _split_budget()
+        n = int(arg)
+    except (TypeError, ValueError):
+        return f"Usage: {_prefix(settings)} test <bytes> (20-500)"
     n = max(20, min(n, 500))
     prefix = f"TEST {n}B "
     ruler = "".join(f"{i:.>10}" for i in range(10, n + 20, 10))
@@ -644,18 +628,13 @@ async def _redirect_channel_mailbox_to_dm(ctx, sender_name):
 
         public_key = contacts[0].public_key
 
-        # Short individual frames are deliberate for MeshCore RF.
-        help_messages = [
-            "MAILBOX PRIVATE: Mailbox commands are used here in DM.",
-            "Start: mbx | mbx ? | mbx help | mbx accept",
-            "Send: mbx msg <key> <text> | mbx to <key|name>",
-            "Draft: mbx add <text> | mbx send [text]",
-            "Read: mbx inbox | mbx play [N] | mbx next [N]",
-            "Manage: mbx del | mbx clear",
-        ]
-
-        for help_text in help_messages:
-            await ctx.send_dm(public_key, help_text)
+        # One nudge, not a hand-rolled guide: 'mbx help' here answers through
+        # the normal DM path, which lets ctx.reply_split size the reply.
+        await ctx.send_dm(
+            public_key,
+            "MAILBOX PRIVATE: Mailbox commands are used here in DM. "
+            f"Send '{_prefix(ctx.settings)} help' for the full guide.",
+        )
 
     except asyncio.CancelledError:
         raise
@@ -672,10 +651,9 @@ async def _redirect_channel_mailbox_to_dm(ctx, sender_name):
 async def _send(ctx, reply):
     """Put one command's reply on the air.
 
-    ``_bot_inner`` and its ``_cmd_*`` helpers return a single unsplit string (or
-    None); ``ctx.reply_split`` owns the sizing entirely and turns it into as many
-    ``(i/n)`` parts as the link needs — no per-bot budget setting. A ``_Raw``
-    reply is sent verbatim so ``mbx test`` keeps its exact byte count.
+    ``_bot_inner`` and its ``_cmd_*`` helpers return one plain string (or None)
+    and never size it: ``ctx.reply_split`` owns delivery. A ``_Raw`` reply is
+    sent verbatim so ``mbx test`` keeps its exact byte count.
     """
     if reply is None:
         return
@@ -847,7 +825,7 @@ def _bot_inner(settings, **kwargs) -> "str | None":
         n_dir = conn.execute("SELECT COUNT(*) FROM directory").fetchone()[0]
         return (
             f"db={_db_path(settings)} "
-            f"split={_split_budget()} body={_max_body(settings)} "
+            f"body={_max_body(settings)} "
             f"(hard {HARD_MAX_BODY}) dir={n_dir} names"
             # f"env: {env_dump or '(none)'}"
         )
