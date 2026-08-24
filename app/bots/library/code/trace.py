@@ -12,7 +12,14 @@ BOT_META = {
     "name": "trace",
     "category": "Mesh",
     "description": "Active route trace along a hex path (real trace packet)",
-    "version": "1.2.0",
+    "long_description": (
+        "`trace a1b2` transmits a real trace packet along those hops and reports each node's name "
+        "and SNR from the response — measured path quality, not a guess from the contact list. The "
+        "radio must be connected, and a slow round trip can hit the bot engine's 10-second budget. "
+        "Every trace costs airtime on every hop, so it is worth keeping this one deliberate rather "
+        "than casual."
+    ),
+    "version": "1.2.1",
     "cooldown_seconds": 30,
     "settings_schema": [
         {

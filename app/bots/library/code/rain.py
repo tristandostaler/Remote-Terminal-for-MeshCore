@@ -11,7 +11,13 @@ BOT_META = {
     "name": "rain",
     "category": "Weather",
     "description": "Next-2h rain nowcast (Open-Meteo 15-min data)",
-    "version": "1.1.0",
+    "long_description": (
+        "`rain [place]` (or `nowcast`) answers the only weather question that matters in the next "
+        "two hours: is rain coming here, and when does it ease? It reads Open-Meteo's 15-minute "
+        "precipitation forecast for the location. With no place it uses the default location "
+        "below. No API key; the server needs internet access."
+    ),
+    "version": "1.1.1",
     "cooldown_seconds": 3,
     "settings_schema": [
         {

@@ -11,6 +11,7 @@ function makeBot(overrides: Partial<Bot> = {}): Bot {
     name: 'ping',
     category: 'Basic',
     description: 'Replies pong',
+    long_description: 'Replies pong, and reports how the message reached this node.',
     code: 'from remoteterm import bot',
     enabled: true,
     admin_only: false,

@@ -12,7 +12,14 @@ BOT_META = {
     "name": "weather_alerts",
     "category": "Alerts",
     "description": "Pushes new NWS alerts for a point to a channel",
-    "version": "1.0.0",
+    "long_description": (
+        "Polls api.weather.gov every five minutes for alerts active at the latitude and longitude "
+        "configured below, and pushes each new alert's headline to the configured channel exactly "
+        "once. Alerts already sent are remembered across restarts, so an app restart does not "
+        "replay them. US only — elsewhere the feed has nothing to report. It answers no keyword; "
+        "it only pushes."
+    ),
+    "version": "1.0.1",
     "settings_schema": [
         {
             "key": "default_lat",

@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS bots (
     name TEXT NOT NULL UNIQUE,
     category TEXT NOT NULL DEFAULT 'Custom',
     description TEXT NOT NULL DEFAULT '',
+    long_description TEXT NOT NULL DEFAULT '',
     code TEXT NOT NULL DEFAULT '',
     enabled INTEGER DEFAULT 0,
     admin_only INTEGER DEFAULT 0,

@@ -18,7 +18,14 @@ BOT_META = {
     "name": "alert",
     "category": "Alerts",
     "description": "Active emergency incidents from PulsePoint (needs agency ids)",
-    "version": "1.1.0",
+    "long_description": (
+        "`alert` lists the emergency incidents currently active at the PulsePoint agencies you "
+        "configure — the fire and EMS dispatch feed many US agencies publish. Set the agency id(s) "
+        "covering your area first (find them at web.pulsepoint.org); incidents older than the "
+        "configured age are dropped. PulsePoint returns an encrypted envelope, decrypted here with "
+        "the community-derived key. Internet access required."
+    ),
+    "version": "1.1.1",
     "cooldown_seconds": 30,
     "settings_schema": [
         {

@@ -51,6 +51,19 @@ function scopeListOf(bot: Bot): string[] {
   return [];
 }
 
+/** Renders `backticked` spans as inline code — bot descriptions name commands. */
+function withInlineCode(text: string) {
+  return text.split('`').map((part, index) =>
+    index % 2 === 1 ? (
+      <code key={index} className="font-mono text-[0.75rem] bg-muted rounded px-1 py-0.5">
+        {part}
+      </code>
+    ) : (
+      part
+    )
+  );
+}
+
 function SectionTitle({ title, hint }: { title: string; hint?: string }) {
   return (
     <div className="mb-2.5">
@@ -704,218 +717,238 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
 
       {/* ── Settings ── */}
       {tab === 'settings' && (
-        <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col md:flex-row gap-8">
-          <div className="flex-1 max-w-md flex flex-col gap-5">
-            <div>
-              <SectionTitle
-                title="Where it runs"
-                hint="Which conversations this bot listens to. Triggers still apply. New bots start on #bot / #bots plus DMs so they stay off Public."
-              />
-              <div className="inline-flex gap-0.5 bg-muted rounded-lg p-[3px] mb-2.5">
-                {(['all', 'only', 'except'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => {
-                      setScopeMode(mode);
-                      markDirty();
-                    }}
-                    className={cn(
-                      'px-3 py-1 rounded-md text-xs transition-colors',
-                      scopeMode === mode
-                        ? 'bg-background text-foreground shadow-sm'
-                        : 'text-muted-foreground hover:text-foreground'
-                    )}
-                  >
-                    {mode === 'all' ? 'All channels' : mode === 'only' ? 'Only…' : 'All except…'}
-                  </button>
-                ))}
-              </div>
-              {scopeMode !== 'all' && (
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  {scopeList.map((key) => {
-                    const label = scopeChannelLabel(key, channels);
-                    const unjoined = isUnjoinedChannel(key, channels);
-                    return (
-                      <span
-                        key={key}
-                        title={
-                          unjoined
-                            ? `${label} is not on this node — join it to let the bot answer there`
-                            : undefined
-                        }
-                        className={cn(
-                          'inline-flex items-center gap-1.5 text-xs rounded-md px-2 py-1',
-                          unjoined ? 'bg-muted text-muted-foreground' : 'bg-primary/10 text-primary'
-                        )}
-                      >
-                        {label}
-                        {unjoined && <span className="text-[0.625rem]">not joined</span>}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setScopeList((prev) => prev.filter((k) => k !== key));
-                            markDirty();
-                          }}
-                          aria-label={`Remove ${label}`}
-                        >
-                          <X className="h-3 w-3 opacity-70" />
-                        </button>
-                      </span>
-                    );
-                  })}
-                  <select
-                    value=""
-                    onChange={(e) => {
-                      if (e.target.value && !scopeList.includes(e.target.value)) {
-                        setScopeList((prev) => [...prev, e.target.value]);
-                        markDirty();
-                      }
-                    }}
-                    className="h-7 rounded-md border border-dashed border-input bg-transparent px-2 text-xs text-muted-foreground"
-                  >
-                    <option value="">+ Add channel</option>
-                    {hashtagChannels
-                      .filter((c) => !scopeList.includes(c.key))
-                      .map((c) => (
-                        <option key={c.key} value={c.key}>
-                          {c.name}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-              )}
-              {scopeMode === 'only' && unjoinedScopeLabels.length > 0 && (
-                <p className="text-[0.6875rem] text-muted-foreground mb-2 leading-relaxed">
-                  {unjoinedScopeLabels.join(', ')} {unjoinedScopeLabels.length === 1 ? 'is' : 'are'}{' '}
-                  not on this node, so nothing arrives from there yet. Join with + New message ›
-                  hashtag channel, or point the bot at a channel you already have.
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-6">
+          {(bot.description || bot.long_description) && (
+            <div className="max-w-3xl">
+              <SectionTitle title="What this bot does" />
+              {bot.description && (
+                <p className="text-[0.8125rem] leading-relaxed">
+                  {withInlineCode(bot.description)}
                 </p>
               )}
-              <label className="flex items-center gap-2.5 cursor-pointer mt-2">
-                <input
-                  type="checkbox"
-                  checked={respondToDms}
-                  onChange={(e) => {
-                    setRespondToDms(e.target.checked);
-                    markDirty();
-                  }}
-                  className="w-4 h-4 rounded border-input accent-primary"
-                />
-                <span className="text-[0.8125rem]">Respond to direct messages</span>
-              </label>
-              <label className="flex items-start gap-2.5 cursor-pointer mt-2">
-                <input
-                  type="checkbox"
-                  checked={adminOnly}
-                  onChange={(e) => {
-                    setAdminOnly(e.target.checked);
-                    markDirty();
-                  }}
-                  className="w-4 h-4 rounded border-input accent-primary mt-0.5"
-                />
-                <span className="text-[0.8125rem]">
-                  Admins only{' '}
-                  <span className="text-[0.6875rem] text-muted-foreground">
-                    — answer only senders on the Admin users list (Bots › Engine)
-                  </span>
-                </span>
-              </label>
+              {bot.long_description && (
+                <p className="text-[0.8125rem] text-muted-foreground leading-relaxed mt-1.5 whitespace-pre-line">
+                  {withInlineCode(bot.long_description)}
+                </p>
+              )}
             </div>
-
-            <div className="border-t border-border pt-4">
-              <SectionTitle
-                title="Limits"
-                hint="Engine-wide limits (global reply, per-user, TX spacing) stack on top."
-              />
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <div className="text-xs text-muted-foreground mb-1">Cooldown (s)</div>
-                  <Input
-                    type="number"
-                    value={cooldown}
-                    min={0}
-                    onChange={(e) => {
-                      setCooldown(e.target.value);
-                      markDirty();
-                    }}
-                    className="h-8 font-mono text-[0.8125rem]"
-                  />
-                </div>
-                <div className="flex-1">
-                  <div className="text-xs text-muted-foreground mb-1">Per-user (s)</div>
-                  <Input
-                    type="number"
-                    value={perUserCooldown}
-                    min={0}
-                    onChange={(e) => {
-                      setPerUserCooldown(e.target.value);
-                      markDirty();
-                    }}
-                    className="h-8 font-mono text-[0.8125rem]"
-                  />
-                </div>
-                <div className="flex-1">
-                  <div className="text-xs text-muted-foreground mb-1">Queue threshold (s)</div>
-                  <Input
-                    type="number"
-                    value={queueThreshold}
-                    min={0}
-                    onChange={(e) => {
-                      setQueueThreshold(e.target.value);
-                      markDirty();
-                    }}
-                    className="h-8 font-mono text-[0.8125rem]"
-                  />
-                </div>
-              </div>
-              <p className="text-[0.6875rem] text-muted-foreground mt-2">
-                A request arriving within the queue threshold of cooldown expiry is queued instead
-                of dropped.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex-1 max-w-md">
-            <SectionTitle
-              title="Bot settings"
-              hint="Declared by the bot's settings schema — read in code via ctx.settings."
-            />
-            {bot.settings_schema.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
-                This bot declares no settings. Add a settings_schema to BOT_META in the code to get
-                typed fields here.
-              </p>
-            ) : (
-              <div className="flex flex-col gap-3.5">
-                {bot.settings_schema.map((field) => {
-                  if (
-                    field.show_when &&
-                    String(
-                      settings[field.show_when.key] ??
-                        bot.settings_schema.find((item) => item.key === field.show_when?.key)
-                          ?.default ??
-                        ''
-                    ) !== field.show_when.value
-                  ) {
-                    return null;
-                  }
-                  return (
-                    <SchemaField
-                      key={field.key}
-                      field={field}
-                      value={settings[field.key]}
-                      schema={bot.settings_schema}
-                      settings={settings}
-                      onChange={(value) => {
-                        setSettings((prev) => ({ ...prev, [field.key]: value }));
+          )}
+          <div className="flex flex-col md:flex-row gap-8">
+            <div className="flex-1 max-w-md flex flex-col gap-5">
+              <div>
+                <SectionTitle
+                  title="Where it runs"
+                  hint="Which conversations this bot listens to. Triggers still apply. New bots start on #bot / #bots plus DMs so they stay off Public."
+                />
+                <div className="inline-flex gap-0.5 bg-muted rounded-lg p-[3px] mb-2.5">
+                  {(['all', 'only', 'except'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => {
+                        setScopeMode(mode);
                         markDirty();
                       }}
-                    />
-                  );
-                })}
+                      className={cn(
+                        'px-3 py-1 rounded-md text-xs transition-colors',
+                        scopeMode === mode
+                          ? 'bg-background text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {mode === 'all' ? 'All channels' : mode === 'only' ? 'Only…' : 'All except…'}
+                    </button>
+                  ))}
+                </div>
+                {scopeMode !== 'all' && (
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {scopeList.map((key) => {
+                      const label = scopeChannelLabel(key, channels);
+                      const unjoined = isUnjoinedChannel(key, channels);
+                      return (
+                        <span
+                          key={key}
+                          title={
+                            unjoined
+                              ? `${label} is not on this node — join it to let the bot answer there`
+                              : undefined
+                          }
+                          className={cn(
+                            'inline-flex items-center gap-1.5 text-xs rounded-md px-2 py-1',
+                            unjoined
+                              ? 'bg-muted text-muted-foreground'
+                              : 'bg-primary/10 text-primary'
+                          )}
+                        >
+                          {label}
+                          {unjoined && <span className="text-[0.625rem]">not joined</span>}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setScopeList((prev) => prev.filter((k) => k !== key));
+                              markDirty();
+                            }}
+                            aria-label={`Remove ${label}`}
+                          >
+                            <X className="h-3 w-3 opacity-70" />
+                          </button>
+                        </span>
+                      );
+                    })}
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value && !scopeList.includes(e.target.value)) {
+                          setScopeList((prev) => [...prev, e.target.value]);
+                          markDirty();
+                        }
+                      }}
+                      className="h-7 rounded-md border border-dashed border-input bg-transparent px-2 text-xs text-muted-foreground"
+                    >
+                      <option value="">+ Add channel</option>
+                      {hashtagChannels
+                        .filter((c) => !scopeList.includes(c.key))
+                        .map((c) => (
+                          <option key={c.key} value={c.key}>
+                            {c.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
+                {scopeMode === 'only' && unjoinedScopeLabels.length > 0 && (
+                  <p className="text-[0.6875rem] text-muted-foreground mb-2 leading-relaxed">
+                    {unjoinedScopeLabels.join(', ')}{' '}
+                    {unjoinedScopeLabels.length === 1 ? 'is' : 'are'} not on this node, so nothing
+                    arrives from there yet. Join with + New message › hashtag channel, or point the
+                    bot at a channel you already have.
+                  </p>
+                )}
+                <label className="flex items-center gap-2.5 cursor-pointer mt-2">
+                  <input
+                    type="checkbox"
+                    checked={respondToDms}
+                    onChange={(e) => {
+                      setRespondToDms(e.target.checked);
+                      markDirty();
+                    }}
+                    className="w-4 h-4 rounded border-input accent-primary"
+                  />
+                  <span className="text-[0.8125rem]">Respond to direct messages</span>
+                </label>
+                <label className="flex items-start gap-2.5 cursor-pointer mt-2">
+                  <input
+                    type="checkbox"
+                    checked={adminOnly}
+                    onChange={(e) => {
+                      setAdminOnly(e.target.checked);
+                      markDirty();
+                    }}
+                    className="w-4 h-4 rounded border-input accent-primary mt-0.5"
+                  />
+                  <span className="text-[0.8125rem]">
+                    Admins only{' '}
+                    <span className="text-[0.6875rem] text-muted-foreground">
+                      — answer only senders on the Admin users list (Bots › Engine)
+                    </span>
+                  </span>
+                </label>
               </div>
-            )}
+
+              <div className="border-t border-border pt-4">
+                <SectionTitle
+                  title="Limits"
+                  hint="Engine-wide limits (global reply, per-user, TX spacing) stack on top."
+                />
+                <div className="flex gap-3">
+                  <div className="flex-1">
+                    <div className="text-xs text-muted-foreground mb-1">Cooldown (s)</div>
+                    <Input
+                      type="number"
+                      value={cooldown}
+                      min={0}
+                      onChange={(e) => {
+                        setCooldown(e.target.value);
+                        markDirty();
+                      }}
+                      className="h-8 font-mono text-[0.8125rem]"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-xs text-muted-foreground mb-1">Per-user (s)</div>
+                    <Input
+                      type="number"
+                      value={perUserCooldown}
+                      min={0}
+                      onChange={(e) => {
+                        setPerUserCooldown(e.target.value);
+                        markDirty();
+                      }}
+                      className="h-8 font-mono text-[0.8125rem]"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-xs text-muted-foreground mb-1">Queue threshold (s)</div>
+                    <Input
+                      type="number"
+                      value={queueThreshold}
+                      min={0}
+                      onChange={(e) => {
+                        setQueueThreshold(e.target.value);
+                        markDirty();
+                      }}
+                      className="h-8 font-mono text-[0.8125rem]"
+                    />
+                  </div>
+                </div>
+                <p className="text-[0.6875rem] text-muted-foreground mt-2">
+                  A request arriving within the queue threshold of cooldown expiry is queued instead
+                  of dropped.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex-1 max-w-md">
+              <SectionTitle
+                title="Bot settings"
+                hint="Declared by the bot's settings schema — read in code via ctx.settings."
+              />
+              {bot.settings_schema.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  This bot declares no settings. Add a settings_schema to BOT_META in the code to
+                  get typed fields here.
+                </p>
+              ) : (
+                <div className="flex flex-col gap-3.5">
+                  {bot.settings_schema.map((field) => {
+                    if (
+                      field.show_when &&
+                      String(
+                        settings[field.show_when.key] ??
+                          bot.settings_schema.find((item) => item.key === field.show_when?.key)
+                            ?.default ??
+                          ''
+                      ) !== field.show_when.value
+                    ) {
+                      return null;
+                    }
+                    return (
+                      <SchemaField
+                        key={field.key}
+                        field={field}
+                        value={settings[field.key]}
+                        schema={bot.settings_schema}
+                        settings={settings}
+                        onChange={(value) => {
+                          setSettings((prev) => ({ ...prev, [field.key]: value }));
+                          markDirty();
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

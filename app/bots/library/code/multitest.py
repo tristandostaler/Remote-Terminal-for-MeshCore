@@ -18,7 +18,14 @@ BOT_META = {
     "name": "multitest",
     "category": "Mesh",
     "description": "Collects unique message paths heard during a 6s window",
-    "version": "1.3.0",
+    "long_description": (
+        "Say `multitest` and the bot listens for six seconds, then reports every distinct routing "
+        "path it heard in that window, each as its repeater hops separated by commas. Have other "
+        "stations transmit while it counts. Repeats that only extend a path already seen are "
+        "stages of the same propagation, not new routes, so they are collapsed into the longest "
+        "observation. Good for comparing coverage after moving an antenna."
+    ),
+    "version": "1.3.1",
     "cooldown_seconds": 30,
 }
 

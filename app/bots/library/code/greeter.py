@@ -15,7 +15,14 @@ BOT_META = {
     "name": "greeter",
     "category": "Basic",
     "description": "Welcomes first-time posters per channel",
-    "version": "1.1.0",
+    "long_description": (
+        "Watches its channels and welcomes each sender the first time they post there, using the "
+        "greeting text configured below. Who has been greeted is remembered per sender and "
+        "channel, so a restart does not re-greet anyone. Careful on first enable: everyone counts "
+        "as new then, regulars included — try it on a quiet channel first, or let it run through a "
+        "busy hour before announcing it. It answers no commands."
+    ),
+    "version": "1.1.1",
     "respond_to_dms": False,
     "settings_schema": [
         {

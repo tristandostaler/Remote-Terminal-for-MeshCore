@@ -37,6 +37,7 @@ function makeBot(): Bot {
     name: 'provider',
     category: 'Test',
     description: 'Schema renderer test',
+    long_description: 'Renders the settings schema fields, nothing more.',
     code: 'from remoteterm import bot',
     enabled: false,
     admin_only: false,
@@ -242,5 +243,32 @@ describe('BotEditor extra keywords', () => {
     expect(
       screen.queryByRole('button', { name: 'Remove keyword wxalert' })
     ).not.toBeInTheDocument();
+  });
+});
+
+describe('BotEditor about block', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('shows the short description and the long one under it on the Settings tab', async () => {
+    vi.spyOn(api, 'getBot').mockResolvedValue(makeBot());
+    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+
+    // Settings is the tab the editor opens on: what the bot does comes before
+    // how it is configured.
+    expect(await screen.findByText('Schema renderer test')).toBeInTheDocument();
+    expect(
+      screen.getByText('Renders the settings schema fields, nothing more.')
+    ).toBeInTheDocument();
+  });
+
+  it('skips the block for a bot that describes itself nowhere', async () => {
+    const bot = makeBot();
+    bot.description = '';
+    bot.long_description = '';
+    vi.spyOn(api, 'getBot').mockResolvedValue(bot);
+    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+
+    await screen.findByText('Where it runs');
+    expect(screen.queryByText('What this bot does')).not.toBeInTheDocument();
   });
 });

@@ -71,6 +71,14 @@ BOT_META = {
     "name": "mailbox",
     "category": "Communication",
     "description": "Store-and-forward mailbox for offline nodes (DM 'mbx help')",
+    "long_description": (
+        "Store-and-forward for nodes that are not online right now. `mbx msg <key> <text>` leaves "
+        "a message in one shot, or `mbx to <name>`, `mbx add` and `mbx send` compose one over "
+        "several frames. Recipients DM `mbx inbox` for counts, then `mbx play` / `mbx next` to "
+        "read and `mbx del` / `mbx clear` to tidy up. Names resolve only for nodes this companion "
+        "has heard; a public-key prefix always works. `mbx help` prints the full guide; messages "
+        "live in the SQLite file configured below."
+    ),
     "version": "5.1.1",
     "respond_to_dms": True,
     "settings_schema": [

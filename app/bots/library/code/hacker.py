@@ -12,7 +12,13 @@ BOT_META = {
     "name": "hacker",
     "category": "Fun",
     "description": "Linux commands get joke supervillain-mainframe errors",
-    "version": "1.2.0",
+    "long_description": (
+        "A gag. Type a Linux command such as `sudo`, `rm -rf` or `whoami` in one of this bot's "
+        "channels and the node answers with a straight-faced supervillain-mainframe error. Nothing "
+        "is ever executed — the keywords only pick a joke line. It answers to a long list of shell "
+        "words, so keep it away from channels where those get typed in earnest. Offline."
+    ),
+    "version": "1.2.1",
 }
 
 KEYWORDS = (

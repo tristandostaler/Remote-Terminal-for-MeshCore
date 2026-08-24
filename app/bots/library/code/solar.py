@@ -23,7 +23,14 @@ BOT_META = {
     "name": "solar",
     "category": "Solar",
     "description": "Space weather: solar indices, HF band conditions, aurora outlook",
-    "version": "1.2.0",
+    "long_description": (
+        "`solar` reports the space-weather numbers — solar flux, sunspots, A index and K index. "
+        "`hfcond` (or `bands`) turns the same HamQSL document into day and night propagation per "
+        "band, and `aurora` / `kp` maps the NOAA planetary K index onto the G storm scale. The "
+        "HamQSL fetch is cached for a few minutes, so asking for both costs one request. Internet "
+        "access required."
+    ),
+    "version": "1.2.1",
     "cooldown_seconds": 5,
 }
 

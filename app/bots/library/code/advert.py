@@ -11,7 +11,14 @@ BOT_META = {
     "name": "advert",
     "category": "Admin",
     "description": "Sends a flood advert on request (DM, admins, 1h cooldown)",
-    "version": "1.1.0",
+    "long_description": (
+        "`advert` makes this node transmit an advert, which every repeater in earshot rebroadcasts "
+        "so the mesh learns the node again. That costs airtime for everyone, so it ships DM-only, "
+        "admin-gated, and on a one-hour cooldown. The mode setting picks a flood advert or a "
+        "zero-hop one that only direct neighbours hear. Enable it so a remote operator can "
+        "re-announce this node without opening the app."
+    ),
+    "version": "1.1.1",
     "admin_only": True,
     "cooldown_seconds": 3600,
     "settings_schema": [

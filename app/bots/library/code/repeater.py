@@ -15,7 +15,13 @@ BOT_META = {
     "name": "repeater",
     "category": "Admin",
     "description": "Repeater fleet overview: list, stats (DM, admins)",
-    "version": "1.2.0",
+    "long_description": (
+        "`repeater list` names the repeaters this node knows about and `repeater stats` summarises "
+        "the fleet. DM-only and admin-gated, since it is an operator tool rather than a mesh "
+        "command. The destructive fleet operations — purge, restore, auto-manage — deliberately "
+        "stay in Settings › Radio-App Management, where they ask for confirmation first."
+    ),
+    "version": "1.2.1",
     "admin_only": True,
     "respond_to_dms": True,
 }

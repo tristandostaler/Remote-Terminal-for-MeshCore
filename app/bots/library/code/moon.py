@@ -14,7 +14,12 @@ BOT_META = {
     "name": "moon",
     "category": "Solar",
     "description": "Moon phase, illumination, next full/new moon",
-    "version": "1.1.0",
+    "long_description": (
+        "`moon` reports the current phase name, how much of the disc is lit, and the dates of the "
+        "next full and new moon. It is pure arithmetic from a known new-moon epoch, so it needs no "
+        "API key and no internet access — it answers just as well on an isolated node."
+    ),
+    "version": "1.1.1",
 }
 
 _SYNODIC_DAYS = 29.530588853

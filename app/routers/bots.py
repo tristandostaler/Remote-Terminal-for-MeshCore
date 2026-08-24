@@ -61,6 +61,7 @@ BOT_META = {
     "name": "my-bot",
     "category": "Custom",
     "description": "Describe what this bot does",
+    "long_description": "A few more lines: what it answers, what it needs, what it costs.",
     "version": "1.0.0",
 }
 
@@ -86,6 +87,10 @@ def _extract_meta_updates(code: str) -> dict[str, Any]:
     schema = meta.get("settings_schema")
     if isinstance(schema, list):
         updates["settings_schema"] = schema
+    for key in ("description", "long_description"):
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            updates[key] = value.strip()
     return updates
 
 
@@ -155,6 +160,7 @@ async def get_library() -> list[dict[str, Any]]:
             "name": entry["name"],
             "category": entry["category"],
             "description": entry["description"],
+            "long_description": entry.get("long_description", ""),
             "version": entry["version"],
             "installed": entry["key"] in installed,
         }
@@ -267,6 +273,7 @@ async def create_bot(body: BotCreateRequest) -> Bot:
     code = body.code
     category = body.category
     description = body.description
+    long_description = body.long_description
     settings_schema: list[dict[str, Any]] = []
     settings: dict[str, Any] = {}
     meta_defaults: dict[str, Any] = {}
@@ -277,6 +284,7 @@ async def create_bot(body: BotCreateRequest) -> Bot:
         code = entry["code"]
         category = category if category != "Custom" else entry["category"]
         description = description or entry["description"]
+        long_description = long_description or entry.get("long_description", "")
         settings_schema = entry.get("settings_schema") or []
         settings = entry.get("settings") or {}
         meta_defaults = entry
@@ -288,6 +296,7 @@ async def create_bot(body: BotCreateRequest) -> Bot:
         name=name,
         category=category,
         description=description,
+        long_description=long_description,
         code=code,
         enabled=body.enabled,
         respond_to_dms=bool(meta_defaults.get("respond_to_dms", True)),
@@ -335,7 +344,9 @@ async def update_bot(bot_id: str, body: BotUpdateRequest) -> Bot:
 
     if "code" in fields and fields["code"] is not None:
         await _validate_code_or_400(fields["code"])
-        fields.update(_extract_meta_updates(fields["code"]))
+        # An explicit value in the request wins; the rest follow the code's meta.
+        for key, value in _extract_meta_updates(fields["code"]).items():
+            fields.setdefault(key, value)
         if record.builtin_key and fields["code"] != record.code:
             fields["modified"] = True
 
@@ -382,6 +393,7 @@ async def reset_bot(bot_id: str) -> Bot:
         bot_id,
         code=entry["code"],
         description=entry["description"],
+        long_description=entry.get("long_description", ""),
         category=entry["category"],
         settings_schema=entry.get("settings_schema") or [],
         builtin_version=entry["version"],

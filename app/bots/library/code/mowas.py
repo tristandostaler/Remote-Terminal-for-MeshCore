@@ -19,7 +19,14 @@ BOT_META = {
     "name": "mowas",
     "category": "Alerts",
     "description": "Forwards MoWaS civil-protection warnings from a webhook to channels",
-    "version": "1.0.0",
+    "long_description": (
+        "Bridges German MoWaS civil-protection warnings onto the mesh. A relay POSTs each warning "
+        "to /api/hooks/mowas, gated by the token set below, and the bot forwards it to the German "
+        "and/or English channel you configure. CAP-JSON, CAP XML and a plain headline/description "
+        "payload are all accepted. Nothing is polled here — the sender pushes, so no warning "
+        "arrives until the relay is configured."
+    ),
+    "version": "1.0.1",
     "respond_to_dms": False,
     "settings_schema": [
         {

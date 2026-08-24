@@ -9,7 +9,8 @@ dict (read by exec'ing the source through the normal loader):
         "key": "wx",                  # stable identity (builtin_key)
         "name": "wx",                 # default display name
         "category": "Weather",
-        "description": "...",
+        "description": "...",          # one line, shown in the bots list
+        "long_description": "...",     # 3-5 lines, shown on the Settings tab
         "version": "1.0.0",
         "settings_schema": [...],      # optional; drives the Settings tab
         "settings": {...},             # optional defaults for ctx.settings
@@ -59,7 +60,7 @@ def _extract_meta(source: str, filename: str) -> dict[str, Any]:
     meta = loaded.namespace.get("BOT_META")
     if not isinstance(meta, dict):
         raise LibraryError(f"{filename}: missing module-level BOT_META dict")
-    for required in ("key", "name", "category", "description", "version"):
+    for required in ("key", "name", "category", "description", "long_description", "version"):
         if not meta.get(required):
             raise LibraryError(f"{filename}: BOT_META.{required} is required")
     return meta
@@ -225,6 +226,7 @@ async def ensure_seeded() -> int:
                 name=name,
                 category=entry["category"],
                 description=entry["description"],
+                long_description=entry.get("long_description", ""),
                 code=entry["code"],
                 enabled=False,
                 admin_only=bool(entry.get("admin_only", False)),
@@ -244,10 +246,18 @@ async def ensure_seeded() -> int:
                 existing.id,
                 code=entry["code"],
                 description=entry["description"],
+                long_description=entry.get("long_description", ""),
                 category=entry["category"],
                 settings_schema=entry.get("settings_schema") or [],
                 builtin_version=entry["version"],
             )
+            changed += 1
+        elif not existing.long_description and entry.get("long_description"):
+            # Backfill only. Rows that predate the column have nothing to show
+            # on the Settings tab, and a bot the operator modified would never
+            # be refreshed by the version path above — filling an empty field
+            # overwrites nothing they wrote.
+            await BotRepository.update(existing.id, long_description=entry["long_description"])
             changed += 1
     if changed:
         logger.info("Bot library seeding applied %d change(s)", changed)

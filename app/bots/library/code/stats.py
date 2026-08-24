@@ -7,7 +7,13 @@ BOT_META = {
     "name": "stats",
     "category": "Mesh",
     "description": "24h mesh statistics digest",
-    "version": "1.1.0",
+    "long_description": (
+        "`stats` sends a two-line digest of the last 24 hours — messages seen, nodes heard, "
+        "repeaters up, new contacts this week — followed by the totals this node knows about. It "
+        "reads the app's own database, so it answers immediately and adds no mesh traffic beyond "
+        "the reply. A good pulse check to leave enabled on a bot channel."
+    ),
+    "version": "1.1.1",
 }
 
 

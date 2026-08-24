@@ -14,7 +14,14 @@ BOT_META = {
     "name": "prefix-collision",
     "category": "Alerts",
     "description": "Warns a channel when a new repeater collides on a 1-byte prefix",
-    "version": "1.0.0",
+    "long_description": (
+        "Watches for newly heard repeaters and warns the configured channel whenever a new one's "
+        "first path byte matches a repeater already known — the collision that makes routing "
+        "ambiguous for everyone. It fires on the new-contact event rather than polling, and a "
+        "cooldown keeps a flapping neighbour from repeating the warning. Set the target channel "
+        "below before enabling; it answers no keywords."
+    ),
+    "version": "1.0.1",
     "respond_to_dms": False,
     "settings_schema": [
         {

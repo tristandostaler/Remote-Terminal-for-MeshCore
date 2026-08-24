@@ -12,7 +12,14 @@ BOT_META = {
     "name": "inbound webhook",
     "category": "Custom",
     "description": "POST /api/hooks/send relays a message to a channel or DM",
-    "version": "1.0.0",
+    "long_description": (
+        "A one-way bridge from HTTP into the mesh: POST /api/hooks/send with a JSON body naming a "
+        "channel (by name or 32-hex key) plus a message, or a 64-hex dm_to key for a direct "
+        "message. Requests must carry an X-Hook-Token header matching the token set below — set "
+        "one before enabling, as an empty token keeps the hook shut. Messages are capped at 400 "
+        "characters. Wire it to alerting, home automation, or a cron job on another host."
+    ),
+    "version": "1.0.1",
     "settings_schema": [
         {
             "key": "webhook_token",
