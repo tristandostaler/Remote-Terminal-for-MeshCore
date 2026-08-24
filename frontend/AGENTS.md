@@ -88,6 +88,7 @@ frontend/src/
 │   ├── rawPacketIdentity.ts    # observation_id vs id dedup helpers
 │   ├── rawPacketStats.ts       # Session packet stats windows, rankings, and coverage helpers
 │   ├── regionScope.ts          # Regional flood-scope label/normalization helpers
+│   ├── botScope.ts             # Default bot channels (#bot/#bots) + scope chip labels
 │   ├── meshcoreOpenPayloads.ts # Rich MeshCore Open payload detection/rendering helpers
 │   ├── textReplace.ts          # Shared message text substitution helpers
 │   ├── pathHopWidthPreference.ts # LocalStorage persistence for hop-width display toggle
@@ -379,6 +380,16 @@ It falls back to a 12-char prefix when `name` is missing.
 ### `utils/pathUtils.ts`
 
 Distance/validation helpers used by path + map UI.
+
+### `utils/botScope.ts`
+
+The channels a bot listens to by default — `#bot` and `#bots`, plus DMs — and
+the labelling that makes a bot's scope readable. Hashtag keys are derived from
+the name (identical on every node), so the default names channels this node may
+not have joined; `scopeChannelLabel` prefers the joined channel's name, falls
+back to the well-known bot-channel name, then a truncated key, and
+`isUnjoinedChannel` drives the "not joined" hint in the bot editor. `DEFAULT_BOT_CHANNELS`
+mirrors `BOT_CHANNEL_KEYS` in `app/channel_constants.py` — a test pins the two together.
 
 ## Types and Contracts (`types.ts`)
 

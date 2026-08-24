@@ -14,6 +14,7 @@ import type {
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { toast } from '../ui/sonner';
+import { isUnjoinedChannel, scopeChannelLabel } from '../../utils/botScope';
 import { cn } from '@/lib/utils';
 import { BotTriggerChips } from './BotsView';
 
@@ -533,6 +534,13 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
   }, [newCron]);
 
   const hashtagChannels = useMemo(() => channels.filter((c) => c.key), [channels]);
+  const unjoinedScopeLabels = useMemo(
+    () =>
+      scopeList
+        .filter((key) => isUnjoinedChannel(key, channels))
+        .map((key) => scopeChannelLabel(key, channels)),
+    [scopeList, channels]
+  );
 
   if (loadError) {
     return (
@@ -695,7 +703,7 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
             <div>
               <SectionTitle
                 title="Where it runs"
-                hint="Which conversations this bot listens to. Triggers still apply."
+                hint="Which conversations this bot listens to. Triggers still apply. New bots start on #bot / #bots plus DMs so they stay off Public."
               />
               <div className="inline-flex gap-0.5 bg-muted rounded-lg p-[3px] mb-2.5">
                 {(['all', 'only', 'except'] as const).map((mode) => (
@@ -720,20 +728,30 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
               {scopeMode !== 'all' && (
                 <div className="flex flex-wrap gap-1.5 mb-2">
                   {scopeList.map((key) => {
-                    const channel = channels.find((c) => c.key === key);
+                    const label = scopeChannelLabel(key, channels);
+                    const unjoined = isUnjoinedChannel(key, channels);
                     return (
                       <span
                         key={key}
-                        className="inline-flex items-center gap-1.5 text-xs bg-primary/10 text-primary rounded-md px-2 py-1"
+                        title={
+                          unjoined
+                            ? `${label} is not on this node — join it to let the bot answer there`
+                            : undefined
+                        }
+                        className={cn(
+                          'inline-flex items-center gap-1.5 text-xs rounded-md px-2 py-1',
+                          unjoined ? 'bg-muted text-muted-foreground' : 'bg-primary/10 text-primary'
+                        )}
                       >
-                        {channel?.name ?? `${key.slice(0, 8)}…`}
+                        {label}
+                        {unjoined && <span className="text-[0.625rem]">not joined</span>}
                         <button
                           type="button"
                           onClick={() => {
                             setScopeList((prev) => prev.filter((k) => k !== key));
                             markDirty();
                           }}
-                          aria-label={`Remove ${channel?.name ?? key}`}
+                          aria-label={`Remove ${label}`}
                         >
                           <X className="h-3 w-3 opacity-70" />
                         </button>
@@ -760,6 +778,13 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
                       ))}
                   </select>
                 </div>
+              )}
+              {scopeMode === 'only' && unjoinedScopeLabels.length > 0 && (
+                <p className="text-[0.6875rem] text-muted-foreground mb-2 leading-relaxed">
+                  {unjoinedScopeLabels.join(', ')} {unjoinedScopeLabels.length === 1 ? 'is' : 'are'}{' '}
+                  not on this node, so nothing arrives from there yet. Join with + New message ›
+                  hashtag channel, or point the bot at a channel you already have.
+                </p>
               )}
               <label className="flex items-center gap-2.5 cursor-pointer mt-2">
                 <input

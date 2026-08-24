@@ -14,11 +14,16 @@ dict (read by exec'ing the source through the normal loader):
         "settings_schema": [...],      # optional; drives the Settings tab
         "settings": {...},             # optional defaults for ctx.settings
         "respond_to_dms": True,        # optional (default True)
+        "scope": {...},                # optional; default is #bot/#bots + DMs
         "admin_only": False,           # optional
         "cooldown_seconds": 0,         # optional
         "per_user_cooldown_seconds": 0,
         "queue_threshold_seconds": 0,
     }
+
+All seeded bots are scoped to the default bot channels (``app/bot_scope.py``)
+unless ``BOT_META["scope"]`` says otherwise — a command bot loose on Public is
+noise for the whole mesh.
 
 Seeding is additive and non-destructive: a bot the operator modified
 (``modified = 1``) is never touched; an unmodified built-in is refreshed when

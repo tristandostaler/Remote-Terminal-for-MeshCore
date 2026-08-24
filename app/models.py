@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.bot_scope import default_bot_scope
 from app.path_utils import normalize_contact_route, normalize_route_override
 
 # Valid MeshCore contact types: 0=unknown, 1=client, 2=repeater, 3=room, 4=sensor.
@@ -1339,7 +1340,7 @@ class Bot(BaseModel):
     enabled: bool = False
     admin_only: bool = False
     respond_to_dms: bool = True
-    scope: dict = Field(default_factory=lambda: {"channels": "all"})
+    scope: dict = Field(default_factory=default_bot_scope)
     cooldown_seconds: float = 0
     per_user_cooldown_seconds: float = 0
     queue_threshold_seconds: float = 0
