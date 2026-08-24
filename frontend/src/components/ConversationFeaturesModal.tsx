@@ -1,13 +1,18 @@
+import { useCallback, useEffect, useState } from 'react';
+import { Loader2 } from 'lucide-react';
+
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { Switch } from './ui/switch';
 import { cn } from '@/lib/utils';
+import { api, type AeicStatus, type ImageCodecId } from '../api';
+import { toast } from './ui/sonner';
 
 /**
- * Per-conversation MeshCore Open feature toggles (compression today; image
- * sharing and other interop features to come). Opened from the chat header.
+ * Per-conversation MeshCore Open feature toggles. Opened from the chat header.
  *
- * Each feature is one {@link FeatureRow}; toggles apply immediately. To add a
- * feature, add a prop pair (state + setter) and render another row.
+ * Two features today: MCMP text compression, and which codec photos use. Each is
+ * one bordered block; changes apply immediately. To add a feature, add a prop
+ * pair (state + setter) and render another block.
  */
 
 interface FeatureRowProps {
@@ -40,6 +45,157 @@ const MCMP_VERSIONS: { value: number; label: string; description: string }[] = [
   { value: 3, label: 'v3', description: 'Container (timestamp); matches the advanced fork' },
 ];
 
+const IMAGE_CODECS: {
+  value: ImageCodecId;
+  label: string;
+  headline: string;
+  description: string;
+}[] = [
+  {
+    value: 'ie4',
+    label: 'Standard',
+    headline: '15-40 packets',
+    description: '256px greyscale AVIF/JPEG. Readable by MeshCore SAR clients.',
+  },
+  {
+    value: 'aeic',
+    label: 'AI reconstruction',
+    headline: '1-2 messages',
+    description: '512px colour from ~150 bytes. The receiver rebuilds it with a neural decoder.',
+  },
+];
+
+function formatMib(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(0)} MB`;
+}
+
+/**
+ * The AEIC option's availability, plus the model download it may need.
+ *
+ * Local to the modal rather than global state: it is only looked at here, and
+ * the answer can change while the dialog is open (a download finishing), so it
+ * re-polls while one is in flight.
+ */
+function useAeicStatus(open: boolean) {
+  const [status, setStatus] = useState<AeicStatus | null>(null);
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await api.getAeicStatus());
+    } catch {
+      // An older server without the endpoint just leaves the AI option disabled
+      // with its default explanation; nothing worth interrupting the user for.
+      setStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    void refresh();
+  }, [open, refresh]);
+
+  useEffect(() => {
+    if (!open || !status?.downloading) return;
+    const timer = window.setInterval(() => void refresh(), 1000);
+    return () => window.clearInterval(timer);
+  }, [open, status?.downloading, refresh]);
+
+  return { status, refresh };
+}
+
+/** Download / progress / diagnosis for the 958 MB model the AI codec needs. */
+function AeicModelPanel({
+  status,
+  onRefresh,
+}: {
+  status: AeicStatus;
+  onRefresh: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const start = useCallback(async () => {
+    setBusy(true);
+    try {
+      await api.startAeicModelDownload();
+      await onRefresh();
+    } catch (error) {
+      toast.error('Could not start the download', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [onRefresh]);
+
+  const cancel = useCallback(async () => {
+    setBusy(true);
+    try {
+      await api.cancelAeicModelDownload();
+      await onRefresh();
+    } finally {
+      setBusy(false);
+    }
+  }, [onRefresh]);
+
+  if (!status.runtime_available) {
+    return (
+      <p className="mt-2 text-xs leading-snug text-muted-foreground">
+        This server was installed without the optional <code>onnxruntime</code> dependency, so it
+        cannot run the AI codec. Reinstall with the <code>aeic</code> extra to enable it.
+      </p>
+    );
+  }
+
+  if (status.downloading) {
+    const done = status.installed_bytes + status.downloaded_bytes;
+    const percent = Math.min(100, Math.round((done / status.bundle_total_bytes) * 100));
+    return (
+      <div className="mt-2 space-y-1.5">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="animate-spin" size={13} />
+          <span className="truncate">
+            {status.download_file ?? 'Downloading'} — {percent}%
+          </span>
+        </div>
+        <div className="h-1 overflow-hidden rounded-full bg-muted">
+          <div className="h-full bg-primary transition-all" style={{ width: `${percent}%` }} />
+        </div>
+        <button
+          type="button"
+          onClick={() => void cancel()}
+          disabled={busy}
+          className="text-xs text-muted-foreground underline hover:text-foreground"
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
+  if (status.supports_decode) return null;
+
+  const missing = status.assets.filter((asset) => !asset.installed).length;
+  return (
+    <div className="mt-2 space-y-1.5">
+      <p className="text-xs leading-snug text-muted-foreground">
+        Needs a one-time {formatMib(status.bundle_total_bytes)} model download ({missing} of{' '}
+        {status.assets.length} files still missing). It lives on the server, not in your browser,
+        and is what reconstructs a photo from ~150 bytes.
+      </p>
+      {status.last_error && (
+        <p className="text-xs leading-snug text-destructive">{status.last_error}</p>
+      )}
+      <button
+        type="button"
+        onClick={() => void start()}
+        disabled={busy}
+        className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-accent disabled:opacity-60"
+      >
+        Download model ({formatMib(status.bundle_total_bytes)})
+      </button>
+    </div>
+  );
+}
+
 interface ConversationFeaturesModalProps {
   open: boolean;
   onClose: () => void;
@@ -48,12 +204,14 @@ interface ConversationFeaturesModalProps {
   conversationName: string;
   mcmpEnabled: boolean;
   mcmpVersion: number;
+  imageCodec: ImageCodecId;
   onSetMcmpEnabled: (
     type: 'channel' | 'contact',
     id: string,
     enabled: boolean,
     version: number
   ) => void;
+  onSetImageCodec: (type: 'channel' | 'contact', id: string, codec: ImageCodecId) => void;
 }
 
 export function ConversationFeaturesModal({
@@ -64,8 +222,16 @@ export function ConversationFeaturesModal({
   conversationName,
   mcmpEnabled,
   mcmpVersion,
+  imageCodec,
   onSetMcmpEnabled,
+  onSetImageCodec,
 }: ConversationFeaturesModalProps) {
+  const { status: aeicStatus, refresh: refreshAeic } = useAeicStatus(open);
+  // Only gate on the server's ability to ENCODE: that is what picking the codec
+  // for this conversation actually commits us to. Whether the peer can decode is
+  // their business and something we cannot know.
+  const aeicSelectable = aeicStatus?.supports_encode ?? false;
+
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <DialogContent className="sm:max-w-[520px]">
@@ -134,7 +300,58 @@ export function ConversationFeaturesModal({
               </div>
             )}
           </div>
-          {/* Future MeshCore Open features (image sharing, etc.) add a row here. */}
+
+          <div className="rounded-md border border-border p-3">
+            <div className="text-sm font-medium text-foreground">Photo codec</div>
+            <div className="mt-0.5 text-xs leading-snug text-muted-foreground">
+              How an attached photo is packed for the mesh. Both ends must use the same one.
+            </div>
+
+            <div
+              className="mt-2.5 grid grid-cols-2 gap-1.5"
+              role="radiogroup"
+              aria-label="Photo codec"
+            >
+              {IMAGE_CODECS.map((option) => {
+                const selected = imageCodec === option.value;
+                const disabled = option.value === 'aeic' && !aeicSelectable;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    aria-label={option.label}
+                    disabled={disabled}
+                    onClick={() => onSetImageCodec(conversationType, conversationId, option.value)}
+                    className={cn(
+                      'rounded-md border px-2.5 py-1.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      selected
+                        ? 'border-primary bg-primary/10 text-foreground'
+                        : 'border-border hover:bg-accent',
+                      disabled && 'cursor-not-allowed opacity-50 hover:bg-transparent'
+                    )}
+                  >
+                    <div className="font-medium">{option.label}</div>
+                    <div className="text-xs font-medium text-foreground/70">{option.headline}</div>
+                    <div className="text-xs leading-snug text-muted-foreground">
+                      {option.description}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {aeicStatus && <AeicModelPanel status={aeicStatus} onRefresh={refreshAeic} />}
+
+            {imageCodec === 'aeic' && (
+              <p className="mt-2 text-xs leading-snug text-muted-foreground">
+                AI reconstruction is lossy in an unusual way: the receiver gets a recognisably
+                similar picture rather than the same pixels. It is the only way a 512px colour photo
+                fits in one or two messages.
+              </p>
+            )}
+          </div>
         </div>
       </DialogContent>
     </Dialog>

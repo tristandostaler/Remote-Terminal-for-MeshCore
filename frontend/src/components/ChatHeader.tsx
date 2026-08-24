@@ -25,6 +25,7 @@ import { ContactAvatar } from './ContactAvatar';
 import { ContactStatusInfo } from './ContactStatusInfo';
 import type { Channel, Contact, Conversation, PathDiscoveryResponse, RadioConfig } from '../types';
 import { CONTACT_TYPE_ROOM } from '../types';
+import type { ImageCodecId } from '../api';
 
 interface ChatHeaderProps {
   conversation: Conversation;
@@ -50,6 +51,7 @@ interface ChatHeaderProps {
     enabled: boolean,
     version: number
   ) => void;
+  onSetImageCodec?: (type: 'channel' | 'contact', id: string, codec: ImageCodecId) => void;
   onSetChannelFloodScopeOverride?: (key: string, floodScopeOverride: string) => void;
   onSetChannelPathHashModeOverride?: (key: string, pathHashModeOverride: number | null) => void;
   onDeleteChannel: (key: string) => void;
@@ -77,6 +79,7 @@ export function ChatHeader({
   onToggleFavorite,
   onToggleMute,
   onSetMcmpEnabled,
+  onSetImageCodec,
   onSetChannelFloodScopeOverride,
   onSetChannelPathHashModeOverride,
   onDeleteChannel,
@@ -164,13 +167,17 @@ export function ChatHeader({
     conversation.type === 'contact'
       ? (activeContact?.mcmp_version ?? 2)
       : (activeChannel?.mcmp_version ?? 2);
+  const imageCodec: ImageCodecId =
+    conversation.type === 'contact'
+      ? (activeContact?.image_codec ?? 'ie4')
+      : (activeChannel?.image_codec ?? 'ie4');
   const showFeaturesButton =
     !!onSetMcmpEnabled &&
     ((conversation.type === 'contact' && !activeContactIsRoomServer) ||
       conversation.type === 'channel');
   // Any feature enabled -> highlight the button so active features are visible
   // without opening the modal.
-  const anyFeatureEnabled = mcmpEnabled;
+  const anyFeatureEnabled = mcmpEnabled || imageCodec !== 'ie4';
   const favoriteTitle =
     conversation.type === 'contact'
       ? isFav
@@ -595,7 +602,9 @@ export function ChatHeader({
           conversationName={conversation.name}
           mcmpEnabled={mcmpEnabled}
           mcmpVersion={mcmpVersion}
+          imageCodec={imageCodec}
           onSetMcmpEnabled={onSetMcmpEnabled}
+          onSetImageCodec={onSetImageCodec ?? (() => {})}
         />
       )}
     </header>

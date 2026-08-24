@@ -13,14 +13,20 @@ import {
 } from 'react';
 import { ImagePlus, Loader2, Mic, Smile, X } from 'lucide-react';
 import { api } from '../api';
-import { encodeMeshImage, type EncodedMeshImage } from '../services/imageCodec';
+import {
+  encodeMeshImage,
+  prepareAeicImage,
+  AEIC_SQUARE_SIZE,
+  type EncodedMeshImage,
+  type PreparedAeicImage,
+} from '../services/imageCodec';
+import type { ImageCodecId } from '../api';
 import { estimateImageTransmitSeconds, IMAGE_FRAGMENT_BYTES } from '../utils/imageEnvelope';
 import { VoiceCapture } from '../services/voiceCapture';
 import { Shrink } from 'lucide-react';
 import { Button } from './ui/button';
 import { toast } from './ui/sonner';
 import { cn } from '@/lib/utils';
-import { api } from '../api';
 import {
   getTextReplaceEnabled,
   getTextReplaceMapJson,
@@ -84,6 +90,9 @@ interface MessageInputProps {
   mcmpEnabled?: boolean;
   /** MCMP transport version (2 or 3) the estimate should size for. */
   mcmpVersion?: number;
+  /** Which codec an attached photo uses. 'aeic' replaces the AVIF/JPEG fragment
+   *  transport with the neural codec: ~150 bytes as one or two text messages. */
+  imageCodec?: ImageCodecId;
 }
 
 type LimitState = 'normal' | 'warning' | 'danger' | 'error';
@@ -93,8 +102,18 @@ export interface MessageInputHandle {
   focus: () => void;
 }
 
-export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(function MessageInput)
-  { onSend, disabled, placeholder, conversationType, senderName, voiceConversation, mcmpEnabled, mcmpVersion },
+export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(function MessageInput(
+  {
+    onSend,
+    disabled,
+    placeholder,
+    conversationType,
+    senderName,
+    voiceConversation,
+    mcmpEnabled,
+    mcmpVersion,
+    imageCodec = 'ie4',
+  },
   ref
 ) {
   const [text, setText] = useState('');
@@ -118,46 +137,69 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageSize, setImageSize] = useState<64 | 128 | 256>(256);
   const [imagePreview, setImagePreview] = useState<EncodedMeshImage | null>(null);
+  const [aeicPreview, setAeicPreview] = useState<PreparedAeicImage | null>(null);
   const [imagePreparing, setImagePreparing] = useState(false);
   const [imageSending, setImageSending] = useState(false);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!imagePreview) {
+    const blob = imagePreview?.blob ?? aeicPreview?.previewBlob ?? null;
+    if (!blob) {
       setImagePreviewUrl(null);
       return;
     }
-    const url = URL.createObjectURL(imagePreview.blob);
+    const url = URL.createObjectURL(blob);
     setImagePreviewUrl(url);
     return () => URL.revokeObjectURL(url);
-  }, [imagePreview]);
+  }, [imagePreview, aeicPreview]);
 
-  const prepareImage = useCallback(async (file: File, maxDimension: 64 | 128 | 256) => {
-    setImagePreparing(true);
-    setImagePreview(null);
-    try {
-      setImagePreview(await encodeMeshImage(file, maxDimension));
-    } catch (error) {
-      setImageFile(null);
-      toast.error('Image unavailable', {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setImagePreparing(false);
-    }
-  }, []);
+  // The two codecs need different pixels, so preparation branches here rather
+  // than at send time: the preview has to show what will actually be encoded.
+  // IE4 wants a downscaled greyscale AVIF/JPEG; AEIC wants the whole frame
+  // stretched into a 512px RGB square.
+  const prepareImage = useCallback(
+    async (file: File, maxDimension: 64 | 128 | 256, codec: ImageCodecId) => {
+      setImagePreparing(true);
+      setImagePreview(null);
+      setAeicPreview(null);
+      try {
+        if (codec === 'aeic') {
+          setAeicPreview(await prepareAeicImage(file));
+        } else {
+          setImagePreview(await encodeMeshImage(file, maxDimension));
+        }
+      } catch (error) {
+        setImageFile(null);
+        toast.error('Image unavailable', {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setImagePreparing(false);
+      }
+    },
+    []
+  );
 
   const clearImage = useCallback(() => {
     setImageFile(null);
     setImagePreview(null);
+    setAeicPreview(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
   const sendImage = useCallback(async () => {
-    if (!voiceConversation || !imagePreview || imageSending) return;
+    if (!voiceConversation || imageSending) return;
     setImageSending(true);
     try {
-      await api.sendImage(voiceConversation.type, voiceConversation.key, imagePreview);
+      if (aeicPreview) {
+        // The server does the ~0.3 s encode and then transmits one or two
+        // aei1: messages; this POST is just the 768 KB of prepared pixels.
+        await api.sendAeicImage(voiceConversation.type, voiceConversation.key, aeicPreview);
+      } else if (imagePreview) {
+        await api.sendImage(voiceConversation.type, voiceConversation.key, imagePreview);
+      } else {
+        return;
+      }
       clearImage();
     } catch (error) {
       toast.error('Image message failed', {
@@ -166,7 +208,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
     } finally {
       setImageSending(false);
     }
-  }, [clearImage, imagePreview, imageSending, voiceConversation]);
+  }, [aeicPreview, clearImage, imagePreview, imageSending, voiceConversation]);
 
   useEffect(() => {
     if (!recording) return;
@@ -466,7 +508,26 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
               )}
             </div>
             <div className="min-w-0 flex-1 text-sm">
-              <div className="font-medium">Image attachment</div>
+              <div className="font-medium">
+                {imageCodec === 'aeic' ? 'Photo (AI reconstruction)' : 'Image attachment'}
+              </div>
+              {aeicPreview && (
+                <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+                  <div>
+                    {AEIC_SQUARE_SIZE}×{AEIC_SQUARE_SIZE} colour · from {aeicPreview.sourceWidth}×
+                    {aeicPreview.sourceHeight}
+                  </div>
+                  {/* Deliberately a range, not a number: the bitstream size is
+                      only known after the server-side encode. Measured 117-209 B
+                      over the reference corpus, which is 1-2 messages. */}
+                  <div>~150 bytes · 1–2 messages</div>
+                  <div>Estimated transfer: ~4s per direct hop</div>
+                  <div>
+                    The receiver rebuilds this with a neural decoder, so they see a similar picture
+                    rather than the same pixels.
+                  </div>
+                </div>
+              )}
               {imagePreview && (
                 <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
                   <div>
@@ -497,24 +558,29 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
                   )}
                 </div>
               )}
-              <label className="mt-2 flex items-center gap-2 text-xs">
-                Max size
-                <select
-                  aria-label="Maximum image dimension"
-                  value={imageSize}
-                  disabled={imagePreparing || imageSending}
-                  className="rounded border border-input bg-background px-1.5 py-1"
-                  onChange={(event) => {
-                    const size = Number(event.target.value) as 64 | 128 | 256;
-                    setImageSize(size);
-                    if (imageFile) void prepareImage(imageFile, size);
-                  }}
-                >
-                  <option value={64}>64 px</option>
-                  <option value={128}>128 px</option>
-                  <option value={256}>256 px</option>
-                </select>
-              </label>
+              {/* AEIC always encodes a 512px square, so there is nothing to pick.
+                  Not rendered at all rather than hidden: a display:none control
+                  is still a tab stop and still reachable by a screen reader. */}
+              {imageCodec !== 'aeic' && (
+                <label className="mt-2 flex items-center gap-2 text-xs">
+                  Max size
+                  <select
+                    aria-label="Maximum image dimension"
+                    value={imageSize}
+                    disabled={imagePreparing || imageSending}
+                    className="rounded border border-input bg-background px-1.5 py-1"
+                    onChange={(event) => {
+                      const size = Number(event.target.value) as 64 | 128 | 256;
+                      setImageSize(size);
+                      if (imageFile) void prepareImage(imageFile, size, imageCodec);
+                    }}
+                  >
+                    <option value={64}>64 px</option>
+                    <option value={128}>128 px</option>
+                    <option value={256}>256 px</option>
+                  </select>
+                </label>
+              )}
             </div>
           </div>
           <div className="mt-3 flex justify-end gap-2">
@@ -530,10 +596,10 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
             <Button
               type="button"
               size="sm"
-              disabled={!imagePreview || imagePreparing || imageSending}
+              disabled={(!imagePreview && !aeicPreview) || imagePreparing || imageSending}
               onClick={() => void sendImage()}
             >
-              {imageSending ? 'Sending...' : 'Send image'}
+              {imageSending ? 'Sending...' : imageCodec === 'aeic' ? 'Send photo' : 'Send image'}
             </Button>
           </div>
         </div>
@@ -666,7 +732,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
                     const file = event.target.files?.[0];
                     if (!file) return;
                     setImageFile(file);
-                    void prepareImage(file, imageSize);
+                    void prepareImage(file, imageSize, imageCodec);
                   }}
                 />
                 <Button

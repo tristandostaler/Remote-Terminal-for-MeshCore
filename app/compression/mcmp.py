@@ -1050,3 +1050,27 @@ def decode_incoming_body(text: str) -> str:
         len(decoded.text),
     )
     return decoded.text
+
+
+def encode_base91(data: bytes) -> str:
+    """basE91-encode arbitrary binary for carriage inside a text message.
+
+    Exposed for :mod:`app.imaging.aeic.text_transport`, which frames AEIC image
+    bitstreams the same way MCMP frames compressed prose. This is the encoder
+    both upstream Dart helpers share, so text produced here is readable by them.
+
+    The alphabet excludes space, the apostrophe, the backslash and the hyphen,
+    which is what makes the output safe to drop into a MeshCore message body.
+    """
+    return _b91_encode(data)
+
+
+def decode_base91(text: str) -> bytes:
+    """Inverse of :func:`encode_base91`.
+
+    Uses the v2 decoder, which is the exact counterpart of ``_b91_encode``'s
+    trailing-byte handling; verified to round-trip arbitrary binary at every
+    length in ``tests/test_aeic_text_transport.py``. Raises
+    :class:`MeshCompressorError` on a character outside the alphabet.
+    """
+    return _b91_decode_v2(text)

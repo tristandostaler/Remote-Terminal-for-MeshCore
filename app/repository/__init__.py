@@ -1,3 +1,4 @@
+from app.repository.aeic_image import AeicImageRepository
 from app.repository.bots import (
     BotEngineSettingsRepository,
     BotFeedRepository,
@@ -33,6 +34,7 @@ __all__ = [
     "ContactNameHistoryRepository",
     "ContactRepository",
     "FanoutConfigRepository",
+    "AeicImageRepository",
     "ImageRepository",
     "MessageRepository",
     "RawPacketRepository",

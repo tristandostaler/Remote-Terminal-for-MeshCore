@@ -10,6 +10,7 @@ import {
 import type { Channel, Contact, Message, MessagePath, RadioConfig, RawPacket } from '../types';
 import { CONTACT_TYPE_ROOM } from '../types';
 import { api } from '../api';
+import type { AeicSessionStatus } from '../api';
 import {
   findLinkedChannelReferences,
   formatTime,
@@ -32,9 +33,15 @@ import { toast } from './ui/sonner';
 import { handleKeyboardActivate } from '../utils/a11y';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { cn } from '@/lib/utils';
-import { Download, ImageOff, Loader2, Play, X } from 'lucide-react';
+import { Download, ImageOff, Loader2, Play, Sparkles, X } from 'lucide-react';
 import { parseVoiceEnvelope } from '../utils/voiceEnvelope';
 import { estimateImageTransmitSeconds, parseImageEnvelope } from '../utils/imageEnvelope';
+import {
+  aeicApproxBitstreamBytes,
+  aeicAspectRatio,
+  parseAeicChunk,
+  type AeicChunk,
+} from '../utils/aeicEnvelope';
 
 function ImageMessage({ message, content }: { message: Message; content: string }) {
   const envelope = parseImageEnvelope(content);
@@ -133,6 +140,166 @@ function ImageMessage({ message, content }: { message: Message; content: string 
           />
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A photo sent with the AEIC neural codec.
+ *
+ * Unlike the IE4 bubble there is nothing to fetch: the ~150-byte bitstream
+ * already arrived inside these one-or-two text messages. What this waits on is
+ * the *decode* — a ~5 s ONNX synthesis pass on the server — so it polls the
+ * session rather than requesting fragments.
+ *
+ * Chunk 0 carries the metadata byte and owns the bubble; a later chunk renders
+ * as a small chip so the conversation does not show a wall of basE91.
+ */
+function AeicImageMessage({ message, chunk }: { message: Message; chunk: AeicChunk }) {
+  const [session, setSession] = useState<AeicSessionStatus | null>(null);
+  const [state, setState] = useState<'idle' | 'loading' | 'decoded' | 'unavailable'>('idle');
+  const [detail, setDetail] = useState<string | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  const poll = useCallback(async () => {
+    setState('loading');
+    setDetail(null);
+    try {
+      let current = await api.getAeicSessionForMessage(message.id);
+      setSession(current);
+      // The synthesis pass is seconds, not milliseconds, and it is queued behind
+      // any other decode on the server.
+      for (let attempt = 0; !current.decoded && attempt < 60; attempt += 1) {
+        if (current.decode_error) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        current = await api.getAeicSession(current.session_key);
+        setSession(current);
+      }
+      if (current.decoded) {
+        setState('decoded');
+        return;
+      }
+      setState('unavailable');
+      setDetail(
+        current.decode_error ??
+          (current.received_chunks < current.total_chunks
+            ? `Waiting for part ${current.received_chunks + 1} of ${current.total_chunks}`
+            : 'Not decoded yet')
+      );
+    } catch (error) {
+      setState('unavailable');
+      setDetail(error instanceof Error ? error.message : String(error));
+    }
+  }, [message.id]);
+
+  // An inbound image decodes on its own as soon as it is reassembled, so look
+  // once on mount rather than making the reader tap to find out.
+  useEffect(() => {
+    void poll();
+  }, [poll]);
+
+  const retryDecode = useCallback(async () => {
+    if (!session) return;
+    setState('loading');
+    try {
+      const refreshed = await api.retryAeicDecode(session.session_key);
+      setSession(refreshed);
+      setState(refreshed.decoded ? 'decoded' : 'unavailable');
+      if (!refreshed.decoded) setDetail(refreshed.decode_error ?? 'Not decoded yet');
+    } catch (error) {
+      setState('unavailable');
+      setDetail(error instanceof Error ? error.message : String(error));
+      toast.error('Could not decode image', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [session]);
+
+  const contentUrl = session ? api.aeicContentUrl(session.session_key) : null;
+  const ratio = aeicAspectRatio(session?.aspect_code ?? chunk.aspectCode);
+  const approxBytes = session?.bitstream_bytes || aeicApproxBitstreamBytes(chunk.payloadChars);
+  const square = session?.square_size ?? chunk.squareSize ?? 512;
+
+  return (
+    <div className="w-48 max-w-full">
+      {state === 'decoded' && contentUrl ? (
+        <button
+          type="button"
+          className="block overflow-hidden rounded-md"
+          onClick={() => setFullscreen(true)}
+          aria-label="Open AI-reconstructed image"
+        >
+          <img
+            src={contentUrl}
+            alt="AI-reconstructed image message"
+            className="w-48 object-cover"
+            style={{ aspectRatio: String(ratio) }}
+          />
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => void (state === 'unavailable' && session ? retryDecode() : poll())}
+          disabled={state === 'loading'}
+          aria-label="Reconstruct image"
+          className="flex aspect-square w-48 flex-col items-center justify-center gap-2 rounded-md bg-muted/60 px-2 text-center text-muted-foreground"
+        >
+          {state === 'loading' ? (
+            <Loader2 className="animate-spin" size={30} />
+          ) : state === 'unavailable' ? (
+            <ImageOff size={30} />
+          ) : (
+            <Sparkles size={30} />
+          )}
+          <span className="text-xs leading-snug">
+            {state === 'loading'
+              ? session && session.received_chunks < session.total_chunks
+                ? `${session.received_chunks}/${session.total_chunks} parts`
+                : 'Reconstructing…'
+              : state === 'unavailable'
+                ? (detail ?? 'Unavailable')
+                : 'Tap to reconstruct'}
+          </span>
+        </button>
+      )}
+      <div className="mt-1 text-[0.6875rem] text-muted-foreground">
+        {square}px AI · {approxBytes} B · {chunk.total} msg{chunk.total === 1 ? '' : 's'}
+      </div>
+      {fullscreen && contentUrl && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4"
+          role="dialog"
+          aria-label="Image viewer"
+          onClick={() => setFullscreen(false)}
+        >
+          <button
+            type="button"
+            className="absolute right-4 top-4 rounded-full bg-background/80 p-2 text-foreground"
+            aria-label="Close image"
+            onClick={() => setFullscreen(false)}
+          >
+            <X size={22} />
+          </button>
+          <img
+            src={contentUrl}
+            alt="AI-reconstructed image, full size"
+            className="max-h-full max-w-full object-contain"
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A continuation chunk of an AEIC image; the picture itself hangs off chunk 0. */
+function AeicImagePart({ chunk }: { chunk: AeicChunk }) {
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      <Sparkles size={13} className="flex-shrink-0" />
+      <span>
+        Image part {chunk.index + 1} of {chunk.total}
+      </span>
     </div>
   );
 }
@@ -1258,6 +1425,9 @@ export function MessageList({
               msg.type === 'PRIV'
                 ? { sender: null, content: msg.text }
                 : parseSenderFromText(msg.text);
+            // AEIC images ride as `aei1:` text; parsed once here so the bubble
+            // dispatch below does not re-parse it per branch.
+            const aeicChunk = parseAeicChunk(content);
             const directSenderName =
               msg.type === 'PRIV' && isRoomServer ? msg.sender_name || null : null;
             const channelSenderName = msg.type === 'CHAN' ? msg.sender_name || sender : null;
@@ -1468,6 +1638,12 @@ export function MessageList({
                     <div className="break-words whitespace-pre-wrap">
                       {parseImageEnvelope(content) ? (
                         <ImageMessage message={msg} content={content} />
+                      ) : aeicChunk ? (
+                        aeicChunk.index === 0 ? (
+                          <AeicImageMessage message={msg} chunk={aeicChunk} />
+                        ) : (
+                          <AeicImagePart chunk={aeicChunk} />
+                        )
                       ) : parseVoiceEnvelope(content) ? (
                         <VoiceMessage message={msg} content={content} />
                       ) : (

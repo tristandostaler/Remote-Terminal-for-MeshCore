@@ -4,6 +4,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from app.compression import decode_incoming_body
+from app.imaging.aeic.ingest import note_inbound_chunk
 from app.models import Message, MessagePath
 from app.repository import ContactRepository, MessageRepository, RawPacketRepository
 
@@ -362,6 +363,18 @@ async def create_message_from_decrypted(
         packet_hash=packet_hash,
     )
 
+    # An aei1: body is one chunk of an AEIC image. The text stays in the message
+    # (as the IE4 envelope does); this feeds the reassembler.
+    await note_inbound_chunk(
+        text=text,
+        message_id=msg_id,
+        conversation_type="CHAN",
+        conversation_key=channel_key_normalized,
+        peer_public_key=resolved_sender_key,
+        sender_name=sender,
+        broadcast_fn=broadcast_fn,
+    )
+
     return msg_id
 
 
@@ -507,6 +520,19 @@ async def create_fallback_channel_message(
         channel_name=channel_name,
     )
     broadcast_message(message=message, broadcast_fn=broadcast_fn)
+
+    # Third and last AEIC ingest route: the get_msg() drain. Must feed the
+    # reassembler at parity with the raw-RF route above, or an image that
+    # arrives via this path alone never renders.
+    await note_inbound_chunk(
+        text=text,
+        message_id=msg_id,
+        conversation_type="CHAN",
+        conversation_key=conversation_key_normalized,
+        peer_public_key=resolved_sender_key,
+        sender_name=sender_name,
+        broadcast_fn=broadcast_fn,
+    )
     return message
 
 
