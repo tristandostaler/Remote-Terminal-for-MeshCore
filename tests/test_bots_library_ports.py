@@ -91,12 +91,15 @@ class TestMowasExtraction:
         assert extract({"cap_xml": "<not-xml"}) == []
 
 
-class TestWorldcupSummarize:
-    def test_summarize_event(self):
-        summarize = _load_namespace("worldcup_live")["_summarize"]
+class TestSportsParseGame:
+    """One parser now backs `sports`, `wc` and the live announcer."""
+
+    def test_parse_game(self):
+        ns = _load_namespace("sports")
+        parse = ns["_parse_game"]
         event = {
             "id": "401",
-            "status": {"type": {"state": "in"}},
+            "status": {"type": {"state": "in", "shortDetail": "65'"}},
             "competitions": [
                 {
                     "competitors": [
@@ -106,8 +109,14 @@ class TestWorldcupSummarize:
                 }
             ],
         }
-        assert summarize(event) == ("401", "ARG 2-1 FRA", "in")
-        assert summarize({"competitions": []}) is None
+        assert parse(event) == ("FRA 1 @ ARG 2 65'", "in", {"ARG", "FRA"})
+        assert parse({"competitions": []}) is None
+
+    def test_worldcup_keyword_pins_the_fifa_scoreboard(self):
+        """`wc` must reach the World Cup regardless of the league setting."""
+        ns = _load_namespace("sports")
+        assert ns["_KEYWORD_LEAGUES"]["wc"] == "worldcup"
+        assert "fifa.world" in ns["_scoreboard_url"]("worldcup")
 
 
 class TestMentionPattern:
@@ -118,7 +127,12 @@ class TestMentionPattern:
 
         entry = get_library_entry(key)
         assert entry is not None
-        bot = await BotRepository.create(name=f"{key}-mentiontest", code=entry["code"])
+        name = f"{key}-mentiontest"
+        suffix = 2
+        while await BotRepository.name_exists(name):
+            name = f"{key}-mentiontest-{suffix}"
+            suffix += 1
+        bot = await BotRepository.create(name=name, code=entry["code"])
         engine = BotEngine()
         return await engine.test_run(bot, request)
 
@@ -127,25 +141,31 @@ class TestMentionPattern:
             test_db, "ping", BotTestRequest(text="ping", sender_name="K0PHX")
         )
         assert response.error is None
-        assert response.replies[0]["text"].startswith("@[K0PHX] ")
+        assert "@[K0PHX]" in response.replies[0]["text"]
 
-    async def test_signal_report_prefixes_a_mention(self, test_db):
-        response = await self._test_run(
-            test_db, "test", BotTestRequest(text="test", sender_name="K0PHX")
-        )
-        assert response.error is None
-        assert response.replies[0]["text"].startswith("@[K0PHX]: ")
+    async def test_test_is_the_same_command_as_ping(self, test_db):
+        """`ping` and `test` were merged — one bot, one reply, either word."""
+        for word in ("ping", "test"):
+            response = await self._test_run(
+                test_db, "ping", BotTestRequest(text=word, sender_name="K0PHX")
+            )
+            assert response.error is None, word
+            assert len(response.replies) == 1, word
+            text = response.replies[0]["text"]
+            assert text.startswith("🤖 Copy, @[K0PHX] @ "), word
+            assert "Direct (no path)" in text, word
 
     async def test_roll_names_the_roller_as_a_mention(self, test_db):
+        """`roll` was merged into `dice` and keeps its own 1..N output."""
         response = await self._test_run(
-            test_db, "roll", BotTestRequest(text="roll 20", sender_name="K0PHX")
+            test_db, "dice", BotTestRequest(text="roll 20", sender_name="K0PHX")
         )
         assert response.error is None
         assert response.replies[0]["text"].startswith("@[K0PHX] rolled ")
 
     async def test_missing_sender_name_stays_plain(self, test_db):
         response = await self._test_run(
-            test_db, "ping", BotTestRequest(text="ping", sender_name="")
+            test_db, "dice", BotTestRequest(text="roll 20", sender_name="")
         )
         assert response.error is None
         assert "@[" not in response.replies[0]["text"]
@@ -298,14 +318,12 @@ class TestLongReplySplitting:
     MIGRATED = (
         "mailbox",
         "help",
-        "cmd",
         "channels",
         "sports",
         "neighbors",
         "repeater",
         "trace",
         "gwx",
-        "worldcup",
         "wx",
     )
 
@@ -314,9 +332,12 @@ class TestLongReplySplitting:
 
         entry = get_library_entry(key)
         assert entry is not None
-        bot = await BotRepository.create(
-            name=f"{key}-splittest", code=entry["code"], settings=settings or {}
-        )
+        name = f"{key}-splittest"
+        suffix = 2
+        while await BotRepository.name_exists(name):
+            name = f"{key}-splittest-{suffix}"
+            suffix += 1
+        bot = await BotRepository.create(name=name, code=entry["code"], settings=settings or {})
         return await BotEngine().test_run(bot, request)
 
     def test_migrated_bots_use_reply_split(self):
@@ -332,12 +353,14 @@ class TestLongReplySplitting:
         for entry in list_library():
             assert "({i}/{total})" not in entry["code"], f"{entry['key']} hand-numbers parts"
 
-    async def test_cmd_lists_every_command_across_parts(self, test_db):
-        response = await self._test_run("cmd", BotTestRequest(text="cmd"))
-        assert response.error is None
-        # Nothing is dropped and nothing is advertised as omitted.
-        joined = " ".join(r["text"] for r in response.replies)
-        assert "more — see the Bots tab" not in joined
+    async def test_cmd_is_an_alias_of_help(self, test_db):
+        """`cmd` was merged into `help`; every alias prints the same list."""
+        for word in ("help", "cmd", "commands"):
+            response = await self._test_run("help", BotTestRequest(text=word))
+            assert response.error is None, word
+            joined = " ".join(r["text"] for r in response.replies)
+            # Nothing is dropped and nothing is advertised as omitted.
+            assert "more — see the Bots tab" not in joined, word
 
     async def test_help_splits_a_long_command_list(self, test_db):
         """A command list past one frame goes out numbered, never cut with '…'."""
@@ -461,3 +484,250 @@ class TestMailbox:
         joined = " ".join(t.split(") ", 1)[1] for t in texts)
         for i in range(80):
             assert f"word{i:03d}" in joined, f"word{i:03d} lost in playback"
+
+
+class TestMergedBots:
+    """Bots that used to duplicate each other are now one bot with several keywords."""
+
+    async def _run(self, key: str, request: BotTestRequest, settings=None):
+        from app.repository.bots import BotRepository
+
+        entry = get_library_entry(key)
+        assert entry is not None
+        name = f"{key}-mergetest"
+        suffix = 2
+        while await BotRepository.name_exists(name):
+            name = f"{key}-mergetest-{suffix}"
+            suffix += 1
+        bot = await BotRepository.create(name=name, code=entry["code"], settings=settings or {})
+        response = await BotEngine().test_run(bot, request)
+        assert response.error is None, response.error
+        return [r["text"] for r in response.replies]
+
+    def test_retired_keys_are_gone_from_the_library(self):
+        from app.bots.library import MERGED_BOTS, list_library
+
+        keys = {entry["key"] for entry in list_library()}
+        for retired, survivor in MERGED_BOTS.items():
+            assert retired not in keys, f"{retired} was merged but still ships a file"
+            assert survivor in keys, f"{survivor} must survive the {retired} merge"
+
+    def test_no_two_library_bots_claim_the_same_keyword(self):
+        """The engine replies from every matching bot, so a shared keyword = two replies."""
+        from app.bots.library import list_library
+        from app.bots.runtime import load_bot_code
+
+        owners: dict[str, str] = {}
+        for entry in list_library():
+            for keyword in load_bot_code(entry["code"]).declared_keywords:
+                assert keyword not in owners, (
+                    f"{keyword!r} is claimed by both {owners[keyword]} and {entry['key']}"
+                )
+                owners[keyword] = entry["key"]
+
+    def test_absorbed_keywords_all_still_answer(self):
+        """Every keyword the retired bots answered to is kept by its survivor."""
+        from app.bots.runtime import load_bot_code
+
+        expected = {
+            "ping": {"ping", "test"},
+            "help": {"help", "cmd", "commands"},
+            "dice": {"dice", "roll"},
+            "sports": {"sports", "score", "scores", "wc", "worldcup"},
+            "solar": {"solar", "hfcond", "bands", "aurora", "kp"},
+            "fun": {
+                "joke",
+                "jokes",
+                "dadjoke",
+                "dadjokes",
+                "dad joke",
+                "dad jokes",
+                "catfact",
+                "meow",
+                "purr",
+                "funfact",
+                "fortune",
+                "magic8",
+                "fun",
+            },
+        }
+        for key, keywords in expected.items():
+            entry = get_library_entry(key)
+            assert entry is not None, key
+            declared = set(load_bot_code(entry["code"]).declared_keywords)
+            assert keywords <= declared, f"{key} lost {keywords - declared}"
+
+    async def test_dice_and_roll_keep_separate_syntax(self, test_db):
+        assert (await self._run("dice", BotTestRequest(text="dice d20")))[0].startswith("d20: ")
+        rolled = await self._run("dice", BotTestRequest(text="roll 6", sender_name="K0PHX"))
+        assert rolled[0].startswith("@[K0PHX] rolled ")
+        assert rolled[0].endswith("(1-6)")
+
+    async def test_fun_sources_can_be_switched_off_individually(self, test_db):
+        """The six merged Fun bots keep their granularity as per-source settings."""
+        off = await self._run(
+            "fun", BotTestRequest(text="fortune"), settings={"fortune_enabled": False}
+        )
+        assert "switched off" in off[0]
+        on = await self._run("fun", BotTestRequest(text="fortune"))
+        assert "switched off" not in on[0]
+
+    async def test_fun_offline_sources_need_no_network(self, test_db):
+        for word in ("funfact", "fortune", "magic8"):
+            texts = await self._run("fun", BotTestRequest(text=word))
+            assert texts and texts[0].strip(), word
+
+    async def test_fun_picks_only_from_enabled_sources(self, test_db):
+        """`fun` with only magic8 on must always answer as magic8."""
+        settings = {f"{s}_enabled": False for s in ("joke", "dadjoke", "catfact", "funfact")}
+        settings["fortune_enabled"] = False
+        for _ in range(5):
+            texts = await self._run("fun", BotTestRequest(text="fun"), settings=settings)
+            assert texts[0].startswith("Magic 8-Ball: ")
+
+    async def test_fun_with_everything_off_says_so(self, test_db):
+        settings = {
+            f"{s}_enabled": False
+            for s in ("joke", "dadjoke", "catfact", "funfact", "fortune", "magic8")
+        }
+        texts = await self._run("fun", BotTestRequest(text="fun"), settings=settings)
+        assert "switched off" in texts[0]
+
+    def test_solar_and_hfcond_share_one_fetch(self):
+        """They were two bots hitting the same URL; the merge caches the document."""
+        ns = _load_namespace("solar")
+        assert ns["_HAMQSL_TTL_SECONDS"] > 0
+        assert "hamqsl" in ns["_HAMQSL_URL"]
+
+
+class TestRetireMergedBots:
+    """Seeding never deletes, so merged-away rows have to be retired explicitly."""
+
+    async def _seed_retired(
+        self,
+        key: str,
+        *,
+        enabled=False,
+        settings=None,
+        ui_triggers=None,
+        modified=False,
+        code="from remoteterm import bot\n",
+    ):
+        from app.repository.bots import BotRepository
+
+        return await BotRepository.create(
+            name=f"legacy-{key}",
+            code=code,
+            enabled=enabled,
+            settings=settings or {},
+            ui_triggers=ui_triggers or [],
+            builtin_key=key,
+            builtin_version="1.0.0",
+            modified=modified,
+        )
+
+    async def test_pristine_retired_row_is_deleted(self, test_db):
+        from app.bots.library import retire_merged_bots
+        from app.repository.bots import BotRepository
+
+        record = await self._seed_retired("test")
+        assert await retire_merged_bots() == 1
+        assert await BotRepository.get(record.id) is None
+
+    async def test_enabled_retired_row_enables_its_survivor(self, test_db):
+        """Otherwise `test` silently stops answering after the merge."""
+        from app.bots.library import ensure_seeded, retire_merged_bots
+        from app.repository.bots import BotRepository
+
+        await ensure_seeded()
+        survivor = await BotRepository.get_by_builtin_key("ping")
+        assert survivor is not None and not survivor.enabled
+
+        await self._seed_retired("test", enabled=True)
+        await retire_merged_bots()
+
+        survivor = await BotRepository.get_by_builtin_key("ping")
+        assert survivor is not None
+        assert survivor.enabled, "the merged command must keep answering"
+
+    async def test_disabled_retired_row_does_not_enable_its_survivor(self, test_db):
+        from app.bots.library import ensure_seeded, retire_merged_bots
+        from app.repository.bots import BotRepository
+
+        await ensure_seeded()
+        await self._seed_retired("cmd", enabled=False)
+        await retire_merged_bots()
+
+        survivor = await BotRepository.get_by_builtin_key("help")
+        assert survivor is not None
+        assert not survivor.enabled
+
+    async def test_edited_retired_row_is_kept_disabled_and_renamed(self, test_db):
+        """An operator's edits survive; only the keyword clash is removed."""
+        from app.bots.library import retire_merged_bots
+        from app.repository.bots import BotRepository
+
+        code = "from remoteterm import bot\n# my changes\n"
+        record = await self._seed_retired("roll", enabled=True, modified=True, code=code)
+        await retire_merged_bots()
+
+        kept = await BotRepository.get(record.id)
+        assert kept is not None, "operator work must not be deleted"
+        assert kept.code == code
+        assert not kept.enabled
+        assert kept.name.startswith("(retired) ")
+        assert kept.builtin_key is None, "seeding must never claim this row again"
+
+    async def test_custom_triggers_count_as_operator_work(self, test_db):
+        """ui_triggers do not set `modified`, so they need their own check."""
+        from app.bots.library import retire_merged_bots
+        from app.repository.bots import BotRepository
+
+        record = await self._seed_retired(
+            "magic8", ui_triggers=[{"kind": "keyword", "spec": "8ball"}]
+        )
+        await retire_merged_bots()
+
+        kept = await BotRepository.get(record.id)
+        assert kept is not None, "custom keywords must not be deleted"
+        assert kept.ui_triggers == [{"kind": "keyword", "spec": "8ball"}]
+
+    async def test_changed_settings_count_as_operator_work(self, test_db):
+        from app.bots.library import retire_merged_bots
+        from app.repository.bots import BotRepository
+
+        record = await self._seed_retired("worldcup_live", settings={"channel": "#futbol"})
+        await retire_merged_bots()
+
+        kept = await BotRepository.get(record.id)
+        assert kept is not None, "configured bots must not be deleted"
+
+    async def test_worldcup_live_channel_moves_to_the_survivor(self, test_db):
+        from app.bots.library import ensure_seeded, retire_merged_bots
+        from app.repository.bots import BotRepository
+
+        await ensure_seeded()
+        await self._seed_retired("worldcup_live", enabled=True, settings={"channel": "#futbol"})
+        await retire_merged_bots()
+
+        survivor = await BotRepository.get_by_builtin_key("sports")
+        assert survivor is not None
+        assert survivor.settings["live_channel"] == "#futbol"
+        assert survivor.enabled
+
+    async def test_is_idempotent(self, test_db):
+        from app.bots.library import retire_merged_bots
+
+        await self._seed_retired("aurora")
+        assert await retire_merged_bots() == 1
+        assert await retire_merged_bots() == 0
+        assert await retire_merged_bots() == 0
+
+    async def test_seeding_runs_retirement(self, test_db):
+        """A plain startup is enough — no manual step for operators."""
+        from app.bots.library import ensure_seeded
+        from app.repository.bots import BotRepository
+
+        record = await self._seed_retired("hfcond")
+        await ensure_seeded()
+        assert await BotRepository.get(record.id) is None

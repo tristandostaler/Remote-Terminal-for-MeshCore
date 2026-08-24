@@ -185,15 +185,19 @@ class BotRepository:
             "settings_schema",
             "settings",
             "ui_triggers",
+            "builtin_key",
             "builtin_version",
             "modified",
             "last_error",
             "sort_order",
         }
+        # Fields whose whole point can be setting them back to NULL. Not
+        # reachable from BotUpdateRequest — server-side callers only.
+        nullable = {"last_error", "builtin_key"}
         updates: list[str] = []
         params: list[Any] = []
         for key, value in fields.items():
-            if key not in allowed or value is None and key != "last_error":
+            if key not in allowed or (value is None and key not in nullable):
                 continue
             updates.append(f"{key} = ?")
             if key in json_fields:

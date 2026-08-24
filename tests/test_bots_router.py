@@ -102,7 +102,7 @@ class TestBotsCrud:
                     "/api/bots", json={"name": "my-ping", "from_builtin_key": entry["key"]}
                 )
             ).json()
-            assert created["declared_keywords"] == ["ping"]
+            assert created["declared_keywords"] == ["ping", "test"]
             # A clone is a custom bot: no reset-to-builtin lineage.
             assert created["builtin_key"] is None
 
