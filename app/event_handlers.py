@@ -358,6 +358,66 @@ def install_full_raw_data_adapter(meshcore) -> None:
     reader._remoteterm_full_raw_data = True
 
 
+async def on_channel_data(frame: bytes) -> None:
+    """Handle one ``RESP_CODE_CHANNEL_DATA_RECV`` (27) frame.
+
+    This is how an AEIC image sent by MCO Advanced arrives: binary GRP_DATA, not
+    text. The firmware has already decrypted it and split off the data type, so
+    nothing here touches crypto.
+    """
+    from app.imaging.aeic.channel_data import parse_channel_data_frame
+    from app.imaging.aeic.channel_data_ingest import handle_channel_data
+    from app.services.radio_runtime import radio_runtime
+
+    parsed = parse_channel_data_frame(frame)
+    if parsed is None:
+        return
+    conversation_key = radio_runtime.channel_key_for_slot(parsed.channel_index)
+    if conversation_key is None:
+        # The frame names a radio slot, and only slots this process loaded are
+        # resolvable. Nothing to attach the image to, so say why rather than
+        # dropping it silently.
+        logger.info(
+            "Ignoring GRP_DATA on radio slot %d: no channel is loaded there by this process",
+            parsed.channel_index,
+        )
+        return
+    await handle_channel_data(
+        parsed, conversation_key=conversation_key, broadcast_fn=broadcast_event
+    )
+
+
+def install_channel_data_adapter(meshcore) -> None:
+    """Intercept companion frame 27, which meshcore-py does not know about.
+
+    ``PacketType`` jumps straight from 26 to 28, so an inbound GRP_DATA frame
+    reaches ``reader.handle_rx``'s final ``else`` and is logged away as
+    "Unhandled packet type" -- which is exactly why an image sent from MCO
+    Advanced produced nothing in RemoteTerm, not even garbled text.
+
+    Same wrapping strategy as :func:`install_full_raw_data_adapter`, including
+    the idempotency flag, so reconnects do not stack adapters.
+    """
+    from app.imaging.aeic.channel_data import RESP_CODE_CHANNEL_DATA_RECV
+
+    reader = meshcore._reader
+    if getattr(reader, "_remoteterm_channel_data", False):
+        return
+    original = reader.handle_rx
+
+    async def handle_rx(data: bytearray) -> None:
+        if data and data[0] == RESP_CODE_CHANNEL_DATA_RECV:
+            try:
+                await on_channel_data(bytes(data))
+            except Exception:
+                logger.exception("Failed to handle an inbound GRP_DATA frame")
+            return
+        await original(data)
+
+    reader.handle_rx = handle_rx
+    reader._remoteterm_channel_data = True
+
+
 def register_event_handlers(meshcore) -> None:
     """Register event handlers with the MeshCore instance.
 
@@ -388,4 +448,5 @@ def register_event_handlers(meshcore) -> None:
     _active_subscriptions.append(meshcore.subscribe(EventType.ACK, on_ack))
     _active_subscriptions.append(meshcore.subscribe(EventType.RAW_DATA, on_raw_data))
     install_full_raw_data_adapter(meshcore)
+    install_channel_data_adapter(meshcore)
     logger.info("Event handlers registered")

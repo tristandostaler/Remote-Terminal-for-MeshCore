@@ -36,6 +36,7 @@ failure at session creation, indistinguishable from a corrupt download.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from collections.abc import Callable
@@ -126,7 +127,12 @@ ft16 was dropped upstream: it needs 2-3 chunks and left too little headroom.
 """
 
 BUNDLE_TOTAL_BYTES = sum(asset.size_bytes for asset in AEIC_SE_FT32_ASSETS)
-"""958.0 MiB. Named so the pre-flight space check and the tests share one number."""
+"""958.0 MiB. Named so callers and tests share one number.
+
+NOTE: there is deliberately no pre-flight free-space check yet. On a small SD
+card the download can fill the volume, after which SQLite writes start failing --
+worse than refusing up front. Tracked separately.
+"""
 
 
 class AeicBundleIncomplete(RuntimeError):
@@ -288,7 +294,7 @@ async def download_bundle(
             final = bundle.path_for(asset)
             if final.is_file():
                 try:
-                    verify_asset(final, asset)
+                    await asyncio.to_thread(verify_asset, final, asset)
                 except AeicAssetCorrupt as exc:
                     logger.warning("Re-downloading %s: %s", asset.file_name, exc)
                     final.unlink()
@@ -325,7 +331,10 @@ async def download_bundle(
                         if on_progress is not None:
                             on_progress(asset.file_name, have, asset.size_bytes)
 
-            verify_asset(partial, asset)
+            # SHA-256 over 832 MB is seconds of solid CPU. Run on the event loop
+            # it froze the radio link and the websocket for the whole hash --
+            # long enough on a Pi to look like the app had hung.
+            await asyncio.to_thread(verify_asset, partial, asset)
             partial.replace(final)
             logger.info("Installed AEIC asset %s (%d B)", asset.file_name, asset.size_bytes)
 

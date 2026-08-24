@@ -34,6 +34,8 @@ LIGHT_MODULES = (
     "__init__",
     "constants",
     "bundle",
+    "channel_data",
+    "channel_data_ingest",
     "ingest",
     "png",
     "prepare",

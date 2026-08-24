@@ -116,8 +116,8 @@ class TestTargetConstruction:
     @pytest.mark.asyncio
     async def test_a_dm_reply_targets_the_origin_sender_with_the_full_budget(self, monkeypatch):
         stub = StubTransport()
-        monkeypatch.setattr("app.imaging.aeic.transport.select_transport", lambda **_: stub)
-        monkeypatch.setattr("app.imaging.aeic.service.select_transport", lambda **_: stub)
+        monkeypatch.setattr("app.imaging.aeic.transport.select_transport", lambda *_a, **_k: stub)
+        monkeypatch.setattr("app.imaging.aeic.service.select_transport", lambda *_a, **_k: stub)
         monkeypatch.setattr(
             "app.imaging.aeic.service.AeicService.encode_rgb",
             _fake_encode,
@@ -131,7 +131,7 @@ class TestTargetConstruction:
     @pytest.mark.asyncio
     async def test_a_channel_reply_reserves_room_for_the_sender_prefix(self, monkeypatch):
         stub = StubTransport()
-        monkeypatch.setattr("app.imaging.aeic.service.select_transport", lambda **_: stub)
+        monkeypatch.setattr("app.imaging.aeic.service.select_transport", lambda *_a, **_k: stub)
         monkeypatch.setattr("app.imaging.aeic.service.AeicService.encode_rgb", _fake_encode)
         ctx = make_context(is_dm=False, channel_key="AB" * 16)
         await ctx.reply_image(bytes(RGB_BYTES_EXPECTED))
@@ -140,7 +140,7 @@ class TestTargetConstruction:
     @pytest.mark.asyncio
     async def test_records_the_source_aspect_it_was_given(self, monkeypatch):
         stub = StubTransport()
-        monkeypatch.setattr("app.imaging.aeic.service.select_transport", lambda **_: stub)
+        monkeypatch.setattr("app.imaging.aeic.service.select_transport", lambda *_a, **_k: stub)
         monkeypatch.setattr("app.imaging.aeic.service.AeicService.encode_rgb", _fake_encode)
         ctx = make_context()
         await ctx.reply_image(bytes(RGB_BYTES_EXPECTED), source_width=1920, source_height=1080)

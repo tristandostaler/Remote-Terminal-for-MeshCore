@@ -121,3 +121,21 @@ export function aeicApproxBitstreamBytes(payloadChars: number): number {
 export function aeicHeaderChars(isFirst: boolean): number {
   return isFirst ? HEADER_CHARS + META_CHARS : HEADER_CHARS;
 }
+
+/**
+ * Marker for an image that arrived over the binary GRP_DATA transport.
+ *
+ * That transport carries no text at all — the picture is raw chunk blobs — so
+ * unlike an `aei1:` message there is no body to keep. The backend writes this
+ * marker as the message text purely to give the image a place in the
+ * conversation. It is a LOCAL convention between server and UI and never goes
+ * on air; see `app/imaging/aeic/channel_data_ingest.py`.
+ */
+const BINARY_MARKER_PREFIX = 'aeib:';
+
+/** The session key of a binary-transport image, or null. */
+export function parseAeicBinaryRef(text: string): string | null {
+  if (!text.startsWith(BINARY_MARKER_PREFIX)) return null;
+  const key = text.slice(BINARY_MARKER_PREFIX.length).trim();
+  return key.length > 0 ? key : null;
+}

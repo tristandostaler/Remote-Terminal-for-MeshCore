@@ -118,71 +118,78 @@ class TestTextChunkTransport:
 
 
 class TestChannelDataTransport:
-    """The not-yet-implemented binary transport."""
+    """The binary GRP_DATA transport, now implemented.
 
-    def test_is_unavailable_on_a_build_without_command_62(self):
-        assert channel_data_transport_available() is False
-        assert ChannelDataTransport().available is False
+    The wire format itself is pinned in ``tests/test_aeic_channel_data.py``
+    against upstream's constants; this covers the transport's own behaviour.
+    """
+
+    def test_is_available_because_the_frame_needs_no_library_helper(self):
+        """``commands.send`` is a generic dispatcher, so the command number does
+        not have to be exposed by meshcore-py for us to issue it."""
+        assert channel_data_transport_available() is True
+        assert ChannelDataTransport().available is True
 
     @pytest.mark.asyncio
-    async def test_send_explains_what_is_missing_rather_than_failing_obscurely(self):
+    async def test_refuses_a_direct_message(self):
+        """GRP_DATA is a group payload type; there is no DM equivalent."""
         sent: list[str] = []
-        with pytest.raises(AeicTransportUnavailable) as excinfo:
-            await ChannelDataTransport().send(os.urandom(117), SQUARE, make_target(sent))
-        detail = str(excinfo.value)
-        assert str(CMD_SEND_CHANNEL_DATA) in detail
-        assert "not implemented" in detail
+        target = make_target(sent)
+        assert target.conversation_type == "PRIV"
+        with pytest.raises(AeicTransportUnavailable, match="channel traffic only"):
+            await ChannelDataTransport().send(os.urandom(117), SQUARE, target)
 
-    def test_wire_constants_match_the_upstream_framing(self):
-        """Pinned from lib/services/image_chunk_transport.dart. These are what an
-        implementation has to honour, so a typo here would silently misframe."""
+    @pytest.mark.asyncio
+    async def test_refuses_a_channel_target_with_no_radio(self):
+        target = AeicTarget(conversation_type="CHAN", conversation_key="AB" * 16)
+        with pytest.raises(AeicTransportUnavailable, match="radio_manager"):
+            await ChannelDataTransport().send(os.urandom(117), SQUARE, target)
+
+    def test_the_command_number_is_still_pinned(self):
+        assert CMD_SEND_CHANNEL_DATA == 62
         assert DATA_TYPE_AEIC_IMAGE == 0xAE1C
-        assert ChannelDataTransport.BLOB_BYTES == 163
-        assert ChannelDataTransport.HEADER_BYTES == 4
-        assert ChannelDataTransport.PARITY_LENGTH_BYTES == 1
-        # body = blob - header - the parity chunk's length byte
-        assert ChannelDataTransport.BODY_BYTES == 158
-        # `total` is 4 bits and must be >= 1
-        assert ChannelDataTransport.MAX_DATA_CHUNKS == 15
 
-    def test_binary_framing_would_beat_text_for_a_typical_image(self):
-        """The reason to migrate, as an assertion rather than a comment.
+    def test_binary_framing_beats_text_for_a_typical_image(self):
+        """The reason this transport is preferred, as an assertion.
 
         A 156-byte bitstream (the measured ft32 mean) is one binary chunk but two
         basE91 text messages, because basE91 expands by ~23%.
         """
+        from app.imaging.aeic.channel_data import BODY_BYTES
+
         mean_bitstream = 156
-        assert mean_bitstream <= ChannelDataTransport.BODY_BYTES  # one chunk
+        assert mean_bitstream <= BODY_BYTES  # one chunk
         text_chars = int(mean_bitstream * 1.2308)
         assert text_chars > DEFAULT_MESSAGE_BUDGET - 10  # more than one message
 
 
 class TestTransportSelection:
-    def test_falls_back_to_text_while_the_binary_one_is_unavailable(self):
-        transport = select_transport()
+    def test_a_direct_message_always_uses_text(self):
+        transport = select_transport("PRIV")
         assert transport.name == TEXT_TRANSPORT
         assert transport.available
 
     def test_can_be_forced_to_text(self):
-        assert select_transport(prefer_binary=False).name == TEXT_TRANSPORT
+        assert select_transport("CHAN", prefer_binary=False).name == TEXT_TRANSPORT
 
-    def test_prefers_binary_the_moment_it_becomes_available(self, monkeypatch):
-        """The migration switch. When `meshcore` grows command 62 the probe goes
-        true and selection follows on its own -- no call site changes."""
-        monkeypatch.setattr(ChannelDataTransport, "available", property(lambda self: True))
-        assert select_transport().name == CHANNEL_DATA_TRANSPORT
+    def test_a_channel_prefers_the_binary_transport(self):
+        """It is what MCO Advanced speaks, so images actually interoperate."""
+        assert select_transport("CHAN").name == CHANNEL_DATA_TRANSPORT
 
-    def test_the_probe_is_conservative_about_an_unknown_library(self, monkeypatch):
-        """It must never claim the transport works when the send would fail: a
-        wrongly-optimistic probe wastes an encode and confuses the user."""
-        import app.imaging.aeic.transport as transport_module
+    def test_falls_back_to_text_when_the_binary_one_is_unusable(self, monkeypatch):
+        monkeypatch.setattr(ChannelDataTransport, "available", property(lambda self: False))
+        assert select_transport("CHAN").name == TEXT_TRANSPORT
 
-        monkeypatch.setattr(
-            transport_module,
-            "channel_data_transport_available",
-            lambda: False,
-        )
-        assert transport_module.channel_data_transport_available() is False
+    def test_the_firmware_answer_comes_from_the_radio_not_the_probe(self):
+        """Nothing in Python can tell whether the FIRMWARE implements command 62.
+
+        The probe only says the dispatcher exists; the radio answers for real by
+        rejecting the first blob, which is why that rejection is a distinct,
+        recoverable exception.
+        """
+        from app.imaging.aeic.transport import AeicChannelDataUnsupported
+
+        assert issubclass(AeicChannelDataUnsupported, AeicTransportUnavailable)
 
 
 class TestMessageBudget:
