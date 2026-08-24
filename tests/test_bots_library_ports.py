@@ -389,7 +389,7 @@ class TestLongReplySplitting:
 
         texts = [s["text"] for s in ctx.captured_sends]
         # Last message is the unchanged hint; the list before it is numbered.
-        assert texts[-1] == "Say 'help <command>' for details — it names every trigger."
+        assert texts[-1] == "Say 'help <command>' for details."
         parts = texts[:-1]
         assert len(parts) > 1, "expected the long list to split"
         assert [p.split("/")[0] for p in parts] == [f"({i}" for i in range(1, len(parts) + 1)]
@@ -410,14 +410,14 @@ class TestHelpShowsEveryTrigger:
     were unreachable unless you already knew them.
     """
 
-    def _ctx(self, bots, settings=None):
+    def _ctx(self, bots):
         entry = get_library_entry("help")
         assert entry is not None
         handler = load_bot_code(entry["code"]).collector.keywords[0].handler
         ctx = BotContext(
             bot_id="help",
             bot_name="help",
-            settings=settings or {},
+            settings={},
             state={},
             is_test=True,
             loop=asyncio.get_event_loop(),
@@ -427,8 +427,8 @@ class TestHelpShowsEveryTrigger:
         ctx.get_enabled_bots = lambda: bots  # type: ignore[method-assign]
         return handler, ctx
 
-    async def _run(self, bots, text, settings=None):
-        handler, ctx = self._ctx(bots, settings)
+    async def _run(self, bots, text):
+        handler, ctx = self._ctx(bots)
         word, _, rest = text.partition(" ")
         await handler(
             ctx,
@@ -447,21 +447,45 @@ class TestHelpShowsEveryTrigger:
         {"name": "ping", "description": "d", "keywords": ["ping"]},
     ]
 
-    async def test_list_counts_the_extra_triggers_of_each_command(self):
-        """The default list stays one entry per command, marked with its alias count."""
+    async def test_list_spells_out_the_aliases_of_each_command(self):
         texts = await self._run(self.BOTS, "help")
         joined = " ".join(texts)
-        assert "joke (+2)" in joined
+        assert "joke (jokes/fortune)" in joined
         # A command with a single trigger stays bare — no empty parentheses.
         assert "ping (" not in joined
         assert "ping" in joined
-        assert texts[-1].endswith("it names every trigger.")
 
-    async def test_list_spells_out_the_aliases_when_the_operator_asks(self):
-        texts = await self._run(self.BOTS, "help", settings={"spell_out_aliases": True})
+    async def test_list_counts_a_vocabulary_instead_of_spelling_it_out(self):
+        """greeter answers 30 greetings and sudo 28 shell jokes — subject matter,
+        not other names for the command. Inline they cost more airtime than the
+        whole rest of the list, so past the width they collapse to a count."""
+        ns = _load_namespace("help")
+        width = ns["ALIAS_INLINE_WIDTH"]
+        vocabulary = ["hello"] + [f"greeting{i:02d}" for i in range(30)]
+        assert len("/".join(vocabulary[1:])) > width
+
+        texts = await self._run(
+            [
+                {"name": "greeter", "description": "d", "keywords": vocabulary},
+                {"name": "sports", "description": "d", "keywords": ["sports", "score", "wc"]},
+            ],
+            "help",
+        )
         joined = " ".join(texts)
-        assert "joke (jokes/fortune)" in joined
-        assert "ping (" not in joined
+        assert "hello (+30)" in joined
+        assert "greeting00" not in joined
+        # The collapse is per command: a real alias set beside it stays spelled out.
+        assert "sports (score/wc)" in joined
+
+    async def test_a_collapsed_vocabulary_is_still_spelled_out_on_demand(self):
+        """The count is a list-only economy; 'help <command>' never withholds."""
+        vocabulary = ["hello"] + [f"greeting{i:02d}" for i in range(30)]
+        texts = await self._run(
+            [{"name": "greeter", "description": "d", "keywords": vocabulary}], "help hello"
+        )
+        joined = " ".join(texts)
+        for keyword in vocabulary:
+            assert keyword in joined, keyword
 
     async def test_detail_lists_every_trigger_past_the_old_six(self):
         keywords = [f"kw{i:02d}" for i in range(9)]

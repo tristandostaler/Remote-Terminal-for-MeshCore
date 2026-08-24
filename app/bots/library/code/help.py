@@ -7,15 +7,22 @@ Merged from the separate ``cmd`` bot (library 1.2.0): it printed the same list
 with less detail, so the two bots duplicated each other and answering both
 meant two replies.
 
-``help <command>`` names every trigger the command answers to (library 1.3.0);
-it used to stop after six, hiding operator-added keywords and the words merged
-bots absorbed. The bare list marks how many extra triggers each command has
-(``hello (+27)``) rather than spelling them out — a mesh with the greeter and
-sudo bots enabled has ~150 keywords, four times the airtime of the plain list.
-Operators who want them inline can switch on "Spell out aliases in the list".
+Both screens name every trigger a command answers to (library 1.3.0). The list
+used to print one keyword per bot and ``help <command>`` stopped after six, so
+operator-added keywords and the words merged bots absorbed were unreachable
+unless you already knew them. A node with the wordier bots enabled spends a few
+more RF frames on the list; ctx.reply_split numbers them and drops nothing.
 """
 
 from remoteterm import bot
+
+# A handful of bots answer to a vocabulary rather than to alias names: greeter
+# takes 30 greetings, sudo 28 fake shell commands. Those are the bot's subject
+# matter, not other names for the command, and spelling them out costs more
+# airtime than the whole rest of the list. Alias sets that really are alternate
+# names top out around 24 characters ("score/scores/wc/worldcup"), so anything
+# past this width shows its count instead and 'help <command>' spells it out.
+ALIAS_INLINE_WIDTH = 40
 
 BOT_META = {
     "key": "help",
@@ -23,20 +30,6 @@ BOT_META = {
     "category": "Basic",
     "description": "Command list (help, cmd) and per-command help",
     "version": "1.3.0",
-    "settings_schema": [
-        {
-            "key": "spell_out_aliases",
-            "label": "Spell out aliases in the command list",
-            "type": "bool",
-            "default": False,
-            "help": (
-                "Off: the list shows one keyword per command with a (+n) alias count. "
-                "On: every trigger is listed inline, which can multiply the airtime "
-                "the list costs. 'help <command>' always names them all."
-            ),
-        },
-    ],
-    "settings": {"spell_out_aliases": False},
 }
 
 
@@ -70,19 +63,17 @@ async def show_help(ctx, msg):
         await ctx.reply(ctx.t("rt.no_results"))
         return
 
-    spell_out = bool(ctx.settings.get("spell_out_aliases", False))
     commands: list[str] = []
     for entry in bots:
         keywords = _triggers(entry)
         if not keywords:
             continue
-        aliases = keywords[1:]
-        if not aliases:
-            commands.append(keywords[0])
-        elif spell_out:
-            commands.append(f"{keywords[0]} ({'/'.join(aliases)})")
-        else:
-            commands.append(f"{keywords[0]} (+{len(aliases)})")
+        # Aliases ride in parentheses behind the first keyword, slash-separated
+        # so they never read as more commands in the comma-separated list.
+        aliases = "/".join(keywords[1:])
+        if len(aliases) > ALIAS_INLINE_WIDTH:
+            aliases = f"+{len(keywords) - 1}"
+        commands.append(f"{keywords[0]} ({aliases})" if aliases else keywords[0])
     commands.sort()
     if not commands:
         await ctx.reply("No keyword commands enabled — see the Bots tab")
@@ -90,4 +81,4 @@ async def show_help(ctx, msg):
     # ctx.reply_split packs the whole list into as many RF-sized "(i/n)" parts as
     # it takes, so no command is dropped and no keyword is cut in half.
     await ctx.reply_split(f"Commands: {', '.join(commands)}")
-    await ctx.reply("Say 'help <command>' for details — it names every trigger.")
+    await ctx.reply("Say 'help <command>' for details.")
