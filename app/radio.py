@@ -326,6 +326,20 @@ class RadioManager:
         """Return the cached radio slot for a channel key, if present."""
         return self._channel_slot_by_key.get(channel_key.upper())
 
+    def channel_key_for_slot(self, slot: int) -> str | None:
+        """Reverse of :meth:`get_cached_channel_slot`.
+
+        Inbound GRP_DATA frames identify their channel by radio SLOT, not by
+        key -- ``RESP_CODE_CHANNEL_DATA_RECV`` carries a one-byte channel index
+        and nothing else -- so receiving one means mapping that index back to a
+        channel we know. Only slots this process loaded are resolvable, which is
+        the same limitation the rest of the channel path already has.
+        """
+        for key, loaded in self._channel_slot_by_key.items():
+            if loaded == slot:
+                return key
+        return None
+
     def plan_channel_send_slot(
         self,
         channel_key: str,

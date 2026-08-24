@@ -6,15 +6,19 @@ concern from producing it, and there are two ways to do it:
 * :class:`TextChunkTransport` -- basE91-encode the bitstream and send it as
   ordinary ``aei1:`` text messages. Implemented, and what ships today.
 * :class:`ChannelDataTransport` -- MCO Advanced's binary GRP_DATA (0x06) chunk
-  stream under data type ``0xAE1C``. **Not implemented**: it needs
-  ``CMD_SEND_CHANNEL_DATA`` (62), which the Python ``meshcore`` library does not
-  expose. This is where it goes when it does.
+  stream under data type ``0xAE1C``, via ``CMD_SEND_CHANNEL_DATA`` (62). This is
+  the interoperable one, and the default for channels.
 
 Everything that sends an AEIC image -- the ``/aeic/send`` route and the bot
 ``send_image`` family -- goes through :func:`select_transport`, so neither has to
-know which one it got. That is the point of this module: the migration is
-implementing one method here and flipping one capability probe, not editing every
-call site.
+know which one it got.
+
+The Python ``meshcore`` library exposes no ``send_channel_data`` helper, but it
+does not need to: ``commands.send`` is a generic dispatcher, so the frame is
+built in :mod:`app.imaging.aeic.channel_data` and handed straight to it. What
+cannot be probed from Python is whether the *firmware* implements command 62;
+the radio answers that by rejecting the first blob, which
+:class:`AeicChannelDataUnsupported` turns into a clean fallback to text.
 
 ## What a caller provides
 
@@ -35,6 +39,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from meshcore.events import EventType
 
 from app.imaging.aeic.text_transport import (
     DEFAULT_MESSAGE_BUDGET,
@@ -58,6 +64,17 @@ DATA_TYPE_AEIC_IMAGE = 0xAE1C
 
 class AeicTransportUnavailable(RuntimeError):
     """The requested transport cannot run on this install."""
+
+
+class AeicChannelDataUnsupported(AeicTransportUnavailable):
+    """This radio's firmware does not accept ``CMD_SEND_CHANNEL_DATA``.
+
+    Raised ONLY when the very first blob was rejected, i.e. nothing reached the
+    air yet, so the caller can cleanly fall back to the text transport. A
+    failure on any later blob raises the plain
+    :class:`AeicTransportUnavailable` instead, because part of the image is
+    already out and resending it by another route would duplicate it.
+    """
 
 
 @dataclass
@@ -180,60 +197,27 @@ class TextChunkTransport(AeicTransport):
 
 
 class ChannelDataTransport(AeicTransport):
-    """MCO Advanced's binary GRP_DATA transport. NOT IMPLEMENTED YET.
+    """MCO Advanced's binary GRP_DATA transport -- the interoperable one.
 
-    This is the intended destination, not a fallback: it is what MCO Advanced
-    speaks (so images start interoperating), and it drops basE91's ~23%
-    expansion, which puts most photos back into a single packet.
+    Channels only: GRP_DATA is a group payload type with no DM equivalent, so
+    :func:`select_transport` hands direct messages to the text transport.
 
-    ## Implementing it
+    Preferred over text where it applies, for two reasons. It is what MCO
+    Advanced actually speaks, so images interoperate rather than showing up as a
+    line of basE91 on the peer; and it drops that ~23% expansion, which puts most
+    photos back into a single packet.
 
-    The wire format is fully specified upstream in
-    ``lib/services/image_chunk_transport.dart`` on branch
-    ``origin/rename-mco-advanced``. One GRP_DATA blob per chunk, at most 163
-    bytes::
+    The wire format -- blob layout, per-chunk capacities, XOR parity -- lives in
+    :mod:`app.imaging.aeic.channel_data`, ported from upstream's single source of
+    truth. This class is only the radio plumbing: load the channel into a slot,
+    build the frames, push them.
 
-        off  size  field
-        0    2     sender_prefix   selfPublicKey[0..1], in EVERY chunk -- the
-                                   firmware supplies no sender identity on
-                                   RESP_CODE_CHANNEL_DATA_RECV, and chunk 0 may
-                                   be the one that is lost
-        2    1     img_id          uint8, random-ish per image
-        3    1     idx<<4 | total  idx 0..15, total 1..15; idx == total means
-                                   this is the XOR parity chunk
-        4    ..    body            chunk 0: [metadata byte] + image bytes
-                                   others : image bytes
-                                   parity : [len_xor] + XOR of every data body,
-                                            each zero-padded to the body size
-
-    Body capacity is ``163 - 4 - 1 = 158`` bytes: the parity chunk spends one
-    body byte on the XOR of the data body lengths, which is what makes
-    single-loss recovery self-describing (a lost chunk's length comes back as
-    ``len_xor ^ XOR(lengths that arrived)``).
-
-    Four things beyond this class are needed, and none of them are in this file:
-
-    1. an outbound path for ``CMD_SEND_CHANNEL_DATA`` (62) -- either the
-       ``meshcore`` library exposing it, or a raw frame built the way
-       ``app/services/voice.py`` builds raw DM frames;
-    2. a GROUP_DATA (0x06) decrypt/ingest route beside the GROUP_TEXT (0x05)
-       one in ``app/packet_processor.py``, dispatching on data type 0xAE1C;
-    3. reassembly that honours the parity chunk (``app/imaging/aeic/ingest.py``
-       currently reassembles text chunks only);
-    4. keeping ``aei1:`` decoding on the inbound side regardless, so peers that
-       speak only the text form keep working.
-
-    :class:`AeicStreamMetadata` needs no change: its byte already *is* upstream's
-    chunk-0 metadata byte, so nothing has to be re-derived.
+    Unlike the text transport this creates **no message rows**, because nothing
+    textual crossed the air. The local record is the AEIC session written by
+    :meth:`AeicService.send_image`.
     """
 
     name = CHANNEL_DATA_TRANSPORT
-
-    BLOB_BYTES = 163
-    HEADER_BYTES = 4
-    PARITY_LENGTH_BYTES = 1
-    BODY_BYTES = BLOB_BYTES - HEADER_BYTES - PARITY_LENGTH_BYTES
-    MAX_DATA_CHUNKS = 15
 
     @property
     def available(self) -> bool:
@@ -247,53 +231,163 @@ class ChannelDataTransport(AeicTransport):
         *,
         session_id: int | None = None,
     ) -> AeicSendResult:
-        raise AeicTransportUnavailable(
-            "the binary 0xAE1C transport is not implemented yet: it needs "
-            f"CMD_SEND_CHANNEL_DATA ({CMD_SEND_CHANNEL_DATA}), which this "
-            "meshcore build does not expose. See ChannelDataTransport's docstring "
-            "for the wire format and the four pieces the migration needs."
+        """Emit the image as GRP_DATA blobs via ``CMD_SEND_CHANNEL_DATA``.
+
+        Channels only: GRP_DATA is a group payload type, and there is no DM
+        equivalent. A DM target falls back to the text transport, which is why
+        :func:`select_transport` takes the conversation type.
+        """
+        from app.imaging.aeic.channel_data import (
+            DATA_TYPE_AEIC_IMAGE,
+            build_image_chunks,
+            build_send_command,
+            new_image_id,
+            sender_prefix_for,
+        )
+
+        if target.conversation_type != "CHAN":
+            raise AeicTransportUnavailable(
+                "the binary 0xAE1C transport carries channel traffic only; a direct "
+                "message has to use the text transport"
+            )
+        if target.radio_manager is None:
+            raise AeicTransportUnavailable("the binary transport needs a radio_manager")
+
+        radio_manager = target.radio_manager
+        channel_key = target.conversation_key.upper()
+        img_id = new_image_id() if session_id is None else (session_id & 0xFF)
+
+        slot, self_key = await _load_channel_for_binary_send(radio_manager, channel_key)
+        blobs = build_image_chunks(
+            bitstream,
+            metadata.encode(),
+            sender_prefix=sender_prefix_for(self_key),
+            img_id=img_id,
+        )
+
+        async with radio_manager.radio_operation("aeic_channel_data_send", blocking=True) as mc:
+            for position, blob in enumerate(blobs):
+                frame = build_send_command(slot, DATA_TYPE_AEIC_IMAGE, blob)
+                # The firmware answers RESP_CODE_OK, not RESP_CODE_SENT -- a
+                # GRP_DATA blob is fire-and-forget and there is nothing to ACK.
+                result = await mc.commands.send(frame, [EventType.OK, EventType.ERROR])
+                if result is not None and result.type != EventType.ERROR:
+                    continue
+                detail = getattr(result, "payload", "no response")
+                if position == 0:
+                    # Nothing is on air yet, so this is still recoverable. A
+                    # firmware without command 62 rejects the very first blob,
+                    # which is exactly what makes a clean fallback possible --
+                    # and why the caller must not retry after a LATER failure.
+                    raise AeicChannelDataUnsupported(
+                        f"this radio rejected CMD_SEND_CHANNEL_DATA ({CMD_SEND_CHANNEL_DATA}): "
+                        f"{detail}"
+                    )
+                raise AeicTransportUnavailable(
+                    f"CMD_SEND_CHANNEL_DATA failed on blob {position} of {len(blobs)} "
+                    f"({detail}); the image is partially on air and was not resent"
+                )
+
+        radio_manager.note_channel_slot_used(channel_key)
+        logger.info(
+            "Sent a %d-byte AEIC image as %d GRP_DATA blob(s) on channel %s",
+            len(bitstream),
+            len(blobs),
+            channel_key[:12],
+        )
+        return AeicSendResult(
+            transport=self.name,
+            session_id=img_id,
+            # The parity blob is a real packet on air and the caller's airtime
+            # accounting should see it, so it is counted.
+            chunk_count=len(blobs),
+            payload_bytes=len(bitstream),
+            emitted=[],
         )
 
 
+async def _load_channel_for_binary_send(radio_manager, channel_key: str) -> tuple[int, bytes]:
+    """``(radio slot, our public key)`` ready for a GRP_DATA send.
+
+    GRP_DATA addresses a channel by radio SLOT, so the channel has to be resident
+    in one before the blobs go out. This reuses the same slot planner the text
+    channel send uses, so the two cannot disagree about which slot holds what.
+    """
+    from app.repository import ChannelRepository
+
+    channel = await ChannelRepository.get_by_key(channel_key)
+    if channel is None:
+        raise AeicTransportUnavailable(f"channel {channel_key[:12]} is not known")
+
+    slot, needs_configure, evicted = radio_manager.plan_channel_send_slot(
+        channel_key, preferred_slot=0
+    )
+    async with radio_manager.radio_operation("aeic_channel_data_slot", blocking=True) as mc:
+        if needs_configure:
+            set_result = await mc.commands.set_channel(
+                channel_idx=slot,
+                channel_name=channel.name,
+                channel_secret=bytes.fromhex(channel.key),
+            )
+            if set_result is None or set_result.type == EventType.ERROR:
+                if evicted:
+                    radio_manager.invalidate_cached_channel_slot(evicted)
+                raise AeicTransportUnavailable(
+                    f"could not load channel {channel_key[:12]} into radio slot {slot}"
+                )
+            radio_manager.note_channel_slot_loaded(channel_key, slot)
+        self_info = mc.self_info or {}
+        public_key = self_info.get("public_key") or ""
+
+    if isinstance(public_key, str):
+        try:
+            public_key = bytes.fromhex(public_key)
+        except ValueError:
+            public_key = b""
+    if len(public_key) < 2:
+        raise AeicTransportUnavailable(
+            "the radio did not report a public key, which every GRP_DATA chunk "
+            "needs as its in-band sender identity"
+        )
+    return slot, bytes(public_key)
+
+
 def channel_data_transport_available() -> bool:
-    """Whether this install could send a GRP_DATA chunk stream.
+    """Whether this install can attempt a GRP_DATA chunk stream.
 
-    Probes the radio library for ``CMD_SEND_CHANNEL_DATA`` rather than hardcoding
-    False, so the day ``meshcore`` grows the command this returns True on its own
-    and :func:`select_transport` starts preferring it -- at which point the only
-    thing left to write is :meth:`ChannelDataTransport.send`.
-
-    Deliberately conservative: it must never claim the transport works when the
-    send would fail, because a failed image send is a wasted encode and a
-    confused user.
+    The library needs no ``send_channel_data`` helper: ``commands.send`` is a
+    generic dispatcher, so the frame is built here and handed straight to it.
+    What we cannot check from Python is whether the *firmware* implements
+    command 62 -- there is no capability flag for it -- so this returns True
+    whenever the dispatcher exists and the real answer comes from the radio
+    rejecting the first blob, which
+    :class:`ChannelDataTransport` turns into a clean fallback.
     """
     try:
-        from meshcore.commands import messaging
+        from meshcore.commands.base import CommandHandlerBase
     except ImportError:  # pragma: no cover - the library is a hard dependency
         return False
-    handler = getattr(messaging, "MessagingCommandHandler", None)
-    if handler is None:
-        return False
-    # The library names its senders `send_*`; any of these appearing means the
-    # GRP_DATA path exists. Checked by name because the command number itself is
-    # an implementation detail the library does not export.
-    return any(
-        hasattr(handler, candidate)
-        for candidate in ("send_channel_data", "send_chan_data", "send_group_data")
-    )
+    return hasattr(CommandHandlerBase, "send")
 
 
-def select_transport(*, prefer_binary: bool = True) -> AeicTransport:
-    """The best transport this install can actually use.
+def select_transport(
+    conversation_type: str = "CHAN", *, prefer_binary: bool = True
+) -> AeicTransport:
+    """The best transport for this destination.
 
-    Prefers the binary one the moment it becomes usable -- it is smaller on air
-    and interoperates with MCO Advanced -- and falls back to text otherwise,
-    which is every install today.
+    Prefers the binary one on CHANNELS: it is what MCO Advanced speaks, so the
+    image actually interoperates, and it drops basE91's ~23% expansion. Direct
+    messages always use text -- GRP_DATA is a group payload type with no DM
+    equivalent.
+
+    Whether the firmware really implements command 62 cannot be known from here;
+    the binary transport reports that by rejecting its first blob, and
+    :meth:`AeicService.send_image` falls back to text on it.
 
     ``prefer_binary=False`` forces the text transport; used by tests and
     available to a caller that specifically needs a peer to see message rows.
     """
-    if prefer_binary:
+    if prefer_binary and conversation_type == "CHAN":
         binary = ChannelDataTransport()
         if binary.available:
             return binary
