@@ -292,6 +292,8 @@ async def create_bot(body: BotCreateRequest) -> Bot:
         enabled=body.enabled,
         respond_to_dms=bool(meta_defaults.get("respond_to_dms", True)),
         admin_only=bool(meta_defaults.get("admin_only", False)),
+        # None falls through to the repository default: #bot / #bots + DMs.
+        scope=meta_defaults.get("scope"),
         cooldown_seconds=float(meta_defaults.get("cooldown_seconds", 0)),
         settings_schema=settings_schema,
         settings=settings,

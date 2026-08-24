@@ -44,6 +44,15 @@ operators).
 - `translate.py` — 10 locales in `translations/` (ported from meshcore-bot),
   dotted-key lookup with locale fallback, keyword-based language detection.
 - `moderation.py` — banned senders (prefix match) + outgoing profanity filter.
+- `app/bot_scope.py` (top level, next to `channel_constants.py`) — the default
+  channel scope: `#bot` / `#bots` plus DMs. Hashtag keys are
+  `SHA256(name)[:16]`, so the default names those channels even on a node that
+  has not joined them — joining `#bot` later brings every default-scoped bot to
+  life there with no scope edit. Spelled out in four places that must agree:
+  the derived keys, `DEFAULT_BOT_SCOPE_JSON` (the `bots.scope` column default in
+  `app/database.py` — SQL cannot import Python), `default_bot_scope()`, and
+  `frontend/src/utils/botScope.ts`. `tests/test_bot_default_scope.py` asserts
+  they do.
 - `placeholders.py` — `{total_contacts}`-style tokens for scheduled messages.
 - `library/` — built-in bots as real `.py` files under `library/code/`, each
   self-describing via a module-level `BOT_META` dict (metadata +
@@ -99,6 +108,12 @@ token gate only.
 - Legacy `def bot(**kwargs)` sources must keep running unchanged (migration
   064 moved them here verbatim).
 - Seeded bots ship disabled — enabling what a node answers is an operator act.
+- New and seeded bots are scoped to `#bot` / `#bots` + DMs, never "all
+  channels": a command bot on Public is noise for the whole mesh. A built-in may
+  widen its own default via `BOT_META["scope"]`, but nothing may default to
+  `{"channels": "all"}`. Migration 071 retargeted existing bots that were still
+  at the old "all" default **and still disabled** — an enabled or hand-scoped
+  bot is a decision and was left alone.
 - Newly installed SMS bots are `admin_only`; existing installations retain
   their stored permission flag during version refreshes.
 - `ui_triggers` only feed handlers declared with **no-argument** decorators

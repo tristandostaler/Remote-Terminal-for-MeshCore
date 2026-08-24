@@ -8,6 +8,7 @@ import { Input } from '../ui/input';
 import { Switch } from '../ui/switch';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
 import { toast } from '../ui/sonner';
+import { scopeChannelLabel } from '../../utils/botScope';
 import { cn } from '@/lib/utils';
 import { BotEditor } from './BotEditor';
 import { NewBotDialogBody } from './NewBotDialog';
@@ -107,14 +108,25 @@ function botStatusDot(bot: Bot): { className: string; label: string } {
   return { className: 'bg-status-connected', label: 'Running' };
 }
 
-function describeScope(bot: Bot): string {
+function describeChannelList(keys: string[], known: Channel[]): string {
+  const labels = keys.map((key) => scopeChannelLabel(key, known));
+  if (labels.length <= 3) return labels.join(', ');
+  return `${labels.slice(0, 2).join(', ')} +${labels.length - 2} more`;
+}
+
+function describeScope(bot: Bot, known: Channel[]): string {
   const channels = bot.scope?.channels ?? 'all';
   let channelPart = 'All channels';
   if (channels === 'none') {
     channelPart = 'No channels';
   } else if (typeof channels === 'object') {
-    if (channels.only) channelPart = `Only ${channels.only.length} channel(s)`;
-    else if (channels.except) channelPart = `All except ${channels.except.length}`;
+    if (channels.only) {
+      channelPart = channels.only.length
+        ? `Only ${describeChannelList(channels.only, known)}`
+        : 'No channels';
+    } else if (channels.except) {
+      channelPart = `All except ${describeChannelList(channels.except, known)}`;
+    }
   }
   return bot.respond_to_dms ? `${channelPart} + DMs` : channelPart;
 }
@@ -483,7 +495,7 @@ export function BotsView({ botId, channels, contacts, onOpenBot, onCloseBot }: B
                   <div className="text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium mb-1">
                     Scope
                   </div>
-                  <div className="text-xs">{describeScope(selectedBot)}</div>
+                  <div className="text-xs">{describeScope(selectedBot, channels)}</div>
                 </div>
                 <div className="flex gap-4">
                   <div>

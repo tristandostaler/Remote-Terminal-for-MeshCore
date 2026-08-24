@@ -10,6 +10,7 @@ from typing import Any
 
 import aiosqlite
 
+from app.bot_scope import default_bot_scope
 from app.database import db
 from app.models import (
     Bot,
@@ -41,7 +42,7 @@ def _row_to_bot(row: aiosqlite.Row) -> Bot:
         enabled=bool(row["enabled"]),
         admin_only=bool(row["admin_only"]),
         respond_to_dms=bool(row["respond_to_dms"]),
-        scope=_load_json(row["scope"], {"channels": "all"}),
+        scope=_load_json(row["scope"], default_bot_scope()),
         cooldown_seconds=row["cooldown_seconds"] or 0,
         per_user_cooldown_seconds=row["per_user_cooldown_seconds"] or 0,
         queue_threshold_seconds=row["queue_threshold_seconds"] or 0,
@@ -147,7 +148,7 @@ class BotRepository:
                     1 if enabled else 0,
                     1 if admin_only else 0,
                     1 if respond_to_dms else 0,
-                    json.dumps(scope if scope is not None else {"channels": "all"}),
+                    json.dumps(scope if scope is not None else default_bot_scope()),
                     cooldown_seconds,
                     per_user_cooldown_seconds,
                     queue_threshold_seconds,

@@ -1,5 +1,4 @@
 import logging
-from hashlib import sha256
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status
 from pydantic import BaseModel, Field
@@ -7,6 +6,7 @@ from pydantic import BaseModel, Field
 from app.channel_constants import (
     PUBLIC_CHANNEL_KEY,
     PUBLIC_CHANNEL_NAME,
+    hashtag_channel_key,
     is_public_channel_key,
     is_public_channel_name,
 )
@@ -115,8 +115,7 @@ def _derive_channel_identity(
             )
         return key_hex, requested_name, False
 
-    key_bytes = sha256(requested_name.encode("utf-8")).digest()[:16]
-    return key_bytes.hex().upper(), requested_name, is_hashtag
+    return hashtag_channel_key(requested_name), requested_name, is_hashtag
 
 
 def _normalize_bulk_hashtag_name(name: str) -> str | None:
