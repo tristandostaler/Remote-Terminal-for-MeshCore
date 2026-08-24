@@ -387,10 +387,11 @@ class TestLongReplySplitting:
         ]
         await handler(ctx, BotMessage(text="help", is_dm=True, sender_key="ab" * 32))
 
-        texts = [s["text"] for s in ctx.captured_sends]
-        # Last message is the unchanged hint; the list before it is numbered.
-        assert texts[-1] == "Say 'help <command>' for details."
-        parts = texts[:-1]
+        parts = [s["text"] for s in ctx.captured_sends]
+        # The hint rides in the first part, not in a message of its own.
+        assert parts[0].startswith("(1/")
+        assert "Say 'help <command>' for details.\nCommands: " in parts[0]
+        assert not any(p.rstrip().endswith("for details.") for p in parts[1:])
         assert len(parts) > 1, "expected the long list to split"
         assert [p.split("/")[0] for p in parts] == [f"({i}" for i in range(1, len(parts) + 1)]
         assert "…" not in " ".join(parts), "list must not be truncated any more"
@@ -400,6 +401,124 @@ class TestLongReplySplitting:
         joined = " ".join(p.split(") ", 1)[1] for p in parts)
         for i in range(40):
             assert f"keyword{i:02d}" in joined
+
+
+class TestHelpShowsEveryTrigger:
+    """Both help screens name every word that reaches a bot.
+
+    The list used to print one keyword per bot and ``help <command>`` cut the
+    list at six, so operator-added aliases and the words merged bots absorbed
+    were unreachable unless you already knew them.
+    """
+
+    def _ctx(self, bots):
+        entry = get_library_entry("help")
+        assert entry is not None
+        handler = load_bot_code(entry["code"]).collector.keywords[0].handler
+        ctx = BotContext(
+            bot_id="help",
+            bot_name="help",
+            settings={},
+            state={},
+            is_test=True,
+            loop=asyncio.get_event_loop(),
+            origin_is_dm=True,
+            origin_sender_key="ab" * 32,
+        )
+        ctx.get_enabled_bots = lambda: bots  # type: ignore[method-assign]
+        return handler, ctx
+
+    async def _run(self, bots, text):
+        handler, ctx = self._ctx(bots)
+        word, _, rest = text.partition(" ")
+        await handler(
+            ctx,
+            BotMessage(
+                text=text,
+                is_dm=True,
+                sender_key="ab" * 32,
+                keyword=word,
+                args=rest.split() if rest else [],
+            ),
+        )
+        return [s["text"] for s in ctx.captured_sends]
+
+    BOTS = [
+        {"name": "fun", "description": "d", "keywords": ["joke", "jokes", "fortune"]},
+        {"name": "ping", "description": "d", "keywords": ["ping"]},
+    ]
+
+    async def test_the_hint_rides_with_the_list_rather_than_following_it(self):
+        """One transmission fewer, and the pointer lands before the list."""
+        texts = await self._run(self.BOTS, "help")
+        assert texts == ["Say 'help <command>' for details.\nCommands: joke (jokes/fortune), ping"]
+
+    async def test_list_spells_out_the_aliases_of_each_command(self):
+        texts = await self._run(self.BOTS, "help")
+        joined = " ".join(texts)
+        assert "joke (jokes/fortune)" in joined
+        # A command with a single trigger stays bare — no empty parentheses.
+        assert "ping (" not in joined
+        assert "ping" in joined
+
+    async def test_list_teases_a_vocabulary_instead_of_spelling_it_out(self):
+        """greeter answers 30 greetings and sudo 28 shell jokes — subject matter,
+        not other names for the command. In full they cost more airtime than the
+        whole rest of the list, so past the width a couple stand for the rest."""
+        ns = _load_namespace("help")
+        vocabulary = ["hello"] + [f"greeting{i:02d}" for i in range(30)]
+        assert len("/".join(vocabulary[1:])) > ns["ALIAS_INLINE_WIDTH"]
+
+        texts = await self._run(
+            [
+                {"name": "greeter", "description": "d", "keywords": vocabulary},
+                {"name": "sports", "description": "d", "keywords": ["sports", "score", "wc"]},
+            ],
+            "help",
+        )
+        joined = " ".join(texts)
+        # Examples say what the other 28 look like; the count says how many.
+        assert "hello (greeting00/greeting01/+28)" in joined
+        assert "greeting02" not in joined
+        # It is per command: a real alias set beside it stays spelled out whole.
+        assert "sports (score/wc)" in joined
+
+    def test_a_teased_alias_set_still_fits_the_width(self):
+        """The examples are a saving, so they must not cost more than the whole."""
+        ns = _load_namespace("help")
+        hint = ns["_alias_hint"]([f"greeting{i:02d}" for i in range(30)])
+        assert hint == "greeting00/greeting01/+28"
+        assert len(hint) <= ns["ALIAS_INLINE_WIDTH"]
+        # No aliases means no parenthetical at all — not an empty one, not "+0".
+        assert ns["_alias_hint"]([]) == ""
+
+    async def test_a_collapsed_vocabulary_is_still_spelled_out_on_demand(self):
+        """The count is a list-only economy; 'help <command>' never withholds."""
+        vocabulary = ["hello"] + [f"greeting{i:02d}" for i in range(30)]
+        texts = await self._run(
+            [{"name": "greeter", "description": "d", "keywords": vocabulary}], "help hello"
+        )
+        joined = " ".join(texts)
+        for keyword in vocabulary:
+            assert keyword in joined, keyword
+
+    async def test_detail_lists_every_trigger_past_the_old_six(self):
+        keywords = [f"kw{i:02d}" for i in range(9)]
+        texts = await self._run(
+            [{"name": "many", "description": "d", "keywords": keywords}], "help many"
+        )
+        joined = " ".join(texts)
+        assert joined.startswith("many: d — try: ")
+        for keyword in keywords:
+            assert keyword in joined, keyword
+
+    async def test_detail_answers_to_an_alias_and_drops_repeats(self):
+        """UI triggers reach every generic handler, so the raw list repeats words."""
+        texts = await self._run(
+            [{"name": "many", "description": "d", "keywords": ["a", "b", "a"]}], "help b"
+        )
+        joined = " ".join(texts)
+        assert joined.endswith("try: a, b")
 
 
 class TestMailbox:
