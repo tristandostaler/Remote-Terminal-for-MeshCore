@@ -29,6 +29,7 @@ def _ago(now: int, then: int | None) -> str:
     return f"{delta // 86400}d"
 
 
+@bot.on_keyword()
 @bot.on_keyword("neighbors", "neighbours")
 async def neighbors(ctx, msg):
     # Read-only lookup against this app's own contact table (allowed for

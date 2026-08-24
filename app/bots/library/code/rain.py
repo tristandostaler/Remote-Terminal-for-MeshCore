@@ -26,6 +26,7 @@ BOT_META = {
 }
 
 
+@bot.on_keyword()
 @bot.on_keyword("rain", "nowcast")
 async def rain(ctx, msg):
     query = msg.arg_text.strip() or str(ctx.settings.get("default_location") or "Seattle, WA")

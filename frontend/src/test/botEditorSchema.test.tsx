@@ -210,3 +210,37 @@ describe('BotEditor settings schema URL fields', () => {
     expect(screen.getByText('Twilio SID')).toBeInTheDocument();
   });
 });
+
+describe('BotEditor extra keywords', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  async function openTriggers(declared: string[]) {
+    const bot = makeBot();
+    bot.declared_keywords = declared;
+    vi.spyOn(api, 'getBot').mockResolvedValue(bot);
+    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Triggers' }));
+    return screen.getByPlaceholderText('add keyword…');
+  }
+
+  it('adds a keyword the code does not declare', async () => {
+    const input = await openTriggers(['wx']);
+    fireEvent.change(input, { target: { value: 'Forecast' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    // Lowercased, and offered with a remove button like any other chip.
+    expect(screen.getByRole('button', { name: 'Remove keyword forecast' })).toBeInTheDocument();
+  });
+
+  it('refuses a keyword the code already declares', async () => {
+    // The engine drops such a word, so saving the chip would promise an alias
+    // that never answers — or worse, answers for the wrong command.
+    const input = await openTriggers(['wx', 'wxalert']);
+    fireEvent.change(input, { target: { value: 'WXALERT' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(
+      screen.queryByRole('button', { name: 'Remove keyword wxalert' })
+    ).not.toBeInTheDocument();
+  });
+});

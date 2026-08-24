@@ -66,6 +66,7 @@ def _setting(ctx, key: str, default: float) -> float:
         return default
 
 
+@bot.on_keyword()
 @bot.on_keyword("satpass")
 async def satpass(ctx, msg):
     api_key = str(ctx.settings.get("n2yo_api_key") or "").strip()

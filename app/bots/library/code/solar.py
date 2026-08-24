@@ -64,6 +64,7 @@ def _describe_kp(kp: float) -> tuple[str, str]:
     return "quiet", "aurora unlikely"
 
 
+@bot.on_keyword()
 @bot.on_keyword("solar")
 async def solar(ctx, msg):
     try:

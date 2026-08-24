@@ -921,6 +921,7 @@ async def _finish_outbound(ctx, msg, phone, clean, sender, actor_id, result) -> 
 # ----------------------------- commands ------------------------------------
 
 
+@bot.on_keyword()
 @bot.on_keyword("sms")
 async def sms(ctx, msg):
     arg = _command_arg(msg, "sms")

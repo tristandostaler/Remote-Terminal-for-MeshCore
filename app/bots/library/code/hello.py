@@ -53,6 +53,7 @@ SUFFIXES = (
 )
 
 
+@bot.on_keyword()
 @bot.on_keyword(*KEYWORDS)
 async def hello(ctx, msg):
     # @[name] is the mention syntax mesh clients recognize and highlight.

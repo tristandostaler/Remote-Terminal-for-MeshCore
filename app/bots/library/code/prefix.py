@@ -15,6 +15,7 @@ BOT_META = {
 }
 
 
+@bot.on_keyword()
 @bot.on_keyword("prefix", "lookup")
 async def prefix_lookup(ctx, msg):
     # Read-only lookups against this app's own contact table (allowed for

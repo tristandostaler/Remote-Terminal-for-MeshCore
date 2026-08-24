@@ -30,6 +30,7 @@ BOT_META = {
 }
 
 
+@bot.on_keyword()
 @bot.on_keyword("advert")
 async def send_advert(ctx, msg):
     if not msg.is_dm:

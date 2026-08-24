@@ -11,6 +11,7 @@ BOT_META = {
 }
 
 
+@bot.on_keyword()
 @bot.on_keyword("version", "ver")
 async def version(ctx, msg):
     # Read-only import of RemoteTerm's own version metadata — this built-in is

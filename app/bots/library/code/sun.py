@@ -93,6 +93,7 @@ def _sun_times(lat: float, lon: float) -> tuple[datetime, datetime] | None:
     return rise, sets
 
 
+@bot.on_keyword()
 @bot.on_keyword("sun")
 async def sun(ctx, msg):
     query = msg.arg_text.strip()

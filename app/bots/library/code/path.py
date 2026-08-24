@@ -54,6 +54,7 @@ async def _resolve_hops(hops: list[str]) -> str:
     return " > ".join(parts)
 
 
+@bot.on_keyword()
 @bot.on_keyword("path", "decode", "route")
 async def decode_path(ctx, msg):
     arg = msg.arg_text.strip().replace(":", "").replace(" ", "")

@@ -119,6 +119,7 @@ def _parse_game(event):
     return line.strip(), state, {away_abbr.upper(), home_abbr.upper()}
 
 
+@bot.on_keyword()
 @bot.on_keyword("sports", "score", "scores", "wc", "worldcup")
 async def sports(ctx, msg):
     league = (
