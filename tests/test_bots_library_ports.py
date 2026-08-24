@@ -524,27 +524,40 @@ class TestHelpShowsEveryTrigger:
 class TestMailbox:
     """Mailbox builds one unsplit string per command; the entrypoint splits it.
 
-    ``_bot_inner`` runs in a worker thread and cannot await, so every ``_cmd_*``
-    branch returns raw text and ``mailbox()`` hands it to ctx.reply_split. These
-    tests pin the two things that migration could silently break: a branch
+    ``_dispatch`` runs in a worker thread and cannot await, so every ``_cmd_*``
+    branch returns raw text and ``mailbox_command`` hands it to ctx.reply_split.
+    These tests pin the two things that migration could silently break: a branch
     forgetting to return, and the raw ``mbx test`` probe getting renumbered.
+    They also pin the handler split — one keyword command, one passive learner —
+    since that is what puts mailbox in the node's ``help`` command list.
     """
 
-    async def _mailbox(self, tmp_path, settings=None):
+    async def _mailbox(self, tmp_path, settings=None, ui_triggers=None):
         """One mailbox bot record; run as many messages through it as needed."""
         from app.repository.bots import BotRepository
 
         entry = get_library_entry("mailbox")
         assert entry is not None
-        base = {"db_path": str(tmp_path / "mailbox.db"), "prefix": "mbx"}
+        base = {"db_path": str(tmp_path / "mailbox.db")}
         record = await BotRepository.create(
-            name="mailbox-splittest", code=entry["code"], settings={**base, **(settings or {})}
+            name="mailbox-splittest",
+            code=entry["code"],
+            settings={**base, **(settings or {})},
+            ui_triggers=ui_triggers,
         )
         engine = BotEngine()
 
-        async def run(text: str, sender_key: str = "ab" * 32):
+        async def run(
+            text: str,
+            sender_key: str = "ab" * 32,
+            sender_name: str = "TestUser",
+            is_dm: bool = True,
+        ):
             response = await engine.test_run(
-                record, BotTestRequest(text=text, is_dm=True, sender_key=sender_key)
+                record,
+                BotTestRequest(
+                    text=text, is_dm=is_dm, sender_key=sender_key, sender_name=sender_name
+                ),
             )
             assert response.error is None, response.error
             return [r["text"] for r in response.replies]
@@ -624,6 +637,77 @@ class TestMailbox:
         joined = " ".join(t.split(") ", 1)[1] for t in texts)
         for i in range(80):
             assert f"word{i:03d}" in joined, f"word{i:03d} lost in playback"
+
+    def test_the_command_is_a_keyword_so_help_can_list_it(self):
+        """A catch-all on_message declares no keywords, so `help` never saw it.
+
+        The command word has to be a real keyword trigger for
+        ``ctx.get_enabled_bots`` to report it, which is what the help bot lists.
+        """
+        entry = get_library_entry("mailbox")
+        assert entry is not None
+        loaded = load_bot_code(entry["code"])
+        assert loaded.declared_keywords == ["mbx"]
+        # Plus a no-argument handler, so words added on the Triggers tab work.
+        assert loaded.has_generic_keyword_handler
+        # And exactly one catch-all, for passive name -> key learning.
+        assert len(loaded.collector.messages) == 1
+
+    async def test_an_operator_trigger_word_answers_and_is_quoted_back(self, test_db, tmp_path):
+        """The typed word is the prefix — a bot reached as `mail` says `mail`."""
+        run = await self._mailbox(tmp_path, ui_triggers=[{"kind": "keyword", "spec": "mail"}])
+        texts = await run("mail")
+        assert texts
+        joined = " ".join(texts)
+        assert "mail inbox" in joined
+        assert "mbx" not in joined
+
+    async def test_passive_learning_feeds_addressing_by_name_and_stays_quiet(
+        self, test_db, tmp_path
+    ):
+        """The catch-all only learns: no reply, but `mbx to <name>` resolves."""
+        run = await self._mailbox(tmp_path)
+        alice = "cd" * 32
+
+        chatter = await run("just talking, no command here", sender_key=alice, sender_name="alice")
+        assert chatter == [], "the passive handler must never reply"
+
+        await run("mbx accept")
+        texts = await run("mbx to alice")
+        assert len(texts) == 1
+        assert f"alice [{alice[:8]}]" in texts[0]
+
+    def test_a_stored_body_keeps_the_spacing_it_was_sent_with(self):
+        """`msg.arg_text` re-joins on single spaces; a message body must not be
+        rewritten, and the trigger word is matched whole so a node whose name
+        starts with it is not mistaken for the command."""
+        ns = _load_namespace("mailbox")
+        remainder = ns["_remainder"]
+
+        class _Msg:
+            def __init__(self, text, keyword):
+                self.text = text
+                self.keyword = keyword
+
+            @property
+            def arg_text(self):
+                return " ".join(self.text.split()[1:])
+
+        assert remainder(_Msg("mbx msg abcd1234  two  spaces", "mbx")) == (
+            "msg abcd1234  two  spaces"
+        )
+        # The engine strips the mention before matching, so msg.text still has it.
+        assert remainder(_Msg("@[mbxnode] mbx help", "mbx")) == "help"
+        # A global command prefix sits right against the word.
+        assert remainder(_Msg("!mbx  inbox", "mbx")) == "inbox"
+
+    async def test_a_channel_command_starts_the_dm_handoff(self, test_db, tmp_path):
+        """Mailbox stays DM-only; on a channel the command hands off instead."""
+        run = await self._mailbox(tmp_path)
+        texts = await run("mbx help", is_dm=False)
+        assert len(texts) == 1
+        assert "would advert" in texts[0]
+        assert "TestUser" in texts[0]
 
 
 class TestMergedBots:
