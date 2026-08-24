@@ -5,6 +5,11 @@ interface RadioSettings {
   cr: number;
 }
 
+export interface RepeatFreqRange {
+  min_mhz: number;
+  max_mhz: number;
+}
+
 export interface RadioConfig {
   public_key: string;
   name: string;
@@ -20,6 +25,9 @@ export interface RadioConfig {
   telemetry_mode_base?: number;
   telemetry_mode_loc?: number;
   telemetry_mode_env?: number;
+  repeat_enabled?: boolean;
+  repeat_supported?: boolean;
+  allowed_repeat_freqs?: RepeatFreqRange[];
 }
 
 export interface RadioConfigUpdate {
@@ -34,6 +42,7 @@ export interface RadioConfigUpdate {
   telemetry_mode_base?: number;
   telemetry_mode_loc?: number;
   telemetry_mode_env?: number;
+  repeat_enabled?: boolean;
 }
 
 export type RadioDiscoveryTarget = 'repeaters' | 'sensors' | 'all';

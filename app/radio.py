@@ -12,6 +12,7 @@ from serial.serialutil import SerialException
 
 from app.config import settings
 from app.keystore import clear_keys
+from app.services.repeat_mode import RepeatFreqRange
 
 logger = logging.getLogger(__name__)
 MAX_FRONTEND_RECONNECT_ERROR_BROADCASTS = 3
@@ -177,6 +178,11 @@ class RadioManager:
         self.max_channels: int = 40
         self.path_hash_mode: int = 0
         self.path_hash_mode_supported: bool = False
+        # Companion repeat ("relay") mode: whether the firmware reports the flag
+        # at all, its current value, and the frequencies it will repeat on.
+        self.repeat_supported: bool = False
+        self.repeat_enabled: bool = False
+        self.allowed_repeat_freqs: list[RepeatFreqRange] = []
         self._channel_slot_by_key: OrderedDict[str, int] = OrderedDict()
         self._channel_key_by_slot: dict[int, str] = {}
         self._pending_message_channel_key_by_slot: dict[int, str] = {}
@@ -224,6 +230,9 @@ class RadioManager:
         self.max_channels = 40
         self.path_hash_mode = 0
         self.path_hash_mode_supported = False
+        self.repeat_supported = False
+        self.repeat_enabled = False
+        self.allowed_repeat_freqs = []
         self.reset_channel_send_cache()
         self.clear_pending_message_channel_slots()
 

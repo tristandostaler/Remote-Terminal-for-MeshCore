@@ -323,6 +323,7 @@ jsdom has no layout engine, so none of this is observable from the vitest suite 
 
 - `SettingsRadioSection.tsx` surfaces `path_hash_mode` only when `config.path_hash_mode_supported` is true.
 - `SettingsRadioSection.tsx` also exposes `multi_acks_enabled` as a checkbox for the radio's extra direct-ACK transmission behavior.
+- The "Repeat Mesh Packets" checkbox appears only when `config.repeat_supported` is true, and is validated against `config.allowed_repeat_freqs` using the frequency currently in the form (not the saved one) — firmware only relays on the shared off-grid frequencies, so the toggle warns before a save the radio would reject.
 - Advert-location control is intentionally only `off` vs `include node location`. Companion-radio firmware does not reliably distinguish saved coordinates from live GPS in this path.
 - The advert action is mode-aware: the radio settings section exposes both flood and zero-hop manual advert buttons, both routed through the same `onAdvertise(mode)` seam.
 - Mesh discovery in the radio section is limited to node classes that currently answer discovery control-data requests in firmware: repeaters and sensors.
