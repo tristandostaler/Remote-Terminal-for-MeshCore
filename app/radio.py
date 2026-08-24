@@ -332,13 +332,29 @@ class RadioManager:
         Inbound GRP_DATA frames identify their channel by radio SLOT, not by
         key -- ``RESP_CODE_CHANNEL_DATA_RECV`` carries a one-byte channel index
         and nothing else -- so receiving one means mapping that index back to a
-        channel we know. Only slots this process loaded are resolvable, which is
-        the same limitation the rest of the channel path already has.
+        channel we know.
+
+        Consults ``_channel_key_by_slot`` first (the maintained reverse index,
+        rather than a linear scan of its forward twin) and then the queued-message
+        recovery map, exactly the way ``_resolve_channel_for_pending_message``
+        does for inbound channel TEXT.
+
+        Both are consulted because the first is gated on
+        :meth:`channel_slot_reuse_enabled`: on a TCP connection, or when
+        ``force_channel_slot_reconfigure`` is set, ``note_channel_slot_loaded``
+        returns early and the reuse maps stay EMPTY for the whole session. An
+        earlier version of this method read only the forward reuse map, so on
+        those transports every inbound image was dropped as "no channel loaded"
+        while sending kept working -- sends do not need the cache, they just
+        reconfigure a slot each time.
+
+        Returns None only when nothing in this process has ever associated the
+        slot with a channel; the caller then asks the radio directly.
         """
-        for key, loaded in self._channel_slot_by_key.items():
-            if loaded == slot:
-                return key
-        return None
+        cached = self._channel_key_by_slot.get(slot)
+        if cached is not None:
+            return cached
+        return self._pending_message_channel_key_by_slot.get(slot)
 
     def plan_channel_send_slot(
         self,
