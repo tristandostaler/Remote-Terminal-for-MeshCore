@@ -180,3 +180,145 @@ class TestUpstreamRoundTripVectors:
 
         assert (a, STD_META.encode()) in got
         assert (b, HIGH_META.encode()) in got
+
+
+class TestBinarySendIsVisibleLocally:
+    """A binary-transport send must leave a message row to render off.
+
+    The regression this pins: the binary transport emits no text, so
+    ``AeicSendResult.emitted`` is empty, so ``_record_outgoing`` resolved
+    ``message_id = None`` and wrote a session with a NULL message id. The
+    conversation renders images off message rows, so the picture flew to MCO
+    Advanced and the sender's own bubble never appeared.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_binary_send_creates_a_marker_message(self, test_db, monkeypatch):
+        from app.imaging.aeic.channel_data_ingest import MARKER_PREFIX
+        from app.imaging.aeic.service import aeic_service
+        from app.imaging.aeic.transport import (
+            CHANNEL_DATA_TRANSPORT,
+            AeicSendResult,
+            AeicTarget,
+            AeicTransport,
+        )
+        from app.repository import AeicImageRepository
+
+        class BinaryOnly(AeicTransport):
+            """Stands in for ChannelDataTransport: sends, emits no message rows."""
+
+            name = CHANNEL_DATA_TRANSPORT
+
+            @property
+            def available(self) -> bool:
+                return True
+
+            async def send(self, bitstream, metadata, target, *, session_id=None):
+                return AeicSendResult(
+                    transport=self.name,
+                    session_id=session_id or 1,
+                    chunk_count=2,
+                    payload_bytes=len(bitstream),
+                    emitted=[],  # the whole point: nothing textual crossed the air
+                )
+
+        async def fake_encode(rgb):
+            return bytes(range(120))
+
+        monkeypatch.setattr(aeic_service, "encode_rgb", fake_encode)
+
+        channel_key = "CD" * 16
+        result, _bits, _meta = await aeic_service.send_image(
+            bytes(512 * 512 * 3),
+            AeicTarget(conversation_type="CHAN", conversation_key=channel_key),
+            transport=BinaryOnly(),
+        )
+
+        assert result.storage_key is not None
+        session = await AeicImageRepository.get(result.storage_key)
+        assert session is not None
+        # The defect was precisely this being None.
+        assert session["message_id"] is not None
+
+        from app.repository import MessageRepository
+
+        message = await MessageRepository.get_by_id(session["message_id"])
+        assert message is not None
+        assert message.text.startswith(MARKER_PREFIX)
+        assert message.outgoing
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_text_send_is_not_resurrected(self, test_db, monkeypatch):
+        """The fix must not mint bubbles for text sends that produced no row.
+
+        A bot whose send is dropped by moderation legitimately has no message,
+        and inventing one would put a bubble back for a message never sent.
+        """
+        from app.imaging.aeic.service import aeic_service
+        from app.imaging.aeic.transport import AeicTarget, TextChunkTransport
+        from app.repository import AeicImageRepository
+
+        async def fake_encode(rgb):
+            return bytes(range(120))
+
+        async def emit_nothing(chunk: str):
+            return None  # the send was dropped: no Message came back
+
+        monkeypatch.setattr(aeic_service, "encode_rgb", fake_encode)
+        result, _bits, _meta = await aeic_service.send_image(
+            bytes(512 * 512 * 3),
+            AeicTarget(
+                conversation_type="CHAN",
+                conversation_key="EF" * 16,
+                emit_text=emit_nothing,
+            ),
+            transport=TextChunkTransport(),
+        )
+        session = await AeicImageRepository.get(result.storage_key)
+        assert session is not None
+        assert session["message_id"] is None
+
+
+class TestInboundSlotResolution:
+    """Mapping an inbound GRP_DATA frame's radio slot back to a channel.
+
+    ``RESP_CODE_CHANNEL_DATA_RECV`` carries a one-byte channel index and no
+    channel identity, so receiving an image means resolving that slot. The
+    regression pinned here: the first implementation scanned only the
+    slot-*reuse* cache, which is populated as a side effect of SENDING and which
+    ``channel_slot_reuse_enabled()`` keeps permanently empty on TCP. Result:
+    sending worked, and every inbound image was dropped as "no channel loaded".
+    """
+
+    def _manager(self):
+        from app.radio import RadioManager
+
+        return RadioManager()
+
+    def test_resolves_through_the_maintained_reverse_index(self):
+        manager = self._manager()
+        manager.note_channel_slot_loaded("AB" * 16, 3)
+        # Only meaningful where reuse is on; skip the assertion otherwise so this
+        # test says something on every transport rather than silently passing.
+        if manager.channel_slot_reuse_enabled():
+            assert manager.channel_key_for_slot(3) == ("AB" * 16).upper()
+
+    def test_resolves_when_slot_reuse_is_disabled(self, monkeypatch):
+        """The TCP case: the reuse maps never fill, so the fallback must carry it."""
+        manager = self._manager()
+        monkeypatch.setattr(manager, "channel_slot_reuse_enabled", lambda: False)
+
+        key = "CD" * 16
+        manager.note_channel_slot_loaded(key, 2)  # gated off: records nothing
+        assert manager.get_cached_channel_slot(key) is None
+
+        # This map is NOT gated on the reuse flag, which is why it is consulted.
+        manager.remember_pending_message_channel_slot(key, 2)
+        assert manager.channel_key_for_slot(2) == key.upper()
+
+    def test_an_unknown_slot_is_unresolved_rather_than_guessed(self):
+        manager = self._manager()
+        manager.remember_pending_message_channel_slot("AB" * 16, 1)
+        # Slot 7 was never associated with anything; returning slot 1's channel
+        # would file a peer's photo into the wrong conversation.
+        assert manager.channel_key_for_slot(7) is None
