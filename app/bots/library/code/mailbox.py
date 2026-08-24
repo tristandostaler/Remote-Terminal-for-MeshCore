@@ -69,7 +69,7 @@ DEFAULT_PREFIX = "mbx"
 BOT_META = {
     "key": "mailbox",
     "name": "mailbox",
-    "category": "Custom",
+    "category": "Communication",
     "description": "Store-and-forward mailbox for offline nodes (DM 'mbx help')",
     "long_description": (
         "Store-and-forward for nodes that are not online right now. `mbx msg <key> <text>` leaves "
