@@ -80,9 +80,7 @@ def test_private_image_body_is_passed_to_parser_unchanged():
 
 
 def test_channel_image_body_excludes_exact_sender_presentation_prefix():
-    message = SimpleNamespace(
-        type="CHAN", text="Alice: IE4:a:0:e:74:4r:1mc", sender_name="Alice"
-    )
+    message = SimpleNamespace(type="CHAN", text="Alice: IE4:a:0:e:74:4r:1mc", sender_name="Alice")
 
     body = _image_envelope_body(message)
 
