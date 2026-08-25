@@ -238,7 +238,12 @@ export interface ClockDriftSample {
 
 export type DriftSeverity = 'in_sync' | 'minor' | 'major' | 'severe';
 
-export interface ContactClockDrift {
+/**
+ * Scalar drift figures for one node over one window. Shared by the contact info
+ * pane (`ContactClockDrift`) and the node stats page (`NodeClockDriftStats`),
+ * which differ only in how much series detail they carry.
+ */
+export interface ClockDriftSummary {
   latest_drift_seconds: number;
   latest_observed_at: number;
   latest_advert_timestamp: number;
@@ -254,9 +259,20 @@ export interface ContactClockDrift {
   min_drift_seconds: number;
   max_drift_seconds: number;
   mean_drift_seconds: number;
-  /** Trend in seconds/day, or null when too few samples span too little time. */
+  /**
+   * Trend in seconds/day, or null when too few samples span too little time.
+   * Measured over the segment since the clock was last set when there is one —
+   * see `rate_since_last_step`.
+   */
   drift_rate_seconds_per_day: number | null;
+  /** True when the trend covers only the readings after the most recent step. */
+  rate_since_last_step: boolean;
+  /** Times the clock was *set* rather than drifting. Non-zero = a resync isn't holding. */
+  step_count: number;
   bucket_seconds: number;
+}
+
+export interface ContactClockDrift extends ClockDriftSummary {
   samples: ClockDriftSample[];
 }
 
@@ -452,7 +468,9 @@ type ConversationType =
   | 'search'
   | 'trace'
   | 'bots'
-  | 'statistics';
+  | 'statistics'
+  /** Per-node stats page; `id` is the node's public key. */
+  | 'nodeStats';
 
 export interface Conversation {
   type: ConversationType;
@@ -966,6 +984,74 @@ export interface MultibyteRolloutStats {
   repeaters_with_route: number;
   repeaters_multibyte: number;
 }
+
+// ---------------------------------------------------------------------------
+// Node stats page
+//
+// One page, one node, one window selector. The response is a bag of independent
+// optional sections rather than a fixed shape: adding a stat later means adding
+// a field here and a component on the page, and never touching the sections
+// already in it. A section with nothing to say is null and is omitted.
+// ---------------------------------------------------------------------------
+
+/** One bucket of the detailed drift series, with the spread inside it. */
+export interface ClockDriftBand {
+  bucket_start: number;
+  /** Best (largest, least-delayed) reading in the bucket. */
+  drift_seconds: number;
+  min_drift_seconds: number;
+  max_drift_seconds: number;
+  sample_count: number;
+  reading_count: number;
+  direct_reading_count: number;
+}
+
+/** A discontinuity between consecutive readings — a clock being *set*. */
+export interface ClockDriftStep {
+  at: number;
+  from_drift_seconds: number;
+  to_drift_seconds: number;
+  /** Signed; positive means the clock moved forward. */
+  delta_seconds: number;
+  /** Time between the two readings — a jump across a long gap is weaker evidence. */
+  gap_seconds: number;
+}
+
+/**
+ * Readings grouped by the hop count they arrived over. Propagation delay only
+ * biases a reading negative, so a mean falling away as hops rise is that bias
+ * made visible.
+ */
+export interface ClockDriftHopBucket {
+  path_len: number;
+  reading_count: number;
+  mean_drift_seconds: number;
+  min_drift_seconds: number;
+  max_drift_seconds: number;
+}
+
+export interface NodeClockDriftStats extends ClockDriftSummary {
+  series: ClockDriftBand[];
+  /** Largest first. */
+  steps: ClockDriftStep[];
+  histogram: ClockDriftHistogramBin[];
+  hop_breakdown: ClockDriftHopBucket[];
+}
+
+export interface NodeStatsResponse {
+  public_key: string;
+  name: string | null;
+  type: number;
+  window: StatsWindow;
+  /** Seconds the window covers; null for the unbounded 'all'. */
+  window_seconds: number | null;
+  generated_at: number;
+  /** Null when this node's clock has never been measured. */
+  clock_drift: NodeClockDriftStats | null;
+}
+
+/** The node stats page defaults wider than the mesh snapshot — a trend needs lever arm. */
+export const NODE_STATS_DEFAULT_WINDOW: StatsWindow = '1M';
 
 // ---------------------------------------------------------------------------
 // Bots workspace

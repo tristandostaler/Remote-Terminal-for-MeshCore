@@ -27,6 +27,7 @@ import { RichPayloadProvider } from './contexts/RichPayloadContext';
 import { usePush } from './contexts/PushSubscriptionContext';
 import { messageContainsMention } from './utils/messageParser';
 import { getStateKey } from './utils/conversationState';
+import { getContactDisplayName } from './utils/pubkey';
 import type { BulkCreateHashtagChannelsResult, Channel, Conversation, Message } from './types';
 import { CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM } from './types';
 import { shouldAutoFocusInput } from './utils/autoFocusInput';
@@ -619,6 +620,34 @@ export function App() {
   const bulkAddChannelResultModalProps = {
     result: bulkAddResult,
   };
+  // Back from the node stats page goes to that node's own conversation. Browser
+  // history would be the other option, but a deep link into the page has none,
+  // and the node's conversation is a sensible destination either way.
+  const handleBackFromNodeStats = () => {
+    if (activeConversation?.type !== 'nodeStats') return;
+    const key = activeConversation.id;
+    const contact = contacts.find((c) => c.public_key.toLowerCase() === key.toLowerCase());
+    handleSelectConversationWithTargetReset({
+      type: 'contact',
+      id: contact?.public_key ?? key,
+      name: contact
+        ? getContactDisplayName(contact.name, contact.public_key, contact.last_advert)
+        : key.slice(0, 12),
+    });
+  };
+
+  // Opening the node stats page closes the info pane behind it: the pane is a
+  // drawer over the conversation, and leaving it open would cover the page it
+  // just navigated to.
+  const handleOpenNodeStats = (publicKey: string, name?: string) => {
+    handleCloseContactInfo();
+    handleSelectConversationWithTargetReset({
+      type: 'nodeStats',
+      id: publicKey,
+      name: name || publicKey.slice(0, 12),
+    });
+  };
+
   const conversationPaneProps = {
     activeConversation,
     contacts,
@@ -657,6 +686,8 @@ export function App() {
     onSetChannelPathHashModeOverride: handleSetChannelPathHashModeOverride,
     onSelectConversation: handleSelectConversationWithTargetReset,
     onOpenContactInfo: handleOpenContactInfo,
+    onOpenNodeStats: handleOpenNodeStats,
+    onBackFromNodeStats: handleBackFromNodeStats,
     onOpenChannelInfo: handleOpenChannelInfo,
     onSenderClick: handleSenderClick,
     onChannelReferenceClick: handleChannelReferenceClick,
@@ -796,6 +827,7 @@ export function App() {
     blockedNames: appSettings?.blocked_names ?? [],
     trackedTelemetryContacts: appSettings?.tracked_telemetry_contacts ?? [],
     onToggleTrackedTelemetryContact: handleToggleTrackedTelemetryContact,
+    onOpenNodeStats: handleOpenNodeStats,
   };
   const channelInfoPaneProps = {
     channelKey: infoPaneChannelKey,

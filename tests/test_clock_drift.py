@@ -554,3 +554,237 @@ class TestRepeaterAggregate:
         assert stats["furthest_behind"] is None
         assert stats["furthest_ahead"] is None
         assert stats["worst_offenders"] == []
+
+
+class TestNodeStatsDetail:
+    """The detailed per-node section behind the node stats page."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_never_measured(self, test_db):
+        key = _key("a")
+        await _add_repeater("Never Measured", key)
+        detail = await ContactClockDriftRepository.get_detail(
+            key, window_seconds=30 * DAY_SECONDS, now=NOW
+        )
+        assert detail is None
+
+    @pytest.mark.asyncio
+    async def test_series_carries_the_spread_inside_each_bucket(self, test_db):
+        key = _key("b")
+        await _add_repeater("Spread", key)
+
+        # A 30-day window buckets to 6 hours, so these pair up two readings per
+        # bucket -- a bucket reporting only its best would hide the swing.
+        base = day_start(NOW) - 2 * DAY_SECONDS
+        for hour, drift in ((0, -10), (1, -600), (6, -20), (7, -900)):
+            observed = base + hour * HOUR
+            await ContactClockDriftRepository.record(
+                key, advert_timestamp=observed + drift, observed_at=observed
+            )
+
+        detail = await ContactClockDriftRepository.get_detail(
+            key, window_seconds=30 * DAY_SECONDS, now=NOW
+        )
+        assert detail is not None
+        assert detail.bucket_seconds == 6 * HOUR
+        assert detail is not None
+        first = detail.series[0]
+        assert first.reading_count == 2
+        assert first.drift_seconds == -10  # best in the bucket
+        assert first.min_drift_seconds == -600
+        assert first.max_drift_seconds == -10
+
+    @pytest.mark.asyncio
+    async def test_a_clock_being_set_shows_up_as_a_step(self, test_db):
+        key = _key("c")
+        await _add_repeater("Reset At Noon", key)
+
+        base = day_start(NOW) - 3 * DAY_SECONDS
+        # Six hours sitting an hour behind, then someone sets the clock.
+        for hour in range(6):
+            observed = base + hour * HOUR
+            await ContactClockDriftRepository.record(
+                key, advert_timestamp=observed - 3600, observed_at=observed
+            )
+        for hour in range(6, 12):
+            observed = base + hour * HOUR
+            await ContactClockDriftRepository.record(
+                key, advert_timestamp=observed - 4, observed_at=observed
+            )
+
+        detail = await ContactClockDriftRepository.get_detail(
+            key, window_seconds=7 * DAY_SECONDS, now=NOW
+        )
+        assert detail is not None
+        assert len(detail.steps) == 1
+        step = detail.steps[0]
+        assert step.at == base + 6 * HOUR
+        assert step.from_drift_seconds == -3600
+        assert step.to_drift_seconds == -4
+        assert step.delta_seconds == 3596
+        assert step.gap_seconds == HOUR
+
+    @pytest.mark.asyncio
+    async def test_a_steadily_walking_clock_reports_no_steps(self, test_db):
+        """Otherwise every reading from a fast clock would look like a jump."""
+        key = _key("d")
+        await _add_repeater("Walker", key)
+
+        base = day_start(NOW) - 5 * DAY_SECONDS
+        # Gains 10 minutes an hour: every gap moves more than the 120s floor,
+        # but none of it is a discontinuity.
+        for hour in range(48):
+            observed = base + hour * HOUR
+            await ContactClockDriftRepository.record(
+                key, advert_timestamp=observed + hour * 600, observed_at=observed
+            )
+
+        detail = await ContactClockDriftRepository.get_detail(
+            key, window_seconds=7 * DAY_SECONDS, now=NOW
+        )
+        assert detail is not None
+        assert detail.steps == []
+        assert detail.drift_rate_seconds_per_day == pytest.approx(14400, abs=50)
+
+    @pytest.mark.asyncio
+    async def test_hop_breakdown_exposes_the_propagation_bias(self, test_db):
+        key = _key("e")
+        await _add_repeater("Multi Path", key)
+
+        base = day_start(NOW) - 2 * DAY_SECONDS
+        # Same true offset; longer paths read more negative because the advert
+        # spent longer in the air before we heard it.
+        for hour, (hops, drift) in enumerate(
+            ((0, -2), (1, -5), (2, -9), (0, -3), (1, -6), (2, -11))
+        ):
+            observed = base + hour * HOUR
+            await ContactClockDriftRepository.record(
+                key, advert_timestamp=observed + drift, observed_at=observed, path_len=hops
+            )
+
+        detail = await ContactClockDriftRepository.get_detail(
+            key, window_seconds=7 * DAY_SECONDS, now=NOW
+        )
+        assert detail is not None
+        by_hops = {bucket.path_len: bucket for bucket in detail.hop_breakdown}
+        assert sorted(by_hops) == [0, 1, 2]
+        assert by_hops[0].reading_count == 2
+        assert by_hops[0].mean_drift_seconds == pytest.approx(-2.5)
+        assert by_hops[2].mean_drift_seconds == pytest.approx(-10.0)
+        # Direct readings are the least penalised, which is the whole point.
+        assert by_hops[0].mean_drift_seconds > by_hops[2].mean_drift_seconds
+
+    @pytest.mark.asyncio
+    async def test_an_unbounded_window_covers_the_whole_retained_history(self, test_db):
+        key = _key("f")
+        await _add_repeater("Long Memory", key)
+
+        old = day_start(NOW) - 400 * DAY_SECONDS
+        await ContactClockDriftRepository.record(key, advert_timestamp=old - 90, observed_at=old)
+        await ContactClockDriftRepository.record(key, advert_timestamp=NOW - 5, observed_at=NOW)
+
+        windowed = await ContactClockDriftRepository.get_detail(
+            key, window_seconds=30 * DAY_SECONDS, now=NOW
+        )
+        assert windowed is not None
+        assert windowed.bucket_count == 1
+
+        everything = await ContactClockDriftRepository.get_detail(key, window_seconds=None, now=NOW)
+        assert everything is not None
+        assert everything.bucket_count == 2
+        assert everything.first_observed_at == old
+        # ``window_seconds`` reports the real span covered, not a null.
+        assert everything.window_seconds >= 400 * DAY_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_histogram_counts_this_node_s_own_readings(self, test_db):
+        key = _key("1")
+        await _add_repeater("Histogram", key)
+
+        base = day_start(NOW) - DAY_SECONDS
+        for hour, drift in enumerate((-5, -8, -700, -4000)):
+            observed = base + hour * HOUR
+            await ContactClockDriftRepository.record(
+                key, advert_timestamp=observed + drift, observed_at=observed
+            )
+
+        detail = await ContactClockDriftRepository.get_detail(
+            key, window_seconds=7 * DAY_SECONDS, now=NOW
+        )
+        assert detail is not None
+        counts = {bin_.label: bin_.count for bin_ in detail.histogram}
+        assert sum(counts.values()) == 4
+        assert counts["±1m"] == 2  # -5s and -8s
+        assert counts["-1h…-5m"] == 1  # -700s
+        assert counts["-1d…-1h"] == 1  # -4000s is past the hour boundary
+
+
+class TestStepAwareTrend:
+    """A fit across a clock that keeps being reset describes nothing."""
+
+    def test_a_sawtooth_reports_the_current_segment_not_the_average(self):
+        # Loses 600s a day, reset back to zero every four days. Fitting the
+        # whole thing averages the sawtooth away and calls it nearly steady.
+        points: list[tuple[int, int]] = []
+        for day in range(16):
+            for hour in range(0, 24, 6):
+                at = day * 86400 + hour * 3600
+                into_segment = (day % 4) * 86400 + hour * 3600
+                points.append((at, -int(into_segment / 86400 * 600)))
+
+        naive = clock_drift.drift_rate_per_day(points)
+        rate, steps, since_step = clock_drift.drift_trend(points)
+
+        assert len(steps) == 3
+        assert since_step is True
+        # The naive fit badly understates it; the segment fit finds the truth.
+        assert abs(naive or 0) < 200
+        assert rate == pytest.approx(-600, abs=30)
+
+    def test_a_clean_trend_is_unchanged_and_not_flagged(self):
+        # 5 seconds an hour == 120 seconds a day.
+        points = [(i * HOUR, i * 5) for i in range(48)]
+        rate, steps, since_step = clock_drift.drift_trend(points)
+        assert steps == []
+        assert since_step is False
+        assert rate == pytest.approx(120, abs=1)
+
+    def test_a_reset_too_recent_to_fit_falls_back_to_the_whole_window(self):
+        """Better a badly-shaped number than claiming no trend at all."""
+        points = [(i * HOUR, -i * 10) for i in range(24)]
+        points.append((24 * HOUR, 0))  # reset, with nothing after it
+        rate, steps, since_step = clock_drift.drift_trend(points)
+        assert len(steps) == 1
+        assert since_step is False
+        assert rate is not None
+
+    @pytest.mark.asyncio
+    async def test_the_repeater_that_keeps_being_reset_is_not_called_steady(self, test_db):
+        """The bug this guards: the pane said "holding steady" over a sawtooth."""
+        key = _key("7")
+        await _add_repeater("Rebooted", key)
+
+        offset = 0
+        for hours_ago in range(14 * 24, -1, -1):
+            observed = NOW - hours_ago * HOUR
+            offset = -12 if hours_ago in (9 * 24, 3 * 24) else offset - 25
+            await ContactClockDriftRepository.record(
+                key, advert_timestamp=observed + offset, observed_at=observed
+            )
+
+        detail = await ContactClockDriftRepository.get_detail(
+            key, window_seconds=30 * DAY_SECONDS, now=NOW
+        )
+        assert detail is not None
+        assert detail.step_count == 2
+        assert detail.rate_since_last_step is True
+        # Loses 25s an hour == 600s a day, which the sawtooth had been hiding.
+        assert detail.drift_rate_seconds_per_day == pytest.approx(-600, abs=40)
+
+        # The pane's summary reaches the same conclusion, since it reads off the
+        # same helper.
+        summary = await ContactClockDriftRepository.get_for_contact(key, now=NOW)
+        assert summary is not None
+        assert summary.step_count >= 1
+        assert summary.drift_rate_seconds_per_day is not None
+        assert summary.drift_rate_seconds_per_day < -300

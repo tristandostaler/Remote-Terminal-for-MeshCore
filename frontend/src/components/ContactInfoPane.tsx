@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
-import { Activity, Ban, ChevronDown, ChevronRight, Search, Star } from 'lucide-react';
+import { Activity, Ban, BarChart3, ChevronDown, ChevronRight, Search, Star } from 'lucide-react';
 import {
   AreaChart,
   Area,
@@ -97,6 +97,8 @@ interface ContactInfoPaneProps {
   onToggleBlockedName?: (name: string) => void;
   trackedTelemetryContacts?: string[];
   onToggleTrackedTelemetryContact?: (publicKey: string) => Promise<void>;
+  /** Opens the full node stats page for this contact. */
+  onOpenNodeStats?: (publicKey: string, name?: string) => void;
 }
 
 export function ContactInfoPane({
@@ -115,6 +117,7 @@ export function ContactInfoPane({
   onToggleBlockedName,
   trackedTelemetryContacts = [],
   onToggleTrackedTelemetryContact,
+  onOpenNodeStats,
 }: ContactInfoPaneProps) {
   const { distanceUnit } = useDistanceUnit();
   const isNameOnly = contactKey?.startsWith('name:') ?? false;
@@ -442,7 +445,23 @@ export function ContactInfoPane({
                 telemetry because it needs no request and no login — it is already
                 known by the time the pane opens. */}
             {analytics?.clock_drift && (
-              <ClockDriftSection drift={analytics.clock_drift} ready={chartsReady} />
+              <ClockDriftSection
+                drift={analytics.clock_drift}
+                ready={chartsReady}
+                onOpenNodeStats={
+                  onOpenNodeStats
+                    ? () =>
+                        onOpenNodeStats(
+                          contact.public_key,
+                          getContactDisplayName(
+                            contact.name,
+                            contact.public_key,
+                            contact.last_advert
+                          )
+                        )
+                    : undefined
+                }
+              />
             )}
 
             {/* Contact Telemetry */}
@@ -454,6 +473,27 @@ export function ContactInfoPane({
               isTracked={trackedTelemetryContacts.includes(contact.public_key)}
               onToggleTracked={onToggleTrackedTelemetryContact}
             />
+
+            {/* Node stats page. Sits with the actions rather than inside the
+                drift section, because the page is about the node as a whole and
+                will grow sections beyond drift. */}
+            {onOpenNodeStats && (
+              <div className="px-5 py-3 border-b border-border">
+                <button
+                  type="button"
+                  className="text-sm flex items-center gap-2 hover:text-primary transition-colors"
+                  onClick={() =>
+                    onOpenNodeStats(
+                      contact.public_key,
+                      getContactDisplayName(contact.name, contact.public_key, contact.last_advert)
+                    )
+                  }
+                >
+                  <BarChart3 className="h-4.5 w-4.5 text-muted-foreground" aria-hidden="true" />
+                  <span>View node stats</span>
+                </button>
+              </div>
+            )}
 
             {/* Favorite toggle */}
             <div className="px-5 py-3 border-b border-border">
@@ -948,7 +988,15 @@ function ActivityLineChart<T extends ContactAnalyticsHourlyBucket | ContactAnaly
   );
 }
 
-function ClockDriftSection({ drift, ready }: { drift: ContactClockDrift; ready: boolean }) {
+function ClockDriftSection({
+  drift,
+  ready,
+  onOpenNodeStats,
+}: {
+  drift: ContactClockDrift;
+  ready: boolean;
+  onOpenNodeStats?: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const severityClass = driftSeverityTextClass(drift.severity);
   const windowDays = Math.round(drift.window_seconds / 86400);
@@ -958,13 +1006,26 @@ function ClockDriftSection({ drift, ready }: { drift: ContactClockDrift; ready: 
     <div className="px-5 py-3 border-b border-border">
       <div className="flex items-start justify-between gap-2">
         <SectionLabel>Clock Drift</SectionLabel>
-        <button
-          type="button"
-          className="text-[0.625rem] uppercase tracking-wider text-muted-foreground hover:text-primary transition-colors -mt-0.5"
-          onClick={() => setExpanded((value) => !value)}
-        >
-          {expanded ? 'Less' : 'Details'}
-        </button>
+        <div className="-mt-0.5 flex items-center gap-2.5">
+          <button
+            type="button"
+            className="text-[0.625rem] uppercase tracking-wider text-muted-foreground hover:text-primary transition-colors"
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {expanded ? 'Less' : 'Details'}
+          </button>
+          {onOpenNodeStats && (
+            <button
+              type="button"
+              className="text-[0.625rem] uppercase tracking-wider text-primary hover:underline transition-colors inline-flex items-center gap-0.5"
+              onClick={onOpenNodeStats}
+              title="Full drift history, step changes, and per-hop breakdown"
+            >
+              History
+              <ChevronRight className="h-3 w-3" aria-hidden="true" />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex items-baseline gap-2">
@@ -982,12 +1043,16 @@ function ClockDriftSection({ drift, ready }: { drift: ContactClockDrift; ready: 
         {driftDiagnosis(
           drift.latest_drift_seconds,
           drift.drift_rate_seconds_per_day,
-          drift.clock_unset
+          drift.clock_unset,
+          drift.step_count
         )}
       </p>
 
       <div className="mt-2.5 grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-        <InfoItem label="Trend" value={formatDriftRate(drift.drift_rate_seconds_per_day)} />
+        <InfoItem
+          label={drift.rate_since_last_step ? 'Trend since reset' : 'Trend'}
+          value={formatDriftRate(drift.drift_rate_seconds_per_day)}
+        />
         <InfoItem label="Measured" value={formatTime(drift.latest_observed_at)} />
       </div>
 

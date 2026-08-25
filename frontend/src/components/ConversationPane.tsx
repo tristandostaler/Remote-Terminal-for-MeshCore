@@ -36,6 +36,9 @@ const VisualizerView = lazy(() =>
 const StatisticsView = lazy(() =>
   import('./StatisticsView').then((m) => ({ default: m.StatisticsView }))
 );
+const NodeStatsView = lazy(() =>
+  import('./nodeStats/NodeStatsView').then((m) => ({ default: m.NodeStatsView }))
+);
 
 interface ConversationPaneProps {
   activeConversation: Conversation | null;
@@ -81,6 +84,10 @@ interface ConversationPaneProps {
   ) => Promise<void>;
   onSelectConversation: (conversation: Conversation) => void;
   onOpenContactInfo: (publicKey: string, fromChannel?: boolean) => void;
+  /** Opens the per-node stats page. */
+  onOpenNodeStats?: (publicKey: string) => void;
+  /** Leaves the node stats page; undefined hides the back button. */
+  onBackFromNodeStats?: () => void;
   onOpenChannelInfo: (channelKey: string) => void;
   onSenderClick: (sender: string) => void;
   onChannelReferenceClick?: (channelName: string) => void;
@@ -166,6 +173,8 @@ export function ConversationPane({
   onSetChannelPathHashModeOverride,
   onSelectConversation,
   onOpenContactInfo,
+  onOpenNodeStats,
+  onBackFromNodeStats,
   onOpenChannelInfo,
   onSenderClick,
   onChannelReferenceClick,
@@ -313,7 +322,19 @@ export function ConversationPane({
   if (activeConversation.type === 'statistics') {
     return (
       <Suspense fallback={<LoadingPane label="Loading statistics..." />}>
-        <StatisticsView onOpenContactInfo={onOpenContactInfo} />
+        <StatisticsView onOpenNodeStats={onOpenNodeStats} />
+      </Suspense>
+    );
+  }
+
+  if (activeConversation.type === 'nodeStats') {
+    return (
+      <Suspense fallback={<LoadingPane label="Loading node stats..." />}>
+        <NodeStatsView
+          publicKey={activeConversation.id}
+          contacts={contacts}
+          onBack={onBackFromNodeStats}
+        />
       </Suspense>
     );
   }

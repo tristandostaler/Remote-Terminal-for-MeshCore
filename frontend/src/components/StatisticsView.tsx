@@ -400,11 +400,11 @@ function NoiseFloorChart({ history }: { history: NoiseFloorHistoryStats }) {
 function RepeaterClockDriftPanel({
   stats,
   windowKey,
-  onOpenContactInfo,
+  onOpenNodeStats,
 }: {
   stats: RepeaterClockDriftStats;
   windowKey: StatsWindow;
-  onOpenContactInfo?: (publicKey: string) => void;
+  onOpenNodeStats?: (publicKey: string) => void;
 }) {
   const measured = stats.repeaters_with_samples;
 
@@ -527,9 +527,9 @@ function RepeaterClockDriftPanel({
 
       <DriftRankingTable
         title="Furthest off"
-        caption="Largest offset first. Click a repeater for its drift history."
+        caption="Largest offset first. Click a repeater for its full drift history."
         entries={stats.worst_offenders}
-        onOpenContactInfo={onOpenContactInfo}
+        onOpenNodeStats={onOpenNodeStats}
       />
 
       {stats.fastest_rates.length > 0 && (
@@ -538,7 +538,7 @@ function RepeaterClockDriftPanel({
           caption="Ranked by trend, not offset. These will be worse tomorrow — a one-off resync will not hold."
           entries={stats.fastest_rates}
           showRate
-          onOpenContactInfo={onOpenContactInfo}
+          onOpenNodeStats={onOpenNodeStats}
         />
       )}
 
@@ -547,7 +547,7 @@ function RepeaterClockDriftPanel({
           title="Clock never set"
           caption="These report time from boot rather than a date, so they are decades out. Kept out of the figures above, which would otherwise be meaningless."
           entries={stats.unset_clocks}
-          onOpenContactInfo={onOpenContactInfo}
+          onOpenNodeStats={onOpenNodeStats}
         />
       )}
 
@@ -683,13 +683,13 @@ function DriftRankingTable({
   caption,
   entries,
   showRate = false,
-  onOpenContactInfo,
+  onOpenNodeStats,
 }: {
   title: string;
   caption: string;
   entries: RepeaterClockDriftEntry[];
   showRate?: boolean;
-  onOpenContactInfo?: (publicKey: string) => void;
+  onOpenNodeStats?: (publicKey: string) => void;
 }) {
   if (entries.length === 0) {
     return null;
@@ -716,15 +716,15 @@ function DriftRankingTable({
                 <td className="py-1 pr-2 max-w-[14rem]">
                   <span
                     className={
-                      onOpenContactInfo
+                      onOpenNodeStats
                         ? 'cursor-pointer hover:text-primary hover:underline transition-colors truncate inline-block max-w-full align-bottom'
                         : 'truncate inline-block max-w-full align-bottom'
                     }
-                    role={onOpenContactInfo ? 'button' : undefined}
-                    tabIndex={onOpenContactInfo ? 0 : undefined}
-                    onKeyDown={onOpenContactInfo ? handleKeyboardActivate : undefined}
-                    onClick={() => onOpenContactInfo?.(entry.public_key)}
-                    title={onOpenContactInfo ? 'Open drift history' : undefined}
+                    role={onOpenNodeStats ? 'button' : undefined}
+                    tabIndex={onOpenNodeStats ? 0 : undefined}
+                    onKeyDown={onOpenNodeStats ? handleKeyboardActivate : undefined}
+                    onClick={() => onOpenNodeStats?.(entry.public_key)}
+                    title={onOpenNodeStats ? "Open this node's stats page" : undefined}
                   >
                     {entry.name || entry.public_key.slice(0, 12)}
                   </span>
@@ -749,10 +749,10 @@ function DriftRankingTable({
 }
 
 export function StatisticsView({
-  onOpenContactInfo,
+  onOpenNodeStats,
 }: {
-  /** Passed through so a repeater name in the drift tables opens its info pane. */
-  onOpenContactInfo?: (publicKey: string) => void;
+  /** Passed through so a repeater name in the drift tables opens its stats page. */
+  onOpenNodeStats?: (publicKey: string) => void;
 } = {}) {
   const [stats, setStats] = useState<StatisticsResponse | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
@@ -1181,7 +1181,7 @@ export function StatisticsView({
                   <RepeaterClockDriftPanel
                     stats={stats.repeater_clock_drift}
                     windowKey={shownWindow}
-                    onOpenContactInfo={onOpenContactInfo}
+                    onOpenNodeStats={onOpenNodeStats}
                   />
                 </>
               )}

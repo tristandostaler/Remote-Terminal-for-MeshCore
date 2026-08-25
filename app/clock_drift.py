@@ -77,6 +77,26 @@ MIN_RATE_SPAN_SECONDS = 6 * 3600
 # a "still moving" ranking.
 NOTABLE_RATE_SECONDS_PER_DAY = 60
 
+# A clock does not only drift, it also gets *set* -- a reboot, a manual sync, a
+# GPS fix landing. That shows up as a discontinuity between two readings rather
+# than a slope, and it is worth calling out separately because it dates the
+# event. Below this a jump is indistinguishable from measurement noise.
+CLOCK_STEP_MIN_SECONDS = 120
+
+# ...and a jump only counts as a step if it is this many times larger than the
+# node's *typical* reading-to-reading movement over the same gap. Without that,
+# a clock losing an hour a day would report every reading as a "step".
+#
+# The baseline is deliberately the median consecutive change rather than the
+# fitted trend. On a clock that keeps being reset the fitted trend is near zero
+# — the sawtooth averages out — so using it would mark every ordinary reading
+# as a step, which is the opposite of the intent.
+CLOCK_STEP_RATE_MULTIPLE = 3.0
+
+# Below this many consecutive changes there is no baseline to be robust about,
+# so only the absolute floor applies.
+CLOCK_STEP_MIN_BASELINE_DELTAS = 3
+
 # Signed histogram edges in seconds, ascending. Bin i holds drifts in
 # [edges[i-1], edges[i]) with the two open-ended tails at either end.
 _HISTOGRAM_EDGES: tuple[int, ...] = (
@@ -176,6 +196,92 @@ def drift_rate_per_day(points: Sequence[tuple[int, int]]) -> float | None:
     # Slope is seconds of drift per second of wall clock; a day of wall clock
     # is the unit an operator can actually reason about.
     return round((covariance / variance) * 86400.0, 2)
+
+
+def find_clock_steps(points: Sequence[tuple[int, int]]) -> list[dict]:
+    """Discontinuities between consecutive readings — a clock being *set*.
+
+    ``points`` are ``(observed_at, drift_seconds)`` pairs, which this sorts by
+    time. A pair qualifies when the change is both larger than
+    ``CLOCK_STEP_MIN_SECONDS`` and several times larger than this node's typical
+    movement over the same gap — so a fast clock walking steadily does not
+    report every hour as a jump, while the hour it actually got reset does.
+
+    ``gap_seconds`` rides along on every result: a big change across a
+    three-week hole in the data is not the same finding as one across an hour,
+    and only the reader can judge which they are looking at.
+    """
+    if len(points) < 2:
+        return []
+
+    ordered = sorted(points)
+    # Pairwise, so the second sequence is deliberately one shorter -- strict
+    # zip would reject exactly the shape this needs.
+    pairs = list(zip(ordered, ordered[1:], strict=False))
+
+    # Typical movement per second of wall clock, taken as a median so the very
+    # jumps being looked for cannot inflate the baseline that judges them.
+    rates = [
+        abs(drift - previous_drift) / (at - previous_at)
+        for (previous_at, previous_drift), (at, drift) in pairs
+        if at > previous_at
+    ]
+    baseline_per_second = median(rates) if len(rates) >= CLOCK_STEP_MIN_BASELINE_DELTAS else 0.0
+
+    steps: list[dict] = []
+    for (previous_at, previous_drift), (at, drift) in pairs:
+        delta = drift - previous_drift
+        if abs(delta) < CLOCK_STEP_MIN_SECONDS:
+            continue
+        gap = at - previous_at
+        explained = baseline_per_second * gap * CLOCK_STEP_RATE_MULTIPLE
+        if abs(delta) <= explained:
+            continue
+        steps.append(
+            {
+                "at": at,
+                "from_drift_seconds": previous_drift,
+                "to_drift_seconds": drift,
+                "delta_seconds": delta,
+                "gap_seconds": gap,
+            }
+        )
+
+    steps.sort(key=lambda step: abs(step["delta_seconds"]), reverse=True)
+    return steps
+
+
+def drift_trend(
+    points: Sequence[tuple[int, int]],
+) -> tuple[float | None, list[dict], bool]:
+    """Resolve the trend and the steps together, because neither is meaningful alone.
+
+    Fitting a line across a clock that keeps being *set* describes nothing: the
+    sawtooth averages out, and a node losing ten minutes an hour between weekly
+    resets reports as almost steady. That is not a rounding problem, it is the
+    wrong question — what an operator needs to know is what the clock is doing
+    *now*, which is the segment since it was last set.
+
+    So the steps are found first (on their own robust baseline, no fit needed),
+    and the trend is then fitted only over the readings after the last one.
+    Returns
+    ``(rate_per_day, steps, rate_is_since_last_step)`` — the flag matters
+    because a trend measured over three days and one measured over three weeks
+    do not deserve the same confidence, and only the caller can say so.
+    """
+    steps = find_clock_steps(points)
+    coarse = drift_rate_per_day(points)
+    if not steps:
+        return coarse, steps, False
+
+    last_step_at = max(step["at"] for step in steps)
+    segment = [point for point in points if point[0] >= last_step_at]
+    refined = drift_rate_per_day(segment)
+    if refined is None:
+        # Too little history since the reset to fit anything. The whole-window
+        # number is the wrong shape, but it beats claiming no trend exists.
+        return coarse, steps, False
+    return refined, steps, True
 
 
 def median(values: Sequence[float]) -> float:

@@ -19,6 +19,7 @@ from app.models import (
     CreateContactRequest,
     LppSensor,
     NearestRepeater,
+    NodeStatsResponse,
     PathDiscoveryResponse,
     PathDiscoveryRoute,
     TelemetryHistoryEntry,
@@ -39,6 +40,12 @@ from app.services.contact_reconciliation import (
     record_contact_name_and_reconcile,
 )
 from app.services.radio_runtime import radio_runtime as radio_manager
+from app.stats_windows import (
+    NODE_STATS_DEFAULT_WINDOW,
+    STATS_WINDOWS,
+    is_valid_window,
+    window_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -689,6 +696,43 @@ async def request_contact_telemetry(public_key: str) -> ContactTelemetryResponse
         sensors=sensors,
         fetched_at=fetched_at,
         telemetry_history=history,
+    )
+
+
+@router.get("/{public_key}/stats", response_model=NodeStatsResponse)
+async def get_node_stats(
+    public_key: str,
+    window: str = Query(
+        NODE_STATS_DEFAULT_WINDOW,
+        description=("Time window for every section. One of: " + ", ".join(STATS_WINDOWS) + "."),
+    ),
+) -> NodeStatsResponse:
+    """Everything the node stats page shows for one node over one window.
+
+    Deliberately one request for the whole page: every section honours the same
+    window, so a single selector drives all of them and a new section is a new
+    field here rather than a new round trip.
+    """
+    if not is_valid_window(window):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown window '{window}'. Expected one of: {', '.join(STATS_WINDOWS)}",
+        )
+
+    contact = await _resolve_contact_or_404(public_key)
+    now = int(time.time())
+    span = window_seconds(window)
+
+    return NodeStatsResponse(
+        public_key=contact.public_key,
+        name=contact.name,
+        type=contact.type,
+        window=window,
+        window_seconds=span,
+        generated_at=now,
+        clock_drift=await ContactClockDriftRepository.get_detail(
+            contact.public_key, window_seconds=span, now=now
+        ),
     )
 
 
