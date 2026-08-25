@@ -398,6 +398,13 @@ class PathHashWidthStats(BaseModel):
     single_byte_pct: float = 0.0
     double_byte_pct: float = 0.0
     triple_byte_pct: float = 0.0
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "True when the window held more packets than the scan cap and only the most "
+            "recent ones were parsed — the shares are a recent sample, not the whole window."
+        ),
+    )
 
 
 class ChannelDetail(BaseModel):
@@ -1215,16 +1222,30 @@ class ContactActivityCounts(BaseModel):
     last_hour: int
     last_24_hours: int
     last_week: int
+    window: int = Field(
+        default=0, description="Count over the selected statistics window (see StatisticsResponse)"
+    )
 
 
 class NoiseFloorSample(BaseModel):
-    timestamp: int = Field(description="Unix timestamp of the sampled reading")
-    noise_floor_dbm: int = Field(description="Noise floor in dBm")
+    timestamp: int = Field(description="Unix timestamp at the start of the bucket")
+    noise_floor_dbm: int = Field(description="Mean noise floor in the bucket, dBm")
+    min_dbm: int | None = Field(default=None, description="Quietest reading in the bucket, dBm")
+    max_dbm: int | None = Field(default=None, description="Noisiest reading in the bucket, dBm")
 
 
 class NoiseFloorHistoryStats(BaseModel):
-    sample_interval_seconds: int = Field(description="Expected spacing between samples")
-    coverage_seconds: int = Field(description="How much of the last 24 hours is represented")
+    sample_interval_seconds: int = Field(description="Expected spacing between raw samples")
+    bucket_seconds: int = Field(
+        default=60,
+        description=(
+            "Width of each returned bucket. Equal to sample_interval_seconds for short "
+            "windows; wider windows are averaged down so the series stays chart-sized."
+        ),
+    )
+    coverage_seconds: int = Field(
+        description="How far back the stored series reaches within the window"
+    )
     latest_noise_floor_dbm: int | None = Field(
         default=None, description="Most recent sampled noise floor in dBm"
     )
@@ -1234,13 +1255,20 @@ class NoiseFloorHistoryStats(BaseModel):
     samples: list[NoiseFloorSample] = Field(default_factory=list)
 
 
-class PacketsPerHourBucket(BaseModel):
-    timestamp: int = Field(description="Unix timestamp at the start of the hour")
-    count: int = Field(description="Number of packets received in that hour")
+class PacketBucket(BaseModel):
+    timestamp: int = Field(description="Unix timestamp at the start of the bucket")
+    count: int = Field(description="Number of packets received in that bucket")
+
+
+class PacketsOverTime(BaseModel):
+    """Packet arrivals bucketed across the selected window."""
+
+    bucket_seconds: int = Field(description="Width of each bucket in seconds")
+    buckets: list[PacketBucket] = Field(default_factory=list)
 
 
 class RegionScopeStats(BaseModel):
-    """Regional flood-scope adoption over the last 24 hours.
+    """Regional flood-scope adoption over the selected statistics window.
 
     Two independent views, deliberately not merged — they have different
     denominators and will not agree:
@@ -1256,7 +1284,7 @@ class RegionScopeStats(BaseModel):
     """
 
     total_messages: int = Field(
-        description="Flood-routed channel-message packets heard in the last 24h (unique payloads)"
+        description="Flood-routed channel-message packets heard in the window (unique payloads)"
     )
     scoped_messages: int = Field(description="Of those, how many carried a regional transport code")
     scoped_pct: float
@@ -1268,16 +1296,20 @@ class RegionScopeStats(BaseModel):
         )
     )
     total_senders: int = Field(
-        description="Distinct channel-message senders in the last 24h (decryptable channels only)"
+        description="Distinct channel-message senders in the window (decryptable channels only)"
     )
     scoped_senders: int = Field(description="Of those, how many sent at least one scoped message")
     scoped_senders_pct: float
+    truncated: bool = Field(
+        default=False,
+        description="True when the packet scan hit its row cap — traffic counts are a sample",
+    )
 
 
 class MultibyteRolloutStats(BaseModel):
     """Contact-level multibyte path adoption (folded in from meshcore-bot's
     rollout monitor). Counts contacts by the hop width of their known direct
-    route; packet-level shares live in ``path_hash_width_24h``."""
+    route; packet-level shares live in ``path_hash_width``."""
 
     contacts_with_route: int = Field(description="Contacts with a known direct-route hop width")
     contacts_multibyte: int = Field(description="Of those, contacts using 2- or 3-byte hops")
@@ -1289,7 +1321,17 @@ class MultibyteRolloutStats(BaseModel):
 
 
 class StatisticsResponse(BaseModel):
-    busiest_channels_24h: list[BusyChannel]
+    """Mesh statistics over one selectable time window.
+
+    Every time-bounded field honours ``window``; the entity totals and
+    ``multibyte_rollout`` are all-time by nature and ignore it.
+    """
+
+    window: str = Field(description="Window key the snapshot was built for (see STATS_WINDOWS)")
+    window_seconds: int | None = Field(
+        default=None, description="Seconds the window covers; null for the unbounded 'all'"
+    )
+    busiest_channels: list[BusyChannel]
     contact_count: int
     repeater_count: int
     channel_count: int
@@ -1302,11 +1344,11 @@ class StatisticsResponse(BaseModel):
     contacts_heard: ContactActivityCounts
     repeaters_heard: ContactActivityCounts
     known_channels_active: ContactActivityCounts
-    path_hash_width_24h: PathHashWidthStats
-    region_scope_24h: RegionScopeStats
+    path_hash_width: PathHashWidthStats
+    region_scope: RegionScopeStats
     multibyte_rollout: MultibyteRolloutStats
-    packets_per_hour_72h: list[PacketsPerHourBucket]
-    noise_floor_24h: NoiseFloorHistoryStats
+    packets_over_time: PacketsOverTime
+    noise_floor: NoiseFloorHistoryStats
 
 
 class TelemetryHistoryEntry(BaseModel):

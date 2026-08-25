@@ -31,7 +31,7 @@ app/
 ├── migrations/          # Schema migrations (SQLite user_version, per-version modules)
 ├── models.py            # Pydantic request/response models and typed write contracts (for example ContactUpsert)
 ├── version_info.py      # Unified version/build metadata resolution for debug + startup surfaces
-├── repository/          # Data access layer (contacts, channels, messages, raw_packets, settings, fanout, push_subscriptions, repeater_telemetry, contact_telemetry)
+├── repository/          # Data access layer (contacts, channels, messages, raw_packets, settings, fanout, push_subscriptions, repeater_telemetry, contact_telemetry, noise_floor)
 ├── services/            # Shared orchestration/domain services
 │   ├── messages.py              # Shared message creation, dedup, ACK application
 │   ├── message_send.py          # Direct send, channel send, resend workflows
@@ -42,7 +42,7 @@ app/
 │   ├── flood_scope.py           # Firmware-version-aware flood-scope set/clear command seam
 │   ├── radio_lifecycle.py       # Post-connect setup and reconnect/setup helpers
 │   ├── radio_commands.py        # Radio config/private-key command workflows
-│   ├── radio_stats.py           # In-memory local radio stats sampling and noise-floor history
+│   ├── radio_stats.py           # Local radio stats sampling; persists the noise-floor series
 │   └── radio_runtime.py         # Router/dependency seam over the global RadioManager
 ├── radio.py             # RadioManager transport/session state + lock management
 ├── radio_sync.py        # Polling, sync, periodic advertisement loop
@@ -58,6 +58,7 @@ app/
 │   └── manager.py               # Push dispatch: filter, build payload, concurrent send
 ├── bots/                # Bots workspace engine: triggers, cron, feeds, i18n (see bots/AGENTS_bots.md)
 ├── fanout/              # Fanout bus: MQTT, bots, webhooks, Apprise, SQS (see fanout/AGENTS_fanout.md)
+├── stats_windows.py     # Statistics time-window keys and chart bucket sizing
 ├── telemetry_interval.py # Shared telemetry interval math for tracked-repeater scheduler
 ├── path_utils.py        # Path hex rendering and hop-width helpers
 ├── region_scope.py      # Normalize/validate regional flood-scope values
@@ -189,16 +190,26 @@ The retry deliberately does not re-run `_ensure_on_radio` — re-adding the cont
 - Candidate region names come from `app_settings.known_regions` (user-editable, seeded by migration 063 from `flood_scope` + channel `flood_scope_override`).
 - Channel messages persist `messages.transport_code` (uint16, NULL = unscoped plain flood) and `messages.region` (resolved name, NULL = scoped but no list match) at ingest, so the chat region badge survives raw-packet purge. The packet inspector (`GET /packets/{id}` and the `raw_packet` WS broadcast) resolves region on the fly against the current list since it still holds the raw payload.
 
-### Region-scope adoption stats (`region_scope_24h`)
+### Statistics time windows
+
+`GET /statistics?window=` drives every time-bounded metric from one key (`app/stats_windows.py`): `1h`, `1d` (default), `1w`, `1M`, `3M`, `1y`, `all`. `all` means no lower bound — `window_cutoff` returns `None` and each query drops its `WHERE ... >= ?` clause rather than substituting a very old timestamp, so it reaches whatever the database still holds. An unknown key is a 422 from the router; `window_seconds()` falls back to the default for internal callers so a typo cannot take down the snapshot.
+
+Untouched by the window: entity counts, message totals, the packet decrypted/undecrypted split, and `multibyte_rollout` — all all-time by nature. The activity table keeps its fixed 1h/24h/7d columns and adds a `window` count alongside them.
+
+- **Chart bucketing.** `bucket_seconds_for_span` picks a round bucket width (1 min … 30 days) targeting ~200 points, so a year returns a readable series instead of 8,760 hourly rows. Width is derived from the *nominal* window, not from how much data landed in it, so the x-axis granularity depends only on what the user picked; `all` has no nominal span and uses the real one. Both `packets_over_time` and the noise-floor series bucket in SQL.
+- **Scan caps.** `_packet_shape` and `_region_scope_senders` parse every row in Python, which a wide window makes unbounded. Both fetch at most `MAX_SCAN_ROWS` (250k) most-recent rows and set `truncated` when they hit it. **Never drop the flag** — a partial total presented as a whole one is worse than no number, and the UI leans on it to say the figures are a sample.
+- **Noise floor.** Samples live in `noise_floor_samples` (migration 073), written once a minute by the radio-stats loop and pruned to a year. `timestamp` is the INTEGER PRIMARY KEY, so a re-sample in the same second updates in place and window scans stay index-ordered. Buckets carry `min_dbm`/`max_dbm` next to the mean because averaging a wide window flattens a noisy hour and a quiet one into the same line.
+
+### Region-scope adoption stats (`region_scope`)
 
 `GET /statistics` reports regional flood-scope uptake as two views with different denominators that intentionally will not agree:
 
 - **Traffic** (`bucket_region_scope` in `path_utils.py`) counts flood-routed (`route_type` 0/1) GroupText packets across all channels, including undecryptable ones. Zero-hop/direct sends are excluded because firmware reaches them through the non-transport `sendZeroHop`/`sendDirect` overloads and they can never carry transport codes.
-- **Senders** (`StatisticsRepository._region_scope_senders_24h`) counts distinct senders with at least one scoped message. Attribution requires decryption, so it only covers channels we hold keys for — narrower, but self-validating (a decrypted packet is provably not a corrupt capture) and immune to one chatty node skewing the result. Identity is `sender_key` falling back to `sender_name`; scoping reads `messages.transport_code`, falling back to the linked raw packet for rows stored before region tagging existed.
+- **Senders** (`StatisticsRepository._region_scope_senders`) counts distinct senders with at least one scoped message. Attribution requires decryption, so it only covers channels we hold keys for — narrower, but self-validating (a decrypted packet is provably not a corrupt capture) and immune to one chatty node skewing the result. Identity is `sender_key` falling back to `sender_name`; scoping reads `messages.transport_code`, falling back to the linked raw packet for rows stored before region tagging existed.
 
 `false_positive_floor` exists because corrupt RF captures land in `raw_packets` with effectively random headers and a share of them claim `TRANSPORT_FLOOD`. That garbage spreads near-uniformly across payload-type buckets, so it is measured directly from payload types the protocol does not define (`0x0C`/`0x0D`/`0x0E`) and averaged per bucket. **A `scoped_messages` count at or below the floor is not evidence of adoption**; surface the two together and never show the percentage alone. Do not "fix" the floor by removing it — without it the metric reads several times higher than reality.
 
-Both traffic buckets come from one 24h raw-packet scan (`_packet_shape_24h`) shared with `path_hash_width_24h`, so adding region stats costs no extra query or parse pass.
+Both traffic buckets come from one raw-packet scan (`_packet_shape`) shared with `path_hash_width`, so adding region stats costs no extra query or parse pass.
 
 ### Raw packet dedup policy
 
@@ -349,7 +360,7 @@ The background room poller (`app/radio_sync.py` `_room_poll_loop`, started post-
 - `POST /fanout/bots/disable-until-restart` — stop bot modules and keep bots disabled until restart
 
 ### Statistics
-- `GET /statistics` — aggregated mesh network stats (entity counts, message/packet splits, activity windows, busiest channels, `region_scope_24h` regional adoption)
+- `GET /statistics?window=1h|1d|1w|1M|3M|1y|all` — aggregated mesh network stats for one time window (entity counts, message/packet splits, activity windows, busiest channels, packet activity series, `region_scope` regional adoption, noise-floor series). Defaults to `1d`; unknown windows are 422
 
 ### Push
 - `GET /push/vapid-public-key` — VAPID public key for browser `PushManager.subscribe()`
@@ -492,11 +503,13 @@ tests/
 ├── test_send_messages.py       # Outgoing messages, bot triggers, concurrent sends
 ├── test_settings_router.py     # Settings endpoints, advert validation
 ├── test_push_send.py           # Web Push send/dispatch
+├── test_noise_floor_repository.py  # Persisted noise-floor series (record/bucket/prune)
 ├── test_radio_stats.py         # Radio stats sampling and noise-floor history
 ├── test_repeater_telemetry.py  # Repeater telemetry history recording
 ├── test_service_installer.py   # Service installer script behavior
 ├── test_sqs_fanout.py          # SQS fanout module
 ├── test_statistics.py          # Statistics aggregation
+├── test_stats_windows.py       # Statistics window keys and chart bucketing
 ├── test_telemetry_interval.py  # Telemetry interval scheduling math
 ├── test_version_info.py        # Version/build metadata resolution
 ├── test_websocket.py           # WS manager broadcast/cleanup

@@ -704,28 +704,59 @@ interface ContactActivityCounts {
   last_hour: number;
   last_24_hours: number;
   last_week: number;
+  /** Count over the selected statistics window. */
+  window: number;
 }
 
 export interface NoiseFloorSample {
+  /** Start of the bucket, not of an individual reading. */
   timestamp: number;
+  /** Mean dBm across the bucket. */
   noise_floor_dbm: number;
+  min_dbm?: number | null;
+  max_dbm?: number | null;
 }
 
 export interface NoiseFloorHistoryStats {
   sample_interval_seconds: number;
+  /** Bucket width; equals sample_interval_seconds while the window is short. */
+  bucket_seconds: number;
   coverage_seconds: number;
   latest_noise_floor_dbm: number | null;
   latest_timestamp: number | null;
   samples: NoiseFloorSample[];
 }
 
-interface PacketsPerHourBucket {
+interface PacketBucket {
   timestamp: number;
   count: number;
 }
 
+export interface PacketsOverTime {
+  bucket_seconds: number;
+  buckets: PacketBucket[];
+}
+
 /**
- * Regional flood-scope adoption over the last 24h. Two views with different
+ * Windows the statistics endpoint accepts, narrowest first. Keys are sent as
+ * ``?window=``; labels are what the selector shows.
+ */
+export const STATS_WINDOWS = [
+  { key: '1h', label: '1h', title: 'Last hour', phrase: 'the last hour' },
+  { key: '1d', label: '24h', title: 'Last 24 hours', phrase: 'the last 24 hours' },
+  { key: '1w', label: '7d', title: 'Last 7 days', phrase: 'the last 7 days' },
+  { key: '1M', label: '30d', title: 'Last 30 days', phrase: 'the last 30 days' },
+  { key: '3M', label: '90d', title: 'Last 90 days', phrase: 'the last 90 days' },
+  { key: '1y', label: '1y', title: 'Last year', phrase: 'the last year' },
+  { key: 'all', label: 'All', title: 'Everything retained', phrase: 'the stored history' },
+] as const;
+
+export type StatsWindow = (typeof STATS_WINDOWS)[number]['key'];
+
+export const DEFAULT_STATS_WINDOW: StatsWindow = '1d';
+
+/**
+ * Regional flood-scope adoption over the selected window. Two views with different
  * denominators that will not agree — traffic spans all channels including
  * undecryptable ones (so it carries a false-positive floor from corrupt RF
  * captures), while senders requires decryption and is therefore noise-free but
@@ -740,10 +771,16 @@ export interface RegionScopeStats {
   total_senders: number;
   scoped_senders: number;
   scoped_senders_pct: number;
+  /** True when the packet scan hit its row cap — traffic counts are a sample. */
+  truncated?: boolean;
 }
 
 export interface StatisticsResponse {
-  busiest_channels_24h: BusyChannel[];
+  /** Window the snapshot was built for. */
+  window: StatsWindow;
+  /** Seconds the window covers; null for the unbounded 'all'. */
+  window_seconds: number | null;
+  busiest_channels: BusyChannel[];
   contact_count: number;
   repeater_count: number;
   channel_count: number;
@@ -756,7 +793,7 @@ export interface StatisticsResponse {
   contacts_heard: ContactActivityCounts;
   repeaters_heard: ContactActivityCounts;
   known_channels_active: ContactActivityCounts;
-  path_hash_width_24h: {
+  path_hash_width: {
     total_packets: number;
     single_byte: number;
     double_byte: number;
@@ -764,11 +801,13 @@ export interface StatisticsResponse {
     single_byte_pct: number;
     double_byte_pct: number;
     triple_byte_pct: number;
+    /** True when only the most recent packets in the window were parsed. */
+    truncated?: boolean;
   };
-  region_scope_24h: RegionScopeStats;
+  region_scope: RegionScopeStats;
   multibyte_rollout: MultibyteRolloutStats;
-  packets_per_hour_72h: PacketsPerHourBucket[];
-  noise_floor_24h: NoiseFloorHistoryStats;
+  packets_over_time: PacketsOverTime;
+  noise_floor: NoiseFloorHistoryStats;
 }
 
 /** Contact-level multibyte path adoption (nodes, not traffic). */

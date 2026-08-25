@@ -1,8 +1,9 @@
-"""In-memory local-radio stats sampling.
+"""Local-radio stats sampling.
 
 A single 60s loop fetches core, radio, and packet stats from the connected
-radio in one radio-lock acquisition.  The noise-floor 24h history deque is
-maintained as a side effect.
+radio in one radio-lock acquisition.  Each noise-floor reading is persisted
+as a side effect (``noise_floor_samples``), so the statistics chart survives
+a restart and can be asked for a window wider than a day.
 
 After each sample the loop:
 1. Broadcasts a WS ``health`` frame so frontend dashboards refresh.
@@ -12,30 +13,58 @@ After each sample the loop:
 
 Consumers:
 - GET /api/health      → get_latest_radio_stats()  (battery, uptime, etc.)
-- GET /api/statistics  → get_noise_floor_history()  (24h noise-floor chart)
+- GET /api/statistics  → get_noise_floor_history()  (windowed noise-floor chart)
 - Fanout on_health     → _build_fanout_payload()    (identity + stats)
 """
 
 import asyncio
 import logging
 import time
-from collections import deque
 from typing import Any
 
 from meshcore import EventType
 
 from app.radio import RadioDisconnectedError, RadioOperationBusyError
+from app.repository.noise_floor import NoiseFloorRepository
 from app.services.radio_runtime import radio_runtime as radio_manager
 
 logger = logging.getLogger(__name__)
 
 STATS_SAMPLE_INTERVAL_SECONDS = 60
-NOISE_FLOOR_WINDOW_SECONDS = 24 * 60 * 60
-MAX_NOISE_FLOOR_SAMPLES = 1500  # 24h at 60s intervals = 1440
+
+# Old samples are dropped on a slow cadence rather than every minute; the
+# retention horizon is a year, so being an hour late costs nothing.
+NOISE_FLOOR_PRUNE_INTERVAL_SECONDS = 6 * 3600
 
 _stats_task: asyncio.Task | None = None
-_noise_floor_samples: deque[tuple[int, int]] = deque(maxlen=MAX_NOISE_FLOOR_SAMPLES)
 _latest_stats: dict[str, Any] = {}
+_last_noise_floor_prune: int = 0
+
+
+async def _record_noise_floor(now: int, noise_floor: int) -> None:
+    """Persist one reading, occasionally trimming the retention tail.
+
+    A failed write must never take down the sampling loop — the loop also
+    drives the health broadcast and the fanout dispatch, and a missing chart
+    point is the cheapest thing here to lose.
+    """
+    global _last_noise_floor_prune
+
+    try:
+        await NoiseFloorRepository.record(now, noise_floor)
+    except Exception:
+        logger.debug("Failed to persist noise floor sample", exc_info=True)
+        return
+
+    if now - _last_noise_floor_prune < NOISE_FLOOR_PRUNE_INTERVAL_SECONDS:
+        return
+    _last_noise_floor_prune = now
+    try:
+        deleted = await NoiseFloorRepository.prune()
+        if deleted:
+            logger.info("Pruned %d noise floor samples past the retention horizon", deleted)
+    except Exception:
+        logger.debug("Failed to prune noise floor samples", exc_info=True)
 
 
 async def _sample_all_stats() -> dict[str, Any]:
@@ -68,7 +97,7 @@ async def _sample_all_stats() -> dict[str, Any]:
         snapshot.update(radio_event.payload)
         noise_floor = radio_event.payload.get("noise_floor")
         if isinstance(noise_floor, int):
-            _noise_floor_samples.append((now, noise_floor))
+            await _record_noise_floor(now, noise_floor)
 
     if getattr(packet_event, "type", None) == EventType.STATS_PACKETS:
         snapshot["packets"] = packet_event.payload
@@ -166,28 +195,15 @@ async def stop_radio_stats_sampling() -> None:
     _stats_task = None
 
 
-def get_noise_floor_history() -> dict:
-    """Return the current 24-hour in-memory noise floor history snapshot."""
-    now = int(time.time())
-    cutoff = now - NOISE_FLOOR_WINDOW_SECONDS
+async def get_noise_floor_history(cutoff: int | None) -> dict:
+    """Return the stored noise-floor series since ``cutoff`` (``None`` = all).
 
-    samples = [
-        {"timestamp": timestamp, "noise_floor_dbm": noise_floor_dbm}
-        for timestamp, noise_floor_dbm in _noise_floor_samples
-        if timestamp >= cutoff
-    ]
-
-    latest = samples[-1] if samples else None
-    oldest_timestamp = samples[0]["timestamp"] if samples else None
-    coverage_seconds = 0 if oldest_timestamp is None else max(0, now - oldest_timestamp)
-
-    return {
-        "sample_interval_seconds": STATS_SAMPLE_INTERVAL_SECONDS,
-        "coverage_seconds": coverage_seconds,
-        "latest_noise_floor_dbm": latest["noise_floor_dbm"] if latest else None,
-        "latest_timestamp": latest["timestamp"] if latest else None,
-        "samples": samples,
-    }
+    Bucketing happens in SQL (see ``NoiseFloorRepository.history``) so a year
+    of minute-resolution samples still arrives as a chart-sized series.
+    """
+    history = await NoiseFloorRepository.history(cutoff)
+    history["sample_interval_seconds"] = STATS_SAMPLE_INTERVAL_SECONDS
+    return history
 
 
 def get_latest_radio_stats() -> dict[str, Any]:
