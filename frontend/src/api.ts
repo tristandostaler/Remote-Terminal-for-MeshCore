@@ -43,6 +43,7 @@ import type {
   TrackedTelemetryContactsResponse,
   TrackedTelemetryResponse,
   StatisticsResponse,
+  StatsWindow,
   TraceResponse,
   UnreadCounts,
   Bot,
@@ -596,7 +597,10 @@ export const api = {
     }),
 
   // Statistics
-  getStatistics: () => fetchJson<StatisticsResponse>('/statistics'),
+  getStatistics: (window?: StatsWindow) =>
+    fetchJson<StatisticsResponse>(
+      window ? `/statistics?window=${encodeURIComponent(window)}` : '/statistics'
+    ),
 
   // Granular repeater endpoints
   repeaterLogin: (publicKey: string, password: string) =>

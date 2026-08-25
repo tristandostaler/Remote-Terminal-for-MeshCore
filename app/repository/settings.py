@@ -8,14 +8,20 @@ import aiosqlite
 from app.database import db
 from app.models import AppSettings
 from app.path_utils import bucket_path_hash_widths, bucket_region_scope, parse_packet_envelope
+from app.stats_windows import DEFAULT_STATS_WINDOW, bucket_seconds_for_span, window_cutoff
 from app.telemetry_interval import DEFAULT_TELEMETRY_INTERVAL_HOURS
 
 logger = logging.getLogger(__name__)
 
 SECONDS_1H = 3600
 SECONDS_24H = 86400
-SECONDS_72H = 259200
 SECONDS_7D = 604800
+
+# Widening the window from a day to "all time" turns two of these queries into
+# full-table scans that also parse every packet in Python. Both are capped at
+# the most recent N rows in the window and report ``truncated`` so the UI can
+# say the number is a sample rather than quietly showing a partial total.
+MAX_SCAN_ROWS = 250_000
 
 
 class AppSettingsRepository:
@@ -434,21 +440,35 @@ class StatisticsRepository:
         }
 
     @staticmethod
-    async def _activity_counts(*, contact_type: int, exclude: bool = False) -> dict[str, int]:
-        """Get time-windowed counts for contacts/repeaters heard."""
+    async def _activity_counts(
+        *, contact_type: int, exclude: bool = False, cutoff: int | None
+    ) -> dict[str, int]:
+        """Get time-windowed counts for contacts/repeaters heard.
+
+        The 1h/24h/7d columns are fixed so the table always offers the same
+        three reference points; ``window`` is the count over the selected
+        statistics window, which may be wider than any of them (``cutoff``
+        ``None`` means all time).
+        """
         now = int(time.time())
         op = "!=" if exclude else "="
+        window_expr = "1" if cutoff is None else "CASE WHEN last_seen >= ? THEN 1 ELSE 0 END"
+        params: list[int] = [now - SECONDS_1H, now - SECONDS_24H, now - SECONDS_7D]
+        if cutoff is not None:
+            params.append(cutoff)
+        params.append(contact_type)
         async with db.readonly() as conn:
             async with conn.execute(
                 f"""
                 SELECT
                     SUM(CASE WHEN last_seen >= ? THEN 1 ELSE 0 END) AS last_hour,
                     SUM(CASE WHEN last_seen >= ? THEN 1 ELSE 0 END) AS last_24_hours,
-                    SUM(CASE WHEN last_seen >= ? THEN 1 ELSE 0 END) AS last_week
+                    SUM(CASE WHEN last_seen >= ? THEN 1 ELSE 0 END) AS last_week,
+                    SUM({window_expr}) AS window_count
                 FROM contacts
                 WHERE type {op} ? AND last_seen IS NOT NULL
                 """,
-                (now - SECONDS_1H, now - SECONDS_24H, now - SECONDS_7D, contact_type),
+                tuple(params),
             ) as cursor:
                 row = await cursor.fetchone()
         assert row is not None  # Aggregate query always returns a row
@@ -456,19 +476,24 @@ class StatisticsRepository:
             "last_hour": row["last_hour"] or 0,
             "last_24_hours": row["last_24_hours"] or 0,
             "last_week": row["last_week"] or 0,
+            "window": row["window_count"] or 0,
         }
 
     @staticmethod
-    async def _known_channels_active() -> dict[str, int]:
+    async def _known_channels_active(cutoff: int | None) -> dict[str, int]:
         """Count known channel keys with any traffic in each time window.
 
         Channel keys are stored canonically as uppercase hex, so we can avoid
         the old UPPER(...) join and aggregate per known channel directly.
         """
         now = int(time.time())
+        window_expr = "1" if cutoff is None else "CASE WHEN last_received_at >= ? THEN 1 ELSE 0 END"
+        params: list[int] = [now - SECONDS_1H, now - SECONDS_24H, now - SECONDS_7D]
+        if cutoff is not None:
+            params.append(cutoff)
         async with db.readonly() as conn:
             async with conn.execute(
-                """
+                f"""
                 WITH known AS (
                     SELECT conversation_key, MAX(received_at) AS last_received_at
                     FROM messages
@@ -479,10 +504,11 @@ class StatisticsRepository:
                 SELECT
                     SUM(CASE WHEN last_received_at >= ? THEN 1 ELSE 0 END) AS last_hour,
                     SUM(CASE WHEN last_received_at >= ? THEN 1 ELSE 0 END) AS last_24_hours,
-                    SUM(CASE WHEN last_received_at >= ? THEN 1 ELSE 0 END) AS last_week
+                    SUM(CASE WHEN last_received_at >= ? THEN 1 ELSE 0 END) AS last_week,
+                    SUM({window_expr}) AS window_count
                 FROM known
                 """,
-                (now - SECONDS_1H, now - SECONDS_24H, now - SECONDS_7D),
+                tuple(params),
             ) as cursor:
                 row = await cursor.fetchone()
         assert row is not None
@@ -490,43 +516,89 @@ class StatisticsRepository:
             "last_hour": row["last_hour"] or 0,
             "last_24_hours": row["last_24_hours"] or 0,
             "last_week": row["last_week"] or 0,
+            "window": row["window_count"] or 0,
         }
 
     @staticmethod
-    async def _packets_per_hour_72h() -> list[dict[str, int]]:
-        """Return packet counts bucketed by hour for the last 72 hours."""
-        now = int(time.time())
-        cutoff = now - SECONDS_72H
-        # Bucket timestamps to the start of each hour
+    async def _packets_over_time(cutoff: int | None, now: int) -> dict:
+        """Bucket packet arrivals across the window for the activity chart.
+
+        The bucket width scales with the window (hourly for a week, daily-ish
+        for a year) so the series stays chart-sized instead of shipping one
+        point per hour of a year. Counting is done in SQL, so a wide window
+        costs an index scan rather than a fetch of every row.
+        """
         async with db.readonly() as conn:
+            if cutoff is None:
+                async with conn.execute(
+                    "SELECT MIN(timestamp) AS oldest FROM raw_packets"
+                ) as cursor:
+                    bound = await cursor.fetchone()
+                oldest = bound["oldest"] if bound else None
+                span = 0 if oldest is None else max(0, now - oldest)
+            else:
+                span = max(0, now - cutoff)
+
+            bucket = bucket_seconds_for_span(span)
+            params: tuple = (bucket, bucket)
+            where = ""
+            if cutoff is not None:
+                where = "WHERE timestamp >= ?"
+                params = (bucket, bucket, cutoff)
+
             async with conn.execute(
-                """
-                SELECT (timestamp / 3600) * 3600 AS hour_ts, COUNT(*) AS count
+                f"""
+                SELECT (timestamp / ?) * ? AS bucket_ts, COUNT(*) AS count
                 FROM raw_packets
-                WHERE timestamp >= ?
-                GROUP BY hour_ts
-                ORDER BY hour_ts
+                {where}
+                GROUP BY bucket_ts
+                ORDER BY bucket_ts
                 """,
-                (cutoff,),
+                params,
             ) as cursor:
                 rows = await cursor.fetchall()
-        return [{"timestamp": row["hour_ts"], "count": row["count"]} for row in rows]
+
+        return {
+            "bucket_seconds": bucket,
+            "buckets": [{"timestamp": row["bucket_ts"], "count": row["count"]} for row in rows],
+        }
 
     @staticmethod
-    async def _packet_shape_24h() -> tuple[dict[str, int | float], dict[str, int | float]]:
-        """Bucket the last 24h of raw packets by hop hash width and region scope.
+    async def _packet_shape(
+        cutoff: int | None,
+    ) -> tuple[dict[str, int | float], dict[str, int | float]]:
+        """Bucket the window's raw packets by hop hash width and region scope.
 
         Both buckets come from one fetch so the snapshot only scans the packet
-        table once. Returns ``(path_hash_width, region_scope)``.
+        table once. Every row is parsed in Python, so the fetch is capped at the
+        most recent ``MAX_SCAN_ROWS`` packets in the window; past that the
+        result is a recent sample and says so via ``truncated``. Returns
+        ``(path_hash_width, region_scope)``.
         """
-        now = int(time.time())
         async with db.readonly() as conn:
-            async with conn.execute(
-                "SELECT data FROM raw_packets WHERE timestamp >= ?",
-                (now - SECONDS_24H,),
-            ) as cursor:
-                rows = await cursor.fetchall()
-        return bucket_path_hash_widths(rows), bucket_region_scope(rows)
+            if cutoff is None:
+                async with conn.execute(
+                    "SELECT data FROM raw_packets ORDER BY timestamp DESC LIMIT ?",
+                    (MAX_SCAN_ROWS + 1,),
+                ) as cursor:
+                    rows = list(await cursor.fetchall())
+            else:
+                async with conn.execute(
+                    "SELECT data FROM raw_packets WHERE timestamp >= ? "
+                    "ORDER BY timestamp DESC LIMIT ?",
+                    (cutoff, MAX_SCAN_ROWS + 1),
+                ) as cursor:
+                    rows = list(await cursor.fetchall())
+
+        truncated = len(rows) > MAX_SCAN_ROWS
+        if truncated:
+            rows = rows[:MAX_SCAN_ROWS]
+
+        path_hash_width = bucket_path_hash_widths(rows)
+        path_hash_width["truncated"] = truncated
+        region_scope = bucket_region_scope(rows)
+        region_scope["truncated"] = truncated
+        return path_hash_width, region_scope
 
     @staticmethod
     async def get_mesh_summary() -> dict[str, int]:
@@ -574,7 +646,7 @@ class StatisticsRepository:
         """Contact-level multibyte path adoption, by known direct-route hop width.
 
         Folded in from meshcore-bot's rollout monitor. Packet-level widths are
-        reported separately (``path_hash_width_24h``); this counts *nodes*, so
+        reported separately (``path_hash_width``); this counts *nodes*, so
         an operator can see who has upgraded rather than how much traffic has.
         """
         async with db.readonly() as conn:
@@ -608,8 +680,8 @@ class StatisticsRepository:
         }
 
     @staticmethod
-    async def _region_scope_senders_24h() -> dict[str, int | float]:
-        """Count distinct channel-message senders who scoped at least one send.
+    async def _region_scope_senders(cutoff: int | None) -> dict[str, int | float]:
+        """Count distinct window senders who scoped at least one channel send.
 
         Sender attribution requires having decrypted the message, so this only
         covers channels we hold keys for — a narrower population than the
@@ -622,16 +694,22 @@ class StatisticsRepository:
         to ``sender_name`` — one physical operator may run several nodes, hence
         "senders" rather than "users".
         """
-        now = int(time.time())
+        where = "WHERE m.type = 'CHAN' AND m.outgoing = 0"
+        params: tuple = (MAX_SCAN_ROWS,)
+        if cutoff is not None:
+            where += " AND m.received_at >= ?"
+            params = (cutoff, MAX_SCAN_ROWS)
         async with db.readonly() as conn:
             async with conn.execute(
-                """
+                f"""
                 SELECT m.id, m.sender_key, m.sender_name, m.transport_code, p.data
                 FROM messages m
                 LEFT JOIN raw_packets p ON p.message_id = m.id
-                WHERE m.type = 'CHAN' AND m.outgoing = 0 AND m.received_at >= ?
+                {where}
+                ORDER BY m.received_at DESC
+                LIMIT ?
                 """,
-                (now - SECONDS_24H,),
+                params,
             ) as cursor:
                 rows = await cursor.fetchall()
 
@@ -662,8 +740,12 @@ class StatisticsRepository:
         }
 
     @staticmethod
-    async def get_all() -> dict:
-        """Aggregate all statistics from existing tables.
+    async def get_all(window: str = DEFAULT_STATS_WINDOW) -> dict:
+        """Aggregate all statistics from existing tables over ``window``.
+
+        Every time-bounded metric honours the same window, so the whole
+        snapshot describes one period rather than a mix of 24h and 72h slices.
+        ``window`` ``"all"`` drops the lower bound entirely.
 
         Each helper acquires its own lock; there's no requirement that the
         whole snapshot be atomic. If we ever wanted a consistent snapshot
@@ -671,24 +753,30 @@ class StatisticsRepository:
         ``_in_conn`` helpers, but statistics are intentionally approximate.
         """
         now = int(time.time())
+        cutoff = window_cutoff(window, now)
 
         async with db.readonly() as conn:
-            # Top 5 busiest channels in last 24h
+            # Top 5 busiest channels in the window
+            channel_where = "WHERE m.type = 'CHAN'"
+            channel_params: tuple = ()
+            if cutoff is not None:
+                channel_where += " AND m.received_at >= ?"
+                channel_params = (cutoff,)
             async with conn.execute(
-                """
+                f"""
                 SELECT m.conversation_key, COALESCE(c.name, m.conversation_key) AS channel_name,
                        COUNT(*) AS message_count
                 FROM messages m
                 LEFT JOIN channels c ON m.conversation_key = c.key
-                WHERE m.type = 'CHAN' AND m.received_at >= ?
+                {channel_where}
                 GROUP BY m.conversation_key
                 ORDER BY COUNT(*) DESC
                 LIMIT 5
                 """,
-                (now - SECONDS_24H,),
+                channel_params,
             ) as cursor:
                 rows = await cursor.fetchall()
-            busiest_channels_24h = [
+            busiest_channels = [
                 {
                     "channel_key": row["conversation_key"],
                     "channel_name": row["channel_name"],
@@ -734,16 +822,20 @@ class StatisticsRepository:
         # These each acquire their own lock. The snapshot isn't atomic across
         # them — fine for stats, which are approximate by nature.
         message_totals = await StatisticsRepository.get_database_message_totals()
-        contacts_heard = await StatisticsRepository._activity_counts(contact_type=2, exclude=True)
-        repeaters_heard = await StatisticsRepository._activity_counts(contact_type=2)
-        known_channels_active = await StatisticsRepository._known_channels_active()
-        path_hash_width_24h, region_scope = await StatisticsRepository._packet_shape_24h()
-        region_scope.update(await StatisticsRepository._region_scope_senders_24h())
+        contacts_heard = await StatisticsRepository._activity_counts(
+            contact_type=2, exclude=True, cutoff=cutoff
+        )
+        repeaters_heard = await StatisticsRepository._activity_counts(contact_type=2, cutoff=cutoff)
+        known_channels_active = await StatisticsRepository._known_channels_active(cutoff)
+        path_hash_width, region_scope = await StatisticsRepository._packet_shape(cutoff)
+        region_scope.update(await StatisticsRepository._region_scope_senders(cutoff))
         multibyte_rollout = await StatisticsRepository._multibyte_rollout()
-        packets_per_hour_72h = await StatisticsRepository._packets_per_hour_72h()
+        packets_over_time = await StatisticsRepository._packets_over_time(cutoff, now)
 
         return {
-            "busiest_channels_24h": busiest_channels_24h,
+            "window": window,
+            "window_seconds": None if cutoff is None else now - cutoff,
+            "busiest_channels": busiest_channels,
             "contact_count": contact_count,
             "repeater_count": repeater_count,
             "channel_count": channel_count,
@@ -756,8 +848,8 @@ class StatisticsRepository:
             "contacts_heard": contacts_heard,
             "repeaters_heard": repeaters_heard,
             "known_channels_active": known_channels_active,
-            "path_hash_width_24h": path_hash_width_24h,
-            "region_scope_24h": region_scope,
+            "path_hash_width": path_hash_width,
+            "region_scope": region_scope,
             "multibyte_rollout": multibyte_rollout,
-            "packets_per_hour_72h": packets_per_hour_72h,
+            "packets_over_time": packets_over_time,
         }

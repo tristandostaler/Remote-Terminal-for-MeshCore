@@ -122,7 +122,7 @@ frontend/src/
 │   ├── SecurityWarningModal.tsx # Startup warning for trusted-network / bot execution posture
 │   ├── RawPacketList.tsx
 │   ├── RawPacketFeedView.tsx   # Live raw packet feed + session stats drawer
-│   ├── StatisticsView.tsx      # Read-only mesh network stats tool (incl. region-scope adoption)
+│   ├── StatisticsView.tsx      # Read-only mesh network stats tool (window selector, region-scope adoption)
 │   ├── RawPacketDetailModal.tsx # On-demand packet inspector dialog
 │   ├── MapView.tsx
 │   ├── TracePane.tsx           # Multi-hop route trace builder/results view
@@ -515,9 +515,19 @@ Key conventions documented in the reference:
 - **Badges/tags** use `text-[0.625rem] uppercase tracking-wider px-1.5 py-0.5 rounded` with `bg-muted` (neutral) or `bg-primary/10` (active).
 - **Clickable text** (copy-to-clipboard, navigational links) uses `role="button" tabIndex={0}` with `cursor-pointer hover:text-primary transition-colors`.
 
+### Statistics time window
+
+One `WindowSelector` at the top of `StatisticsView.tsx` drives every bounded panel; there is deliberately no per-chart selector. The keys and their labels live in `STATS_WINDOWS` in `types.ts` (`1h`/`1d`/`1w`/`1M`/`3M`/`1y`/`all`) and are sent as `?window=`.
+
+- Headings and empty states read from `stats.window` (`shownWindow`), **not** from the pending selection — the previous snapshot stays rendered while a wider window loads, and a heading that changes before its numbers do is a lie.
+- Do not name the state `window` inside a component; it shadows the global. The prop on `RegionScopeStatsPanel` is `windowKey` for the same reason.
+- Chart x-axis labels follow `bucket_seconds` (`bucketLabeller`): clock time under an hour, date + time under a day, bare date above it.
+- The activity table's extra column only appears for windows wider than `1w` — narrower ones are already among the fixed 1h/24h/7d columns.
+- When the backend sets `truncated`, say so next to the number. The figure is the most recent slice of the window, not the whole of it.
+
 ### Region-scope adoption panel
 
-`StatisticsView.tsx` (sidebar › Tools › Statistics) renders `stats.region_scope_24h` via `RegionScopeStatsPanel`. Two presentation rules exist because regional adoption is currently very sparse, and both are deliberate:
+`StatisticsView.tsx` (sidebar › Tools › Statistics) renders `stats.region_scope` via `RegionScopeStatsPanel`. Two presentation rules exist because regional adoption is currently very sparse, and both are deliberate:
 
 - **Fractions, not bare percentages.** "3 of 117" carries the sample size that "2.6%" hides.
 - **The traffic percentage is withheld** when the scoped count is at or below `false_positive_floor` (corrupt-capture noise) or when the share would round to `0.0%`. The floor caveat is always shown alongside a non-zero scoped count. The sender figure is never suppressed — it requires successful decryption and so carries no noise.

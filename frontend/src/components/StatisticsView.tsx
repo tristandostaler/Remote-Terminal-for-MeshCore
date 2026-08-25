@@ -13,10 +13,66 @@ import {
 } from 'recharts';
 import { Separator } from './ui/separator';
 import { api } from '../api';
-import type { RegionScopeStats, StatisticsResponse } from '../types';
+import { DEFAULT_STATS_WINDOW, STATS_WINDOWS } from '../types';
+import type {
+  NoiseFloorHistoryStats,
+  PacketsOverTime,
+  RegionScopeStats,
+  StatisticsResponse,
+  StatsWindow,
+} from '../types';
 
 function formatPercent(value: number): string {
   return `${value.toFixed(1)}%`;
+}
+
+function windowLabel(window: StatsWindow): string {
+  return STATS_WINDOWS.find((w) => w.key === window)?.label ?? window;
+}
+
+/** Sentence fragment for empty states: "No packets heard in <phrase>." */
+function windowPhrase(window: StatsWindow): string {
+  return STATS_WINDOWS.find((w) => w.key === window)?.phrase ?? 'the selected window';
+}
+
+/**
+ * Window picker. Every bounded panel below reflects the choice, so this is one
+ * control rather than a per-chart selector.
+ */
+function WindowSelector({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: StatsWindow;
+  onChange: (window: StatsWindow) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="Statistics time window"
+      className="inline-flex rounded-md border border-border p-0.5"
+    >
+      {STATS_WINDOWS.map((option) => (
+        <button
+          key={option.key}
+          type="button"
+          title={option.title}
+          aria-pressed={option.key === value}
+          disabled={disabled}
+          onClick={() => onChange(option.key)}
+          className={`rounded px-2 py-1 text-xs font-medium transition-colors disabled:opacity-60 ${
+            option.key === value
+              ? 'bg-primary text-primary-foreground'
+              : 'text-muted-foreground hover:bg-muted'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 /**
@@ -24,7 +80,13 @@ function formatPercent(value: number): string {
  * percentages: with adoption this sparse, "3 of 117" communicates the sample
  * size that "2.6%" hides.
  */
-function RegionScopeStatsPanel({ stats }: { stats: RegionScopeStats }) {
+function RegionScopeStatsPanel({
+  stats,
+  windowKey,
+}: {
+  stats: RegionScopeStats;
+  windowKey: StatsWindow;
+}) {
   // Corrupt RF captures land in the packet table with random headers, some of
   // which claim to be region-scoped. At or below the measured floor there is
   // nothing to report but noise, so withhold the percentage and say so.
@@ -37,7 +99,9 @@ function RegionScopeStatsPanel({ stats }: { stats: RegionScopeStats }) {
 
   return (
     <div>
-      <h3 className="text-base font-semibold tracking-tight mb-2">Region Scope (24h)</h3>
+      <h3 className="text-base font-semibold tracking-tight mb-2">
+        Region Scope ({windowLabel(windowKey)})
+      </h3>
       <p className="text-[0.8125rem] text-muted-foreground mb-3">
         How much local traffic uses regional flood scoping. Traffic covers all channel messages
         heard, including channels you have no key for; senders only counts channels you can decrypt,
@@ -74,9 +138,15 @@ function RegionScopeStatsPanel({ stats }: { stats: RegionScopeStats }) {
           The sender count is unaffected — it requires successful decryption.
         </p>
       )}
+      {stats.truncated && (
+        <p className="text-[0.8125rem] text-muted-foreground mt-2">
+          This window holds more packets than one pass can parse, so the traffic figures come from
+          the most recent slice of it. The sender figures are unaffected.
+        </p>
+      )}
       {stats.total_messages === 0 && (
         <p className="text-sm text-muted-foreground mt-2">
-          No channel messages heard in the last 24 hours.
+          No channel messages heard in {windowPhrase(windowKey)}.
         </p>
       )}
     </div>
@@ -97,13 +167,31 @@ const TOOLTIP_STYLE = {
   labelStyle: { color: 'hsl(var(--muted-foreground))' },
 } as const;
 
+// Buckets are never narrower than a minute, so seconds would always read ":00".
 function formatTime(ts: number): string {
   return new Date(ts * 1000).toLocaleTimeString([], {
     hour: '2-digit',
     minute: '2-digit',
-    second: '2-digit',
     hour12: false,
   });
+}
+
+/** "6 hours", "15 minutes" — for describing a bucket width in prose. */
+function formatDuration(seconds: number): string {
+  if (seconds % 86400 === 0) {
+    const days = seconds / 86400;
+    return days === 1 ? 'day' : `${days} days`;
+  }
+  if (seconds % 3600 === 0) {
+    const hours = seconds / 3600;
+    return hours === 1 ? 'hour' : `${hours} hours`;
+  }
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return minutes === 1 ? 'minute' : `${minutes} minutes`;
+}
+
+function formatDate(ts: number): string {
+  return new Date(ts * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
 function formatDateTime(ts: number): string {
@@ -115,21 +203,34 @@ function formatDateTime(ts: number): string {
   );
 }
 
-function PacketsPerHourChart({ buckets }: { buckets: { timestamp: number; count: number }[] }) {
-  // Fill gaps so hours with zero packets still appear on the chart
+/**
+ * Axis labels have to follow the bucket width: "Mar 5 14:00" is noise on a
+ * year of daily buckets, and a bare date is useless on an hour of minutes.
+ */
+function bucketLabeller(bucketSeconds: number): (ts: number) => string {
+  if (bucketSeconds < 3600) return formatTime;
+  if (bucketSeconds < 86400) return formatDateTime;
+  return formatDate;
+}
+
+function PacketsChart({ series }: { series: PacketsOverTime }) {
+  const bucketSeconds = series.bucket_seconds || 3600;
+  const label = bucketLabeller(bucketSeconds);
+
+  // Fill gaps so buckets with zero packets still appear on the chart
   const filled: { timestamp: number; count: number }[] = [];
-  if (buckets.length > 0) {
-    const first = buckets[0].timestamp;
-    const last = buckets[buckets.length - 1].timestamp;
-    const byTs = new Map(buckets.map((b) => [b.timestamp, b.count]));
-    for (let ts = first; ts <= last; ts += 3600) {
+  if (series.buckets.length > 0) {
+    const first = series.buckets[0].timestamp;
+    const last = series.buckets[series.buckets.length - 1].timestamp;
+    const byTs = new Map(series.buckets.map((b) => [b.timestamp, b.count]));
+    for (let ts = first; ts <= last; ts += bucketSeconds) {
       filled.push({ timestamp: ts, count: byTs.get(ts) ?? 0 });
     }
   }
 
   const data = filled.map((b, i) => ({
     idx: i,
-    label: formatDateTime(b.timestamp),
+    label: label(b.timestamp),
     count: b.count,
   }));
 
@@ -187,15 +288,23 @@ function PacketsPerHourChart({ buckets }: { buckets: { timestamp: number; count:
   );
 }
 
-function NoiseFloorChart({
-  samples,
-}: {
-  samples: { timestamp: number; noise_floor_dbm: number }[];
-}) {
+function NoiseFloorChart({ history }: { history: NoiseFloorHistoryStats }) {
+  const samples = history.samples;
+  const bucketSeconds = history.bucket_seconds || history.sample_interval_seconds || 60;
+  // Once buckets are wider than the sample interval each point is an average,
+  // so draw the min/max band behind it — otherwise a noisy hour and a quiet one
+  // average to the same flat line.
+  const aggregated = bucketSeconds > (history.sample_interval_seconds || 60);
+  const label = bucketLabeller(bucketSeconds);
+
   const data = samples.map((s, i) => ({
     idx: i,
-    time: formatTime(s.timestamp),
+    time: label(s.timestamp),
     noise_floor: s.noise_floor_dbm,
+    spread:
+      aggregated && s.min_dbm != null && s.max_dbm != null
+        ? [s.min_dbm, s.max_dbm]
+        : [s.noise_floor_dbm, s.noise_floor_dbm],
   }));
 
   const tickCount = Math.min(6, samples.length);
@@ -235,8 +344,27 @@ function NoiseFloorChart({
             strokeDasharray: '3 3',
           }}
           labelFormatter={(idx) => data[Number(idx)]?.time ?? ''}
-          formatter={(value) => [`${value} dBm`, 'Noise Floor']}
+          formatter={(value, name) =>
+            name === 'spread'
+              ? [
+                  `${(value as [number, number])[0]} to ${(value as [number, number])[1]} dBm`,
+                  'Range',
+                ]
+              : [`${value} dBm`, aggregated ? 'Mean' : 'Noise Floor']
+          }
         />
+        {aggregated && (
+          <Area
+            type="linear"
+            dataKey="spread"
+            stroke="none"
+            fill="#8b5cf6"
+            fillOpacity={0.12}
+            dot={false}
+            activeDot={false}
+            isAnimationActive={false}
+          />
+        )}
         <Area
           type="linear"
           dataKey="noise_floor"
@@ -256,12 +384,13 @@ export function StatisticsView() {
   const [stats, setStats] = useState<StatisticsResponse | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState(false);
+  const [selectedWindow, setSelectedWindow] = useState<StatsWindow>(DEFAULT_STATS_WINDOW);
 
   useEffect(() => {
     let cancelled = false;
     setStatsLoading(true);
     setStatsError(false);
-    api.getStatistics().then(
+    api.getStatistics(selectedWindow).then(
       (data) => {
         if (!cancelled) {
           setStats(data);
@@ -278,15 +407,40 @@ export function StatisticsView() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [selectedWindow]);
+
+  // Which window the numbers on screen describe. While a wider window loads, the
+  // previous snapshot is still rendered, so headings must follow the data rather
+  // than the pending selection.
+  const shownWindow = stats?.window ?? selectedWindow;
+  // The activity table always shows 1h/24h/7d; a wider selection earns its own
+  // column, a narrower one is already in there.
+  const showWindowColumn = !['1h', '1d', '1w'].includes(shownWindow);
+  const noiseFloor = stats?.noise_floor;
+  const noiseFloorAggregated =
+    !!noiseFloor && noiseFloor.bucket_seconds > (noiseFloor.sample_interval_seconds || 60);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="shrink-0 border-b border-border px-4 py-3">
-        <h2 className="text-base font-semibold">Statistics</h2>
-        <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-          Read-only mesh network statistics aggregated from stored messages and packets.
-        </p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold">Statistics</h2>
+            <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
+              Read-only mesh network statistics aggregated from stored messages and packets.
+            </p>
+          </div>
+          <WindowSelector
+            value={selectedWindow}
+            onChange={setSelectedWindow}
+            disabled={statsLoading}
+          />
+        </div>
+        {statsLoading && stats && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Loading {windowPhrase(selectedWindow)}…
+          </p>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-[800px] space-y-4 p-4">
@@ -348,6 +502,11 @@ export function StatisticsView() {
                       <th className="text-right font-normal pb-1">1h</th>
                       <th className="text-right font-normal pb-1">24h</th>
                       <th className="text-right font-normal pb-1">7d</th>
+                      {showWindowColumn && (
+                        <th className="text-right font-medium pb-1 text-foreground">
+                          {windowLabel(shownWindow)}
+                        </th>
+                      )}
                     </tr>
                   </thead>
                   <tbody>
@@ -356,12 +515,22 @@ export function StatisticsView() {
                       <td className="text-right py-1">{stats.contacts_heard.last_hour}</td>
                       <td className="text-right py-1">{stats.contacts_heard.last_24_hours}</td>
                       <td className="text-right py-1">{stats.contacts_heard.last_week}</td>
+                      {showWindowColumn && (
+                        <td className="text-right py-1 font-medium">
+                          {stats.contacts_heard.window}
+                        </td>
+                      )}
                     </tr>
                     <tr>
                       <td className="py-1">Repeaters heard</td>
                       <td className="text-right py-1">{stats.repeaters_heard.last_hour}</td>
                       <td className="text-right py-1">{stats.repeaters_heard.last_24_hours}</td>
                       <td className="text-right py-1">{stats.repeaters_heard.last_week}</td>
+                      {showWindowColumn && (
+                        <td className="text-right py-1 font-medium">
+                          {stats.repeaters_heard.window}
+                        </td>
+                      )}
                     </tr>
                     <tr>
                       <td className="py-1">Known-channels active</td>
@@ -370,6 +539,11 @@ export function StatisticsView() {
                         {stats.known_channels_active.last_24_hours}
                       </td>
                       <td className="text-right py-1">{stats.known_channels_active.last_week}</td>
+                      {showWindowColumn && (
+                        <td className="text-right py-1 font-medium">
+                          {stats.known_channels_active.window}
+                        </td>
+                      )}
                     </tr>
                   </tbody>
                 </table>
@@ -396,15 +570,18 @@ export function StatisticsView() {
                 </div>
               </div>
 
-              {/* Packets per Hour (72h) */}
-              {stats.packets_per_hour_72h?.length > 0 && (
+              {/* Packet activity over the selected window */}
+              {stats.packets_over_time.buckets.length > 0 && (
                 <>
                   <Separator />
                   <div>
                     <h3 className="text-base font-semibold tracking-tight mb-2">
-                      Packets per Hour (72h)
+                      Packet Activity ({windowLabel(shownWindow)})
                     </h3>
-                    <PacketsPerHourChart buckets={stats.packets_per_hour_72h} />
+                    <div className="mb-2 text-xs text-muted-foreground">
+                      One point per {formatDuration(stats.packets_over_time.bucket_seconds)}.
+                    </div>
+                    <PacketsChart series={stats.packets_over_time} />
                   </div>
                 </>
               )}
@@ -414,30 +591,32 @@ export function StatisticsView() {
               {/* Path Hash Width */}
               <div>
                 <h3 className="text-base font-semibold tracking-tight mb-2">
-                  Path Hash Width (24h)
+                  Path Hash Width ({windowLabel(shownWindow)})
                 </h3>
                 <div className="mb-2 text-xs text-muted-foreground">
-                  Parsed stored raw packets from the last 24 hours:{' '}
-                  {stats.path_hash_width_24h.total_packets}
+                  Parsed stored raw packets from {windowPhrase(shownWindow)}:{' '}
+                  {stats.path_hash_width.total_packets.toLocaleString()}
+                  {stats.path_hash_width.truncated &&
+                    ' (the most recent slice of the window — it holds more than one pass can parse)'}
                 </div>
-                {stats.path_hash_width_24h.total_packets > 0 ? (
+                {stats.path_hash_width.total_packets > 0 ? (
                   <ResponsiveContainer width="100%" height={120}>
                     <BarChart
                       data={[
                         {
                           name: '1-byte',
-                          count: stats.path_hash_width_24h.single_byte,
-                          pct: stats.path_hash_width_24h.single_byte_pct,
+                          count: stats.path_hash_width.single_byte,
+                          pct: stats.path_hash_width.single_byte_pct,
                         },
                         {
                           name: '2-byte',
-                          count: stats.path_hash_width_24h.double_byte,
-                          pct: stats.path_hash_width_24h.double_byte_pct,
+                          count: stats.path_hash_width.double_byte,
+                          pct: stats.path_hash_width.double_byte_pct,
                         },
                         {
                           name: '3-byte',
-                          count: stats.path_hash_width_24h.triple_byte,
-                          pct: stats.path_hash_width_24h.triple_byte_pct,
+                          count: stats.path_hash_width.triple_byte,
+                          pct: stats.path_hash_width.triple_byte_pct,
                         },
                       ]}
                       margin={{ top: 4, right: 4, bottom: 0, left: -16 }}
@@ -477,7 +656,7 @@ export function StatisticsView() {
                   </ResponsiveContainer>
                 ) : (
                   <p className="text-sm text-muted-foreground">
-                    No path data in the last 24 hours.
+                    No path data in {windowPhrase(shownWindow)}.
                   </p>
                 )}
               </div>
@@ -525,22 +704,22 @@ export function StatisticsView() {
               <Separator />
 
               {/* Region Scope */}
-              <RegionScopeStatsPanel stats={stats.region_scope_24h} />
+              <RegionScopeStatsPanel stats={stats.region_scope} windowKey={shownWindow} />
 
               {/* Busiest Channels */}
-              {stats.busiest_channels_24h.length > 0 && (
+              {stats.busiest_channels.length > 0 && (
                 <>
                   <Separator />
                   <div>
                     <h3 className="text-base font-semibold tracking-tight mb-2">
-                      Busiest Channels (24h)
+                      Busiest Channels ({windowLabel(shownWindow)})
                     </h3>
                     <ResponsiveContainer
                       width="100%"
-                      height={stats.busiest_channels_24h.length * 28 + 8}
+                      height={stats.busiest_channels.length * 28 + 8}
                     >
                       <BarChart
-                        data={stats.busiest_channels_24h.map((ch) => ({
+                        data={stats.busiest_channels.map((ch) => ({
                           name: ch.channel_name,
                           messages: ch.message_count,
                         }))}
@@ -566,7 +745,7 @@ export function StatisticsView() {
                           ]}
                         />
                         <Bar dataKey="messages" radius={[0, 4, 4, 0]} maxBarSize={16}>
-                          {stats.busiest_channels_24h.map((_, i) => (
+                          {stats.busiest_channels.map((_, i) => (
                             <Cell
                               key={i}
                               fill={CHANNEL_BAR_COLORS[i % CHANNEL_BAR_COLORS.length]}
@@ -580,37 +759,41 @@ export function StatisticsView() {
               )}
 
               {/* Noise Floor */}
-              {stats.noise_floor_24h && (
+              {stats.noise_floor && (
                 <>
                   <Separator />
                   <div>
                     <h3 className="text-base font-semibold tracking-tight mb-2">
-                      Noise Floor (24h)
+                      Noise Floor ({windowLabel(shownWindow)})
                     </h3>
-                    {stats.noise_floor_24h.latest_noise_floor_dbm != null && (
+                    {stats.noise_floor.latest_noise_floor_dbm != null && (
                       <div className="mb-2 text-xs text-muted-foreground">
-                        Latest reading: {stats.noise_floor_24h.latest_noise_floor_dbm} dBm
-                        {stats.noise_floor_24h.latest_timestamp != null &&
+                        Latest reading: {stats.noise_floor.latest_noise_floor_dbm} dBm
+                        {stats.noise_floor.latest_timestamp != null &&
                           ` at ${new Date(
-                            stats.noise_floor_24h.latest_timestamp * 1000
+                            stats.noise_floor.latest_timestamp * 1000
                           ).toLocaleTimeString([], {
                             hour: '2-digit',
                             minute: '2-digit',
                           })}`}
+                        {noiseFloorAggregated &&
+                          ` · averaged into buckets of ${formatDuration(
+                            stats.noise_floor.bucket_seconds
+                          )}, shaded band is the min/max`}
                       </div>
                     )}
-                    {stats.noise_floor_24h.samples.length > 1 ? (
-                      <NoiseFloorChart samples={stats.noise_floor_24h.samples} />
-                    ) : stats.noise_floor_24h.samples.length === 0 ? (
+                    {stats.noise_floor.samples.length > 1 ? (
+                      <NoiseFloorChart history={stats.noise_floor} />
+                    ) : stats.noise_floor.samples.length === 0 ? (
                       <p className="text-sm text-muted-foreground">
-                        No noise floor samples collected yet. Samples are collected every minute and
-                        retained until server restart.
+                        No noise floor samples stored for {windowPhrase(shownWindow)}. Samples are
+                        collected every minute while the radio is connected and kept for a year.
                       </p>
                     ) : (
                       <p className="text-sm text-muted-foreground">
-                        Only one sample so far ({stats.noise_floor_24h.samples[0].noise_floor_dbm}{' '}
-                        dBm). More data needed for a chart. Samples are collected every minute and
-                        retained until server restart.
+                        Only one sample so far ({stats.noise_floor.samples[0].noise_floor_dbm} dBm).
+                        More data needed for a chart. Samples are collected every minute while the
+                        radio is connected and kept for a year.
                       </p>
                     )}
                   </div>

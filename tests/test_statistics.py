@@ -2,7 +2,7 @@
 
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -24,7 +24,7 @@ class TestStatisticsEmpty:
         assert result["total_dms"] == 0
         assert result["total_channel_messages"] == 0
         assert result["total_outgoing"] == 0
-        assert result["busiest_channels_24h"] == []
+        assert result["busiest_channels"] == []
         assert result["contacts_heard"]["last_hour"] == 0
         assert result["contacts_heard"]["last_24_hours"] == 0
         assert result["contacts_heard"]["last_week"] == 0
@@ -34,7 +34,7 @@ class TestStatisticsEmpty:
         assert result["known_channels_active"]["last_hour"] == 0
         assert result["known_channels_active"]["last_24_hours"] == 0
         assert result["known_channels_active"]["last_week"] == 0
-        assert result["path_hash_width_24h"] == {
+        assert result["path_hash_width"] == {
             "total_packets": 0,
             "single_byte": 0,
             "double_byte": 0,
@@ -42,8 +42,9 @@ class TestStatisticsEmpty:
             "single_byte_pct": 0.0,
             "double_byte_pct": 0.0,
             "triple_byte_pct": 0.0,
+            "truncated": False,
         }
-        assert result["region_scope_24h"] == {
+        assert result["region_scope"] == {
             "total_messages": 0,
             "scoped_messages": 0,
             "scoped_pct": 0.0,
@@ -51,8 +52,10 @@ class TestStatisticsEmpty:
             "total_senders": 0,
             "scoped_senders": 0,
             "scoped_senders_pct": 0.0,
+            "truncated": False,
         }
-        assert result["packets_per_hour_72h"] == []
+        assert result["packets_over_time"]["buckets"] == []
+        assert result["window"] == "1d"
 
 
 class TestStatisticsCounts:
@@ -184,9 +187,9 @@ class TestBusiestChannels:
 
         result = await StatisticsRepository.get_all()
 
-        assert len(result["busiest_channels_24h"]) == 5
+        assert len(result["busiest_channels"]) == 5
         # Most messages first
-        counts = [ch["message_count"] for ch in result["busiest_channels_24h"]]
+        counts = [ch["message_count"] for ch in result["busiest_channels"]]
         assert counts == sorted(counts, reverse=True)
         assert counts[0] == 6  # channel 5 has 6 messages
 
@@ -206,7 +209,7 @@ class TestBusiestChannels:
         await conn.commit()
 
         result = await StatisticsRepository.get_all()
-        assert result["busiest_channels_24h"] == []
+        assert result["busiest_channels"] == []
 
     @pytest.mark.asyncio
     async def test_busiest_channels_shows_key_when_no_channel_name(self, test_db):
@@ -223,8 +226,8 @@ class TestBusiestChannels:
         await conn.commit()
 
         result = await StatisticsRepository.get_all()
-        assert len(result["busiest_channels_24h"]) == 1
-        assert result["busiest_channels_24h"][0]["channel_name"] == key
+        assert len(result["busiest_channels"]) == 1
+        assert result["busiest_channels"][0]["channel_name"] == key
 
 
 class TestActivityWindows:
@@ -350,7 +353,7 @@ class TestPathHashWidthStats:
         await conn.commit()
 
         result = await StatisticsRepository.get_all()
-        breakdown = result["path_hash_width_24h"]
+        breakdown = result["path_hash_width"]
 
         assert breakdown["total_packets"] == 3
         assert breakdown["single_byte"] == 1
@@ -398,7 +401,9 @@ class TestPathHashWidthStats:
             )
 
         with patch("app.path_utils.parse_packet_envelope", side_effect=fake_parse):
-            breakdown, _region_scope = await StatisticsRepository._packet_shape_24h()
+            breakdown, _region_scope = await StatisticsRepository._packet_shape(
+                int(time.time()) - 86400
+            )
 
         assert breakdown["total_packets"] == 3
         assert breakdown["single_byte"] == 1
@@ -443,7 +448,7 @@ class TestRegionScopeStats:
         await self._insert_packet(conn, self.SCOPED_GROUP_TEXT, b"\x44", now - 90000)
         await conn.commit()
 
-        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+        stats = (await StatisticsRepository.get_all())["region_scope"]
 
         # Direct + stale packets excluded, so 2 in the denominator
         assert stats["total_messages"] == 2
@@ -464,7 +469,7 @@ class TestRegionScopeStats:
             )
         await conn.commit()
 
-        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+        stats = (await StatisticsRepository.get_all())["region_scope"]
 
         # Garbage must not inflate the real counts...
         assert stats["total_messages"] == 1
@@ -497,7 +502,7 @@ class TestRegionScopeStats:
             )
         await conn.commit()
 
-        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+        stats = (await StatisticsRepository.get_all())["region_scope"]
 
         assert stats["total_senders"] == 3
         assert stats["scoped_senders"] == 2
@@ -524,7 +529,7 @@ class TestRegionScopeStats:
         )
         await conn.commit()
 
-        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+        stats = (await StatisticsRepository.get_all())["region_scope"]
 
         assert stats["total_senders"] == 1
         assert stats["scoped_senders"] == 1
@@ -552,7 +557,7 @@ class TestRegionScopeStats:
         )
         await conn.commit()
 
-        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+        stats = (await StatisticsRepository.get_all())["region_scope"]
 
         assert stats["total_senders"] == 2
         assert stats["scoped_senders"] == 1
@@ -572,49 +577,86 @@ class TestRegionScopeStats:
         )
         await conn.commit()
 
-        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+        stats = (await StatisticsRepository.get_all())["region_scope"]
 
         assert stats["total_senders"] == 0
         assert stats["scoped_senders"] == 0
         assert stats["scoped_senders_pct"] == 0.0
 
 
-class TestPacketsPerHour:
+class TestPacketsOverTime:
     @pytest.mark.asyncio
-    async def test_buckets_packets_by_hour(self, test_db):
-        """Packets within 72h are bucketed by hour."""
+    async def test_buckets_packets_within_window(self, test_db):
+        """Packets inside the window are bucketed; older ones are excluded."""
         now = int(time.time())
-        hour_start = (now // 3600) * 3600
+        bucket_size = 900  # what a 1d window resolves to
+        bucket_start = (now // bucket_size) * bucket_size
         conn = test_db.conn
 
-        # 3 packets in the current hour, 1 in the previous hour
+        # 3 packets in the current bucket, 1 two buckets back
         for i in range(3):
             await conn.execute(
                 "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
-                (hour_start + i, b"\x01", bytes([i]) * 32),
+                (bucket_start + i, b"\x01", bytes([i]) * 32),
             )
         await conn.execute(
             "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
-            (hour_start - 1800, b"\x02", b"\xaa" * 32),
+            (bucket_start - bucket_size, b"\x02", b"\xaa" * 32),
         )
-        # 1 packet outside the 72h window — should be excluded
+        # 1 packet outside the 1d window — should be excluded
         await conn.execute(
             "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
-            (now - 260000, b"\x03", b"\xbb" * 32),
+            (now - 200_000, b"\x03", b"\xbb" * 32),
         )
         await conn.commit()
 
         result = await StatisticsRepository.get_all()
-        buckets = result["packets_per_hour_72h"]
+        series = result["packets_over_time"]
 
-        assert len(buckets) == 2
-        by_ts = {b["timestamp"]: b["count"] for b in buckets}
-        assert by_ts[hour_start] == 3
-        assert by_ts[hour_start - 3600] == 1
+        assert series["bucket_seconds"] == bucket_size
+        by_ts = {b["timestamp"]: b["count"] for b in series["buckets"]}
+        assert by_ts == {bucket_start: 3, bucket_start - bucket_size: 1}
+
+    @pytest.mark.asyncio
+    async def test_wider_window_uses_wider_buckets(self, test_db):
+        """A month-wide window buckets coarsely instead of shipping hourly points."""
+        now = int(time.time())
+        conn = test_db.conn
+        # Two packets ten days apart — invisible to the default 1d window.
+        for i, age in enumerate((5 * 86400, 15 * 86400)):
+            await conn.execute(
+                "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
+                (now - age, b"\x01", bytes([i]) * 32),
+            )
+        await conn.commit()
+
+        assert (await StatisticsRepository.get_all("1d"))["packets_over_time"]["buckets"] == []
+
+        series = (await StatisticsRepository.get_all("1M"))["packets_over_time"]
+        assert series["bucket_seconds"] == 21600  # 6h buckets for 30 days
+        assert sum(b["count"] for b in series["buckets"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_all_window_has_no_lower_bound(self, test_db):
+        """``all`` reaches packets far older than any preset window."""
+        now = int(time.time())
+        conn = test_db.conn
+        await conn.execute(
+            "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
+            (now - 400 * 86400, b"\x01", b"\x01" * 32),
+        )
+        await conn.commit()
+
+        assert (await StatisticsRepository.get_all("1y"))["packets_over_time"]["buckets"] == []
+
+        result = await StatisticsRepository.get_all("all")
+        assert result["window"] == "all"
+        assert result["window_seconds"] is None
+        assert sum(b["count"] for b in result["packets_over_time"]["buckets"]) == 1
 
     @pytest.mark.asyncio
     async def test_empty_when_no_recent_packets(self, test_db):
-        """Returns empty list when all packets are older than 72h."""
+        """Returns an empty series when every packet predates the window."""
         now = int(time.time())
         conn = test_db.conn
         await conn.execute(
@@ -624,32 +666,86 @@ class TestPacketsPerHour:
         await conn.commit()
 
         result = await StatisticsRepository.get_all()
-        assert result["packets_per_hour_72h"] == []
+        assert result["packets_over_time"]["buckets"] == []
+
+
+NOISE_FLOOR_HISTORY = {
+    "sample_interval_seconds": 60,
+    "bucket_seconds": 60,
+    "coverage_seconds": 1800,
+    "latest_noise_floor_dbm": -119,
+    "latest_timestamp": 1_700_000_000,
+    "samples": [
+        {"timestamp": 1_699_998_200, "noise_floor_dbm": -121, "min_dbm": -121, "max_dbm": -121},
+        {"timestamp": 1_700_000_000, "noise_floor_dbm": -119, "min_dbm": -119, "max_dbm": -119},
+    ],
+}
 
 
 class TestStatisticsEndpoint:
     @pytest.mark.asyncio
     async def test_statistics_endpoint_includes_noise_floor_history(self, test_db, client):
-        noise_floor_history = {
-            "sample_interval_seconds": 60,
-            "coverage_seconds": 1800,
-            "latest_noise_floor_dbm": -119,
-            "latest_timestamp": 1_700_000_000,
-            "samples": [
-                {"timestamp": 1_699_998_200, "noise_floor_dbm": -121},
-                {"timestamp": 1_700_000_000, "noise_floor_dbm": -119},
-            ],
-        }
-
         with patch(
             "app.routers.statistics.get_noise_floor_history",
-            return_value=noise_floor_history,
+            new=AsyncMock(return_value=dict(NOISE_FLOOR_HISTORY)),
         ):
             response = await client.get("/api/statistics")
 
         assert response.status_code == 200
         payload = response.json()
-        assert payload["noise_floor_24h"] == noise_floor_history
+        assert payload["noise_floor"] == NOISE_FLOOR_HISTORY
+        assert payload["window"] == "1d"
+        assert payload["window_seconds"] == 86400
+
+    @pytest.mark.asyncio
+    async def test_window_is_forwarded_to_the_repository(self, test_db, client):
+        """The query parameter picks the window every bounded metric uses."""
+        with patch(
+            "app.routers.statistics.get_noise_floor_history",
+            new=AsyncMock(return_value=dict(NOISE_FLOOR_HISTORY)),
+        ):
+            response = await client.get("/api/statistics", params={"window": "1w"})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["window"] == "1w"
+        assert payload["window_seconds"] == 604800
+
+    @pytest.mark.asyncio
+    async def test_all_window_reports_no_span(self, test_db, client):
+        with patch(
+            "app.routers.statistics.get_noise_floor_history",
+            new=AsyncMock(return_value=dict(NOISE_FLOOR_HISTORY)),
+        ):
+            response = await client.get("/api/statistics", params={"window": "all"})
+
+        assert response.status_code == 200
+        assert response.json()["window_seconds"] is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_window_is_rejected(self, test_db, client):
+        """A typo must not silently fall back to a different period."""
+        response = await client.get("/api/statistics", params={"window": "1decade"})
+
+        assert response.status_code == 422
+        assert "1decade" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_noise_floor_cutoff_follows_the_window(self, test_db, client):
+        captured: list[int | None] = []
+
+        async def _history(cutoff):
+            captured.append(cutoff)
+            return dict(NOISE_FLOOR_HISTORY)
+
+        with patch("app.routers.statistics.get_noise_floor_history", new=_history):
+            await client.get("/api/statistics", params={"window": "1h"})
+            await client.get("/api/statistics", params={"window": "all"})
+
+        now = int(time.time())
+        assert captured[0] is not None
+        assert abs(captured[0] - (now - 3600)) <= 5
+        assert captured[1] is None
 
 
 class TestMultibyteRollout:

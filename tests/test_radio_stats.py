@@ -142,8 +142,6 @@ class TestSampleAllStats:
         is still sampled and available fields are returned."""
         from meshcore import EventType
 
-        radio_stats._noise_floor_samples.clear()
-
         core_event = _make_event(EventType.ERROR, {"reason": "unsupported"})
         radio_event = _make_event(
             EventType.STATS_RADIO,
@@ -176,7 +174,16 @@ class TestSampleAllStats:
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_mc)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
-        with patch.object(radio_stats, "radio_manager") as mock_rm:
+        recorded: list[tuple[int, int]] = []
+
+        with (
+            patch.object(radio_stats, "radio_manager") as mock_rm,
+            patch.object(
+                radio_stats,
+                "_record_noise_floor",
+                new=AsyncMock(side_effect=lambda ts, dbm: recorded.append((ts, dbm))),
+            ),
+        ):
             mock_rm.is_connected = True
             mock_rm.radio_operation = MagicMock(return_value=mock_ctx)
             snapshot = await radio_stats._sample_all_stats()
@@ -185,15 +192,13 @@ class TestSampleAllStats:
         assert "battery_mv" not in snapshot
         assert snapshot["noise_floor"] == -118
         assert snapshot["packets"]["recv"] == 100
-        # Noise floor history was still appended
-        assert len(radio_stats._noise_floor_samples) == 1
+        # Noise floor history was still recorded
+        assert [dbm for _, dbm in recorded] == [-118]
 
     @pytest.mark.asyncio
     async def test_all_stats_succeed(self):
         """All three stats commands succeed — full snapshot returned."""
         from meshcore import EventType
-
-        radio_stats._noise_floor_samples.clear()
 
         core_event = _make_event(
             EventType.STATS_CORE,
@@ -230,7 +235,16 @@ class TestSampleAllStats:
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_mc)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
-        with patch.object(radio_stats, "radio_manager") as mock_rm:
+        recorded: list[tuple[int, int]] = []
+
+        with (
+            patch.object(radio_stats, "radio_manager") as mock_rm,
+            patch.object(
+                radio_stats,
+                "_record_noise_floor",
+                new=AsyncMock(side_effect=lambda ts, dbm: recorded.append((ts, dbm))),
+            ),
+        ):
             mock_rm.is_connected = True
             mock_rm.radio_operation = MagicMock(return_value=mock_ctx)
             snapshot = await radio_stats._sample_all_stats()
@@ -238,7 +252,7 @@ class TestSampleAllStats:
         assert snapshot["battery_mv"] == 4100
         assert snapshot["noise_floor"] == -120
         assert snapshot["packets"]["sent"] == 250
-        assert len(radio_stats._noise_floor_samples) == 1
+        assert [dbm for _, dbm in recorded] == [-120]
 
     @pytest.mark.asyncio
     async def test_all_errors_returns_empty(self):

@@ -1,11 +1,14 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { StatisticsView } from '../components/StatisticsView';
 import type { StatisticsResponse } from '../types';
 
 const emptyStats: StatisticsResponse = {
-  busiest_channels_24h: [],
+  window: '1d',
+  window_seconds: 86400,
+  busiest_channels: [],
   contact_count: 0,
   repeater_count: 0,
   channel_count: 0,
@@ -15,10 +18,10 @@ const emptyStats: StatisticsResponse = {
   total_dms: 0,
   total_channel_messages: 0,
   total_outgoing: 0,
-  contacts_heard: { last_hour: 0, last_24_hours: 0, last_week: 0 },
-  repeaters_heard: { last_hour: 0, last_24_hours: 0, last_week: 0 },
-  known_channels_active: { last_hour: 0, last_24_hours: 0, last_week: 0 },
-  path_hash_width_24h: {
+  contacts_heard: { last_hour: 0, last_24_hours: 0, last_week: 0, window: 0 },
+  repeaters_heard: { last_hour: 0, last_24_hours: 0, last_week: 0, window: 0 },
+  known_channels_active: { last_hour: 0, last_24_hours: 0, last_week: 0, window: 0 },
+  path_hash_width: {
     total_packets: 0,
     single_byte: 0,
     double_byte: 0,
@@ -36,7 +39,7 @@ const emptyStats: StatisticsResponse = {
     repeaters_with_route: 0,
     repeaters_multibyte: 0,
   },
-  region_scope_24h: {
+  region_scope: {
     total_messages: 0,
     scoped_messages: 0,
     scoped_pct: 0,
@@ -45,9 +48,10 @@ const emptyStats: StatisticsResponse = {
     scoped_senders: 0,
     scoped_senders_pct: 0,
   },
-  packets_per_hour_72h: [],
-  noise_floor_24h: {
+  packets_over_time: { bucket_seconds: 900, buckets: [] },
+  noise_floor: {
     sample_interval_seconds: 60,
+    bucket_seconds: 60,
     coverage_seconds: 0,
     latest_noise_floor_dbm: null,
     latest_timestamp: null,
@@ -72,7 +76,7 @@ describe('StatisticsView', () => {
   it('fetches statistics on mount and renders the data', async () => {
     const mockStats: StatisticsResponse = {
       ...emptyStats,
-      busiest_channels_24h: [
+      busiest_channels: [
         { channel_key: 'AA'.repeat(16), channel_name: 'general', message_count: 42 },
       ],
       contact_count: 10,
@@ -84,10 +88,10 @@ describe('StatisticsView', () => {
       total_dms: 25,
       total_channel_messages: 80,
       total_outgoing: 30,
-      contacts_heard: { last_hour: 2, last_24_hours: 7, last_week: 10 },
-      repeaters_heard: { last_hour: 1, last_24_hours: 3, last_week: 3 },
-      known_channels_active: { last_hour: 1, last_24_hours: 4, last_week: 6 },
-      path_hash_width_24h: {
+      contacts_heard: { last_hour: 2, last_24_hours: 7, last_week: 10, window: 7 },
+      repeaters_heard: { last_hour: 1, last_24_hours: 3, last_week: 3, window: 3 },
+      known_channels_active: { last_hour: 1, last_24_hours: 4, last_week: 6, window: 4 },
+      path_hash_width: {
         total_packets: 120,
         single_byte: 60,
         double_byte: 36,
@@ -96,7 +100,7 @@ describe('StatisticsView', () => {
         double_byte_pct: 30,
         triple_byte_pct: 20,
       },
-      region_scope_24h: {
+      region_scope: {
         total_messages: 120,
         scoped_messages: 40,
         scoped_pct: 33.3,
@@ -105,12 +109,16 @@ describe('StatisticsView', () => {
         scoped_senders: 3,
         scoped_senders_pct: 25,
       },
-      packets_per_hour_72h: [
-        { timestamp: 1711792800, count: 12 },
-        { timestamp: 1711796400, count: 8 },
-      ],
-      noise_floor_24h: {
+      packets_over_time: {
+        bucket_seconds: 3600,
+        buckets: [
+          { timestamp: 1711792800, count: 12 },
+          { timestamp: 1711796400, count: 8 },
+        ],
+      },
+      noise_floor: {
         sample_interval_seconds: 60,
+        bucket_seconds: 60,
         coverage_seconds: 3600,
         latest_noise_floor_dbm: -105,
         latest_timestamp: 1711800000,
@@ -125,7 +133,7 @@ describe('StatisticsView', () => {
     await waitFor(() => {
       expect(screen.getByText('Network')).toBeInTheDocument();
     });
-    expect(fetchSpy).toHaveBeenCalledWith('./api/statistics', expect.any(Object));
+    expect(fetchSpy).toHaveBeenCalledWith('./api/statistics?window=1d', expect.any(Object));
 
     // Verify key labels are present
     expect(screen.getByText('Contacts')).toBeInTheDocument();
@@ -140,6 +148,7 @@ describe('StatisticsView', () => {
     expect(
       screen.getByText(/Parsed stored raw packets from the last 24 hours: 120/)
     ).toBeInTheDocument();
+    expect(screen.getByText('Packet Activity (24h)')).toBeInTheDocument();
     expect(screen.getByText('Contacts heard')).toBeInTheDocument();
     expect(screen.getByText('Repeaters heard')).toBeInTheDocument();
     expect(screen.getByText('Known-channels active')).toBeInTheDocument();
@@ -161,7 +170,7 @@ describe('StatisticsView', () => {
     // 60 is corrupt-capture noise, not adoption.
     const mockStats: StatisticsResponse = {
       ...emptyStats,
-      region_scope_24h: {
+      region_scope: {
         total_messages: 391757,
         scoped_messages: 70,
         scoped_pct: 0.0179,
@@ -193,7 +202,7 @@ describe('StatisticsView', () => {
   it('reports scoped traffic as noise when it is at or below the floor', async () => {
     const mockStats: StatisticsResponse = {
       ...emptyStats,
-      region_scope_24h: {
+      region_scope: {
         total_messages: 5000,
         scoped_messages: 12,
         scoped_pct: 0.24,
@@ -217,6 +226,104 @@ describe('StatisticsView', () => {
     ).toBeInTheDocument();
     // Percentage withheld even though 0.24% would round visibly — it is noise
     expect(screen.queryByText(/0\.2%/)).not.toBeInTheDocument();
+  });
+
+  it('refetches with the selected window and relabels the panels', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      const window = url.includes('window=1w') ? '1w' : '1d';
+      return new Response(
+        JSON.stringify({ ...emptyStats, window, window_seconds: window === '1w' ? 604800 : 86400 }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    });
+
+    render(<StatisticsView />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Region Scope (24h)')).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: '7d' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Region Scope (7d)')).toBeInTheDocument();
+    });
+    expect(fetchSpy).toHaveBeenLastCalledWith('./api/statistics?window=1w', expect.any(Object));
+  });
+
+  it('adds a column to the activity table only for windows wider than 7d', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const wide = String(input).includes('window=1M');
+      return new Response(
+        JSON.stringify({
+          ...emptyStats,
+          window: wide ? '1M' : '1d',
+          window_seconds: wide ? 2592000 : 86400,
+          contacts_heard: { last_hour: 1, last_24_hours: 2, last_week: 3, window: 44 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    });
+
+    render(<StatisticsView />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Contacts heard')).toBeInTheDocument();
+    });
+    // 24h is already one of the fixed columns, so no extra one is added
+    expect(screen.queryByText('44')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: '30d' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('44')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('columnheader', { name: '30d' })).toBeInTheDocument();
+  });
+
+  it('says the noise floor is averaged once buckets outgrow the sample interval', async () => {
+    mockStatsFetch({
+      ...emptyStats,
+      window: '1y',
+      window_seconds: 31536000,
+      noise_floor: {
+        sample_interval_seconds: 60,
+        bucket_seconds: 172800,
+        coverage_seconds: 20000000,
+        latest_noise_floor_dbm: -104,
+        latest_timestamp: 1711800000,
+        samples: [
+          { timestamp: 1711000000, noise_floor_dbm: -110, min_dbm: -118, max_dbm: -101 },
+          { timestamp: 1711172800, noise_floor_dbm: -108, min_dbm: -115, max_dbm: -99 },
+        ],
+      },
+    });
+
+    render(<StatisticsView />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Noise Floor (1y)')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/averaged into buckets of 2 days/)).toBeInTheDocument();
+  });
+
+  it('flags traffic figures that came from a truncated packet scan', async () => {
+    mockStatsFetch({
+      ...emptyStats,
+      window: 'all',
+      window_seconds: null,
+      path_hash_width: { ...emptyStats.path_hash_width, total_packets: 250000, truncated: true },
+      region_scope: { ...emptyStats.region_scope, total_messages: 250000, truncated: true },
+    });
+
+    render(<StatisticsView />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Region Scope (All)')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/traffic figures come from the most recent slice/)).toBeInTheDocument();
+    expect(screen.getByText(/the most recent slice of the window/)).toBeInTheDocument();
   });
 
   it('shows an error message when the statistics fetch fails', async () => {
