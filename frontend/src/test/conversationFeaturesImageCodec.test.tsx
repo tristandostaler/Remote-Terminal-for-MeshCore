@@ -74,7 +74,7 @@ describe('photo codec selector', () => {
         mcmpEnabled={false}
         mcmpVersion={2}
         imageCodec={overrides.imageCodec ?? 'ie4'}
-        rawMediaTextFallback
+        rawMediaTextTransport
         onSetMcmpEnabled={onSetMcmpEnabled}
         onSetImageCodec={onSetImageCodec}
       />

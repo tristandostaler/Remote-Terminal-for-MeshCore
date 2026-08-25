@@ -35,8 +35,9 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { handleKeyboardActivate } from '../utils/a11y';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { cn } from '@/lib/utils';
-import { Download, ImageOff, Loader2, Play, Sparkles, X } from 'lucide-react';
+import { Download, ImageOff, Loader2, Play, RefreshCw, Sparkles, X } from 'lucide-react';
 import { parseVoiceEnvelope } from '../utils/voiceEnvelope';
+import { awaitMediaTransfer, imageSnapshot, voiceSnapshot } from '../utils/mediaTransfer';
 import { estimateImageTransmitSeconds, parseImageEnvelope } from '../utils/imageEnvelope';
 import {
   aeicApproxBitstreamBytes,
@@ -48,7 +49,10 @@ import {
 
 function ImageMessage({ message, content }: { message: Message; content: string }) {
   const envelope = parseImageEnvelope(content);
-  const [state, setState] = useState<'idle' | 'loading' | 'complete' | 'unavailable'>(
+  // 'partial' is its own state, and not a flavour of 'unavailable': fragments that
+  // did arrive are kept, and asking again re-requests only the gaps. Reporting that
+  // as unavailable threw away real progress and told the person nothing was there.
+  const [state, setState] = useState<'idle' | 'loading' | 'complete' | 'partial' | 'unavailable'>(
     message.outgoing ? 'complete' : 'idle'
   );
   const [received, setReceived] = useState(message.outgoing ? (envelope?.fragmentCount ?? 0) : 0);
@@ -57,19 +61,44 @@ function ImageMessage({ message, content }: { message: Message; content: string 
 
   const load = async () => {
     if (state === 'loading') return;
+    const before = received;
+    // Tracked alongside the state, because the `received` in this closure is the
+    // value at render time. A poll that rejects halfway through leaves that at 0
+    // while fragments are already stored, which would land in the catch below as
+    // 'unavailable' and hide the retry that only asks for the gaps.
+    let latest = received;
     setState('loading');
     try {
-      let session = await api.fetchImage(message.id);
-      setReceived(session.received_count);
-      for (let attempt = 0; session.state !== 'complete' && attempt < 40; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 750));
-        session = await api.getImageSession(session.session_id);
-        setReceived(session.received_count);
+      const session = await awaitMediaTransfer({
+        start: async () => imageSnapshot(await api.fetchImage(message.id)),
+        poll: async (sessionId) => imageSnapshot(await api.getImageSession(sessionId)),
+        onProgress: (snapshot) => {
+          latest = snapshot.received;
+          setReceived(snapshot.received);
+        },
+      });
+      if (session.complete) {
+        setState('complete');
+        return;
       }
-      if (session.state !== 'complete') throw new Error('Image fragments are not available');
-      setState('complete');
+      setState(session.received > 0 ? 'partial' : 'unavailable');
+      const missing = session.total - session.received;
+      if (session.received > before) {
+        toast.warning(`Image incomplete — ${missing} of ${session.total} parts missing`, {
+          description: 'Tap the image to ask the sender for the missing parts.',
+        });
+      } else {
+        toast.error(
+          before > 0 ? 'No further image parts arrived' : 'Image parts are not arriving',
+          {
+            description:
+              'The sender may be out of range or offline. The parts already here are kept, ' +
+              'so retrying only asks for what is missing.',
+          }
+        );
+      }
     } catch (error) {
-      setState('unavailable');
+      setState(latest > 0 ? 'partial' : 'unavailable');
       toast.error('Image message unavailable', {
         description: error instanceof Error ? error.message : String(error),
       });
@@ -93,29 +122,36 @@ function ImageMessage({ message, content }: { message: Message; content: string 
           type="button"
           onClick={() => void load()}
           disabled={state === 'loading'}
-          aria-label="Load image"
+          aria-label={state === 'partial' ? 'Request the missing image parts' : 'Load image'}
           className="flex aspect-square w-48 flex-col items-center justify-center gap-2 rounded-md bg-muted/60 text-muted-foreground"
         >
           {state === 'loading' ? (
             <Loader2 className="animate-spin" size={30} />
           ) : state === 'unavailable' ? (
             <ImageOff size={30} />
+          ) : state === 'partial' ? (
+            <RefreshCw size={30} />
           ) : (
             <Download size={30} />
           )}
           <span
-            className="text-xs"
+            className="px-2 text-center text-xs"
             title={
-              state === 'loading'
-                ? `${received} of ${envelope.fragmentCount} fragments received so far`
+              state === 'loading' || state === 'partial'
+                ? `${received} of ${envelope.fragmentCount} fragments received so far` +
+                  (state === 'partial'
+                    ? '. Retrying asks the sender only for the ones still missing.'
+                    : '')
                 : undefined
             }
           >
             {state === 'loading'
               ? `${received}/${envelope.fragmentCount}`
-              : state === 'unavailable'
-                ? 'Unavailable — tap to retry'
-                : 'Tap to load'}
+              : state === 'partial'
+                ? `${envelope.fragmentCount - received} of ${envelope.fragmentCount} parts missing — tap to retry`
+                : state === 'unavailable'
+                  ? 'Unavailable — tap to retry'
+                  : 'Tap to load'}
           </span>
         </button>
       )}
@@ -355,25 +391,49 @@ function AeicImagePart({ chunk }: { chunk: AeicChunk }) {
 function VoiceMessage({ message, content }: { message: Message; content: string }) {
   const envelope = parseVoiceEnvelope(content);
   const duration = envelope?.durationSeconds ?? 0;
-  const [state, setState] = useState<'idle' | 'loading' | 'unavailable'>('idle');
+  const [state, setState] = useState<'idle' | 'loading' | 'partial' | 'unavailable'>('idle');
   const [progress, setProgress] = useState(0);
+  const [missing, setMissing] = useState(0);
 
   if (!envelope) return null;
   const play = async () => {
+    if (state === 'loading') return;
+    // See ImageMessage: the rendered progress is not readable from the catch below.
+    let latest = { received: 0, total: 0 };
     setState('loading');
     try {
-      let session = await api.fetchVoice(message.id);
-      for (let attempt = 0; session.state !== 'complete' && attempt < 20; attempt += 1) {
-        setProgress(session.packet_count ? session.received_count / session.packet_count : 0);
-        await new Promise((resolve) => window.setTimeout(resolve, 750));
-        session = await api.getVoiceSession(session.session_id);
+      const session = await awaitMediaTransfer({
+        start: async () => voiceSnapshot(await api.fetchVoice(message.id)),
+        poll: async (sessionId) => voiceSnapshot(await api.getVoiceSession(sessionId)),
+        onProgress: (snapshot) => {
+          latest = { received: snapshot.received, total: snapshot.total };
+          setProgress(snapshot.total ? snapshot.received / snapshot.total : 0);
+        },
+      });
+      if (!session.complete) {
+        // A recording cannot be played with holes in it, so unlike a picture there
+        // is nothing to show for a partial transfer -- but the count still belongs
+        // on screen, because it is the difference between "nearly here, ask again"
+        // and "nothing is coming".
+        setMissing(session.total - session.received);
+        setState(session.received > 0 ? 'partial' : 'unavailable');
+        toast.error(
+          session.received > 0
+            ? `Voice note incomplete — ${session.total - session.received} of ${session.total} parts missing`
+            : 'Voice note parts are not arriving',
+          {
+            description:
+              'Tap again to ask the sender for the missing parts; the ones already here are kept.',
+          }
+        );
+        return;
       }
-      if (session.state !== 'complete') throw new Error('Voice packets are not available');
-      const audio = new Audio(api.voiceAudioUrl(session.session_id));
+      const audio = new Audio(api.voiceAudioUrl(session.sessionId));
       await audio.play();
       setState('idle');
     } catch (error) {
-      setState('unavailable');
+      setMissing(Math.max(0, latest.total - latest.received));
+      setState(latest.received > 0 ? 'partial' : 'unavailable');
       toast.error('Voice message unavailable', {
         description: error instanceof Error ? error.message : String(error),
       });
@@ -387,13 +447,21 @@ function VoiceMessage({ message, content }: { message: Message; content: string 
       className="flex min-w-40 items-center gap-2"
       aria-label={`Play ${duration} second voice message`}
     >
-      {state === 'loading' ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} />}
+      {state === 'loading' ? (
+        <Loader2 className="animate-spin" size={18} />
+      ) : state === 'partial' ? (
+        <RefreshCw size={18} />
+      ) : (
+        <Play size={18} />
+      )}
       <span>
         {state === 'unavailable'
           ? 'Unavailable'
-          : state === 'loading'
-            ? `Fetching ${Math.round(progress * 100)}%`
-            : `${duration}s voice message`}
+          : state === 'partial'
+            ? `${missing} part${missing === 1 ? '' : 's'} missing — tap to retry`
+            : state === 'loading'
+              ? `Fetching ${Math.round(progress * 100)}%`
+              : `${duration}s voice message`}
       </span>
     </button>
   );

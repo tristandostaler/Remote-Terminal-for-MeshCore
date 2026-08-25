@@ -75,7 +75,7 @@ interface ConversationPaneProps {
     version: number
   ) => Promise<void>;
   onSetImageCodec?: (type: 'channel' | 'contact', id: string, codec: ImageCodecId) => Promise<void>;
-  onSetRawMediaTextFallback?: (id: string, enabled: boolean) => Promise<void>;
+  onSetRawMediaTextTransport?: (id: string, enabled: boolean) => Promise<void>;
   onDeleteContact: (publicKey: string) => Promise<void>;
   onDeleteChannel: (key: string) => Promise<void>;
   onSetChannelFloodScopeOverride: (channelKey: string, floodScopeOverride: string) => Promise<void>;
@@ -168,7 +168,7 @@ export function ConversationPane({
   onToggleMute,
   onSetMcmpEnabled,
   onSetImageCodec,
-  onSetRawMediaTextFallback,
+  onSetRawMediaTextTransport,
   onDeleteContact,
   onDeleteChannel,
   onSetChannelFloodScopeOverride,
@@ -401,7 +401,7 @@ export function ConversationPane({
         onToggleMute={onToggleMute}
         onSetMcmpEnabled={onSetMcmpEnabled}
         onSetImageCodec={onSetImageCodec}
-        onSetRawMediaTextFallback={onSetRawMediaTextFallback}
+        onSetRawMediaTextTransport={onSetRawMediaTextTransport}
         onSetChannelFloodScopeOverride={onSetChannelFloodScopeOverride}
         onSetChannelPathHashModeOverride={onSetChannelPathHashModeOverride}
         onDeleteChannel={onDeleteChannel}

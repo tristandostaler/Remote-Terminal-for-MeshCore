@@ -52,7 +52,7 @@ function status(): AeicStatus {
 const CONTACT_ID = 'aa'.repeat(32);
 
 describe('media text fallback switch', () => {
-  const onSetRawMediaTextFallback = vi.fn();
+  const onSetRawMediaTextTransport = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -61,9 +61,9 @@ describe('media text fallback switch', () => {
 
   function renderModal(
     overrides: {
-      rawMediaTextFallback?: boolean;
+      rawMediaTextTransport?: boolean;
       conversationType?: 'contact' | 'channel';
-      onSetRawMediaTextFallback?: typeof onSetRawMediaTextFallback;
+      onSetRawMediaTextTransport?: typeof onSetRawMediaTextTransport;
     } = {}
   ) {
     return render(
@@ -76,13 +76,13 @@ describe('media text fallback switch', () => {
         mcmpEnabled={false}
         mcmpVersion={2}
         imageCodec="ie4"
-        rawMediaTextFallback={overrides.rawMediaTextFallback ?? true}
+        rawMediaTextTransport={overrides.rawMediaTextTransport ?? true}
         onSetMcmpEnabled={vi.fn()}
         onSetImageCodec={vi.fn()}
-        onSetRawMediaTextFallback={
-          'onSetRawMediaTextFallback' in overrides
-            ? overrides.onSetRawMediaTextFallback
-            : onSetRawMediaTextFallback
+        onSetRawMediaTextTransport={
+          'onSetRawMediaTextTransport' in overrides
+            ? overrides.onSetRawMediaTextTransport
+            : onSetRawMediaTextTransport
         }
       />
     );
@@ -91,32 +91,39 @@ describe('media text fallback switch', () => {
   it('shows the switch on for a contact by default', () => {
     renderModal();
 
-    // The label names the "disable" action, which is how the Switch reports being on.
-    expect(screen.getByLabelText('Disable the media text fallback')).toBeInTheDocument();
+    // The label names the action the switch would perform, which is how it reports
+    // being on: from here, the only thing left to do is go back to raw packets.
+    expect(screen.getByLabelText('Fetch media as raw packets instead of text')).toBeInTheDocument();
   });
 
-  it('turns the fallback off through the callback', () => {
-    renderModal({ rawMediaTextFallback: true });
+  it('turns the text transport off through the callback', () => {
+    renderModal({ rawMediaTextTransport: true });
 
-    fireEvent.click(screen.getByLabelText('Disable the media text fallback'));
+    fireEvent.click(screen.getByLabelText('Fetch media as raw packets instead of text'));
 
-    expect(onSetRawMediaTextFallback).toHaveBeenCalledWith(CONTACT_ID, false);
+    expect(onSetRawMediaTextTransport).toHaveBeenCalledWith(CONTACT_ID, false);
   });
 
-  it('turns the fallback back on through the callback', () => {
-    renderModal({ rawMediaTextFallback: false });
+  it('turns the text transport back on through the callback', () => {
+    renderModal({ rawMediaTextTransport: false });
 
-    fireEvent.click(screen.getByLabelText('Enable the media text fallback'));
+    fireEvent.click(screen.getByLabelText('Fetch media as text messages'));
 
-    expect(onSetRawMediaTextFallback).toHaveBeenCalledWith(CONTACT_ID, true);
+    expect(onSetRawMediaTextTransport).toHaveBeenCalledWith(CONTACT_ID, true);
   });
 
-  it('warns what being off means, and only when it is off', () => {
-    renderModal({ rawMediaTextFallback: false });
-    expect(screen.getByText(/will fail instead of falling back/)).toBeInTheDocument();
+  it('explains what each position means', () => {
+    renderModal({ rawMediaTextTransport: false });
+    expect(screen.getByText(/will fail with an error/)).toBeInTheDocument();
 
-    renderModal({ rawMediaTextFallback: true });
-    expect(screen.queryAllByText(/will fail instead of falling back/)).toHaveLength(1);
+    /*
+     * On is explained too, and not left blank. It is the default, so it is the
+     * state most people are in, and the surprising part of it -- that a SAR client
+     * asking in raw packets is still answered in raw packets -- is exactly what an
+     * always-on switch would otherwise hide.
+     */
+    renderModal({ rawMediaTextTransport: true });
+    expect(screen.getByText(/answered in raw packets/)).toBeInTheDocument();
   });
 
   it('is absent for a channel', () => {
@@ -127,12 +134,16 @@ describe('media text fallback switch', () => {
      */
     renderModal({ conversationType: 'channel' });
 
-    expect(screen.queryByLabelText('Disable the media text fallback')).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Fetch media as raw packets instead of text')
+    ).not.toBeInTheDocument();
   });
 
   it('is absent when no handler is wired', () => {
-    renderModal({ onSetRawMediaTextFallback: undefined });
+    renderModal({ onSetRawMediaTextTransport: undefined });
 
-    expect(screen.queryByLabelText('Disable the media text fallback')).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Fetch media as raw packets instead of text')
+    ).not.toBeInTheDocument();
   });
 });

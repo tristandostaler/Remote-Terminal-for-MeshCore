@@ -180,7 +180,7 @@ export interface Contact {
    * Whether image/voice fragments may travel as `rmt1:` text when this node's
    * firmware has no CMD_SEND_RAW_DATA. On by default; costs ~2.5x the airtime.
    */
-  raw_media_text_fallback?: boolean;
+  raw_media_text_transport?: boolean;
   last_contacted: number | null;
   last_read_at: number | null;
   first_seen: number | null;

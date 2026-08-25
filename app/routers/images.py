@@ -19,7 +19,7 @@ from app.services.message_send import (
     send_direct_message_to_contact,
 )
 from app.services.radio_runtime import radio_runtime as radio_manager
-from app.services.raw_media import RawDataUnsupportedError
+from app.services.raw_media import RawDataUnsupportedError, uses_text_transport
 from app.websocket import broadcast_error, broadcast_event
 
 router = APIRouter(prefix="/images", tags=["images"])
@@ -188,7 +188,7 @@ async def fetch_image(message_id: int) -> dict:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return _session_payload(session)
+    return await _session_payload(session)
 
 
 @router.get("/sessions/{session_id}")
@@ -196,7 +196,7 @@ async def get_image_session(session_id: str) -> dict:
     session = await ImageRepository.get(session_id.lower())
     if session is None:
         raise HTTPException(status_code=404, detail="image session not found")
-    return _session_payload(session)
+    return await _session_payload(session)
 
 
 @router.get("/sessions/{session_id}/content")
@@ -215,7 +215,7 @@ async def get_image_content(session_id: str) -> Response:
     )
 
 
-def _session_payload(session: dict) -> dict:
+async def _session_payload(session: dict) -> dict:
     received = len(session["fragments"])
     return {
         "session_id": session["session_id"],
@@ -231,4 +231,26 @@ def _session_payload(session: dict) -> dict:
             for index in range(session["fragment_count"])
             if index not in {fragment[0] for fragment in session["fragments"]}
         ],
+        "transport": await _session_transport(session),
     }
+
+
+async def _session_transport(session: dict) -> str:
+    """Which transport a fetch for this session travels on: ``"raw"`` or ``"text"``.
+
+    Reported so the client can wait for the right length of time. The two differ by
+    roughly an order of magnitude -- a text fragment is two messages a second or so
+    apart, a raw one is a single packet -- and a client pacing a text transfer as if
+    it were raw gives up while fragments are still arriving.
+
+    A guess, strictly: it is what *we* would use to ask, and the peer's reply
+    mirrors whatever our request arrived as, so it is right for every fetch this
+    app starts. It says nothing about an inbound request from someone else.
+    """
+    peer_key = session.get("peer_public_key")
+    if not peer_key:
+        return "raw"
+    contact = await ContactRepository.get_by_key_or_prefix(peer_key)
+    if contact is None:
+        return "raw"
+    return "text" if uses_text_transport(contact) else "raw"

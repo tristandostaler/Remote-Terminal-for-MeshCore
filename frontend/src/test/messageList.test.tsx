@@ -552,6 +552,7 @@ describe('MessageList image messages', () => {
       fragment_count: 14,
       received_count: 4,
       missing_indices: [],
+      transport: 'raw' as const,
     });
     vi.spyOn(api, 'getImageSession').mockResolvedValue({
       session_id: '0000000a',
@@ -563,6 +564,7 @@ describe('MessageList image messages', () => {
       fragment_count: 14,
       received_count: 14,
       missing_indices: [],
+      transport: 'raw' as const,
     });
     render(
       <MessageList
@@ -578,5 +580,98 @@ describe('MessageList image messages', () => {
       timeout: 2000,
     });
     expect(fetchSpy).toHaveBeenCalledWith(1);
+  });
+
+  it('shows how much of a stalled image is missing, and retries only the gaps', async () => {
+    /*
+     * A transfer that stops halfway used to report "Unavailable", which was wrong in
+     * both directions: the fragments that did arrive were kept on the server, and
+     * tapping again re-requested only the missing ones. The screen said nothing had
+     * worked and gave no hint that retrying was cheap.
+     */
+    const fetchSpy = vi.spyOn(api, 'fetchImage').mockResolvedValue({
+      session_id: '0000000a',
+      state: 'receiving',
+      format: 0,
+      width: 256,
+      height: 171,
+      size_bytes: 2100,
+      fragment_count: 14,
+      received_count: 9,
+      missing_indices: [9, 10, 11, 12, 13],
+      transport: 'raw' as const,
+    });
+    // Answers forever with the same count: the transfer is alive but not moving.
+    vi.spyOn(api, 'getImageSession').mockResolvedValue({
+      session_id: '0000000a',
+      state: 'receiving',
+      format: 0,
+      width: 256,
+      height: 171,
+      size_bytes: 2100,
+      fragment_count: 14,
+      received_count: 9,
+      missing_indices: [9, 10, 11, 12, 13],
+      transport: 'raw' as const,
+    });
+    render(
+      <MessageList
+        messages={[createMessage({ text: 'IE4:a:0:e:74:4r:1mc', sender_name: 'Alice' })]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load image' }));
+
+    expect(
+      await screen.findByText('5 of 14 parts missing — tap to retry', undefined, {
+        timeout: 15_000,
+      })
+    ).toBeVisible();
+
+    // And the retry is offered as what it is -- asking for the rest, not starting over.
+    // Relative, because this file does not reset spies between tests and fetchImage
+    // is spied on in the test above too.
+    const before = fetchSpy.mock.calls.length;
+    const retry = screen.getByRole('button', { name: 'Request the missing image parts' });
+    fireEvent.click(retry);
+    await waitFor(() => expect(fetchSpy.mock.calls.length).toBeGreaterThan(before));
+  }, 20_000);
+
+  it('keeps the retry offer when polling fails after fragments arrived', async () => {
+    /*
+     * A poll that rejects mid-transfer is not the same as a transfer with nothing in
+     * it: the fragments already stored server-side survive, so the retry still only
+     * costs the gaps. Reading the progress off the render closure reported 0 here
+     * and offered a from-scratch reload instead.
+     */
+    vi.spyOn(api, 'fetchImage').mockResolvedValue({
+      session_id: '0000000a',
+      state: 'receiving',
+      format: 0,
+      width: 256,
+      height: 171,
+      size_bytes: 2100,
+      fragment_count: 14,
+      received_count: 6,
+      missing_indices: [6, 7, 8, 9, 10, 11, 12, 13],
+      transport: 'raw' as const,
+    });
+    vi.spyOn(api, 'getImageSession').mockRejectedValue(new Error('radio disconnected'));
+    render(
+      <MessageList
+        messages={[createMessage({ text: 'IE4:a:0:e:74:4r:1mc', sender_name: 'Alice' })]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load image' }));
+
+    expect(
+      await screen.findByRole('button', { name: 'Request the missing image parts' })
+    ).toBeVisible();
+    expect(screen.getByText('8 of 14 parts missing — tap to retry')).toBeVisible();
   });
 });

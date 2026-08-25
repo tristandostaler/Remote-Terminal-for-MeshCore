@@ -8,7 +8,12 @@ import logging
 from app.image_protocol import MAX_IMAGE_FRAGMENTS, ImageFetchRequest, ImagePacket
 from app.keystore import get_public_key
 from app.repository import ContactRepository, ImageRepository
-from app.services.raw_media import RAW_MEDIA_FRAGMENT_DELAY_SECONDS, send_raw_to_contact
+from app.services.raw_media import (
+    RAW_MEDIA_FRAGMENT_DELAY_SECONDS,
+    RAW_MEDIA_TEXT_CHUNK_DELAY_SECONDS,
+    MediaTransport,
+    send_raw_to_contact,
+)
 from app.websocket import broadcast_event
 
 logger = logging.getLogger(__name__)
@@ -44,7 +49,9 @@ async def request_image_session(radio_manager, session: dict) -> None:
         await send_raw_to_contact(radio_manager, contact, request.encode())
 
 
-async def handle_raw_image_payload(payload: bytes, radio_manager) -> bool:
+async def handle_raw_image_payload(
+    payload: bytes, radio_manager, *, transport: MediaTransport = MediaTransport.RAW
+) -> bool:
     packet = ImagePacket.parse(payload)
     if packet is not None:
         session = await ImageRepository.get(packet.session_id)
@@ -82,14 +89,24 @@ async def handle_raw_image_payload(payload: bytes, radio_manager) -> bool:
     if session is None:
         return True
     wanted = set(request.missing_indices) if request.missing_indices else None
+    # A re-ask carries only the gaps, so this loop is both the first delivery and
+    # every retry of it. Nothing here needs to know which one it is serving.
+    gap = (
+        RAW_MEDIA_TEXT_CHUNK_DELAY_SECONDS
+        if transport is MediaTransport.TEXT
+        else RAW_MEDIA_FRAGMENT_DELAY_SECONDS
+    )
     sent_count = 0
     for index, data in session["fragments"][:MAX_IMAGE_FRAGMENTS]:
         if wanted is not None and index not in wanted:
             continue
         if sent_count:
-            await asyncio.sleep(RAW_MEDIA_FRAGMENT_DELAY_SECONDS)
+            await asyncio.sleep(gap)
         await send_raw_to_contact(
-            radio_manager, contact, ImagePacket(request.session_id, index, data).encode()
+            radio_manager,
+            contact,
+            ImagePacket(request.session_id, index, data).encode(),
+            transport=transport,
         )
         sent_count += 1
     return True

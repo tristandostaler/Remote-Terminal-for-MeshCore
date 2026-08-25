@@ -16,7 +16,7 @@ from app.services.message_send import (
     send_direct_message_to_contact,
 )
 from app.services.radio_runtime import radio_runtime as radio_manager
-from app.services.raw_media import RawDataUnsupportedError
+from app.services.raw_media import RawDataUnsupportedError, uses_text_transport
 from app.services.voice import request_voice_session
 from app.voice_codec import Codec2, Codec2Unavailable, codec2_available
 from app.voice_protocol import (
@@ -218,7 +218,7 @@ async def fetch_voice(message_id: int) -> dict:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return _session_payload(session)
+    return await _session_payload(session)
 
 
 @router.get("/sessions/{session_id}")
@@ -226,7 +226,7 @@ async def get_voice_session(session_id: str) -> dict:
     session = await VoiceRepository.get(session_id.lower())
     if session is None:
         raise HTTPException(status_code=404, detail="voice session not found")
-    return _session_payload(session)
+    return await _session_payload(session)
 
 
 @router.get("/sessions/{session_id}/audio")
@@ -262,7 +262,7 @@ def _decode(encoded: bytes, mode: VoiceMode) -> bytes:
         return codec.decode_pcm16le(encoded)
 
 
-def _session_payload(session: dict) -> dict:
+async def _session_payload(session: dict) -> dict:
     received = len(session["fragments"])
     return {
         "session_id": session["session_id"],
@@ -276,4 +276,16 @@ def _session_payload(session: dict) -> dict:
             for index in range(session["packet_count"])
             if index not in {fragment[0] for fragment in session["fragments"]}
         ],
+        "transport": await _session_transport(session),
     }
+
+
+async def _session_transport(session: dict) -> str:
+    """Which transport a fetch for this session travels on. See the image router."""
+    peer_key = session.get("peer_public_key")
+    if not peer_key:
+        return "raw"
+    contact = await ContactRepository.get_by_key_or_prefix(peer_key)
+    if contact is None:
+        return "raw"
+    return "text" if uses_text_transport(contact) else "raw"

@@ -207,7 +207,7 @@ interface ConversationFeaturesModalProps {
   mcmpEnabled: boolean;
   mcmpVersion: number;
   imageCodec: ImageCodecId;
-  rawMediaTextFallback: boolean;
+  rawMediaTextTransport: boolean;
   onSetMcmpEnabled: (
     type: 'channel' | 'contact',
     id: string,
@@ -215,7 +215,7 @@ interface ConversationFeaturesModalProps {
     version: number
   ) => void;
   onSetImageCodec: (type: 'channel' | 'contact', id: string, codec: ImageCodecId) => void;
-  onSetRawMediaTextFallback?: (id: string, enabled: boolean) => void;
+  onSetRawMediaTextTransport?: (id: string, enabled: boolean) => void;
 }
 
 export function ConversationFeaturesModal({
@@ -227,10 +227,10 @@ export function ConversationFeaturesModal({
   mcmpEnabled,
   mcmpVersion,
   imageCodec,
-  rawMediaTextFallback,
+  rawMediaTextTransport,
   onSetMcmpEnabled,
   onSetImageCodec,
-  onSetRawMediaTextFallback,
+  onSetRawMediaTextTransport,
 }: ConversationFeaturesModalProps) {
   const { status: aeicStatus, refresh: refreshAeic } = useAeicStatus(open);
   // Only gate on the server's ability to ENCODE: that is what picking the codec
@@ -361,26 +361,35 @@ export function ConversationFeaturesModal({
 
           {/* Contacts only. The raw transport is contact-directed even for a
               picture announced on a channel, so a channel has nothing to set. */}
-          {conversationType === 'contact' && onSetRawMediaTextFallback && (
+          {conversationType === 'contact' && onSetRawMediaTextTransport && (
             <div className="rounded-md border border-border p-3">
               <FeatureRow
-                title="Send media as text if needed"
-                description="Standard photos and voice notes move their fragments as raw packets, which some node firmware cannot send at all. With this on, they travel as ordinary messages instead — about 2.5x the airtime, but the picture opens. Turn it off to get a clear error rather than a slow transfer."
-                checked={rawMediaTextFallback}
-                onCheckedChange={(next) => onSetRawMediaTextFallback(conversationId, next)}
+                title="Fetch media as text messages"
+                description="Standard photos and voice notes move their fragments as raw packets, which some node firmware cannot send at all. With this on, asking for them uses ordinary messages instead — about 2.5x the airtime, but it works on every node. Turn it off to use raw packets and get a clear error where they are unsupported."
+                checked={rawMediaTextTransport}
+                onCheckedChange={(next) => onSetRawMediaTextTransport(conversationId, next)}
                 ariaLabel={
-                  rawMediaTextFallback
-                    ? 'Disable the media text fallback'
-                    : 'Enable the media text fallback'
+                  rawMediaTextTransport
+                    ? 'Fetch media as raw packets instead of text'
+                    : 'Fetch media as text messages'
                 }
               />
 
-              {!rawMediaTextFallback && (
-                <p className="mt-2 text-xs leading-snug text-muted-foreground">
-                  Off: if this node&apos;s firmware has no <code>CMD_SEND_RAW_DATA</code>, opening a
-                  standard photo or voice note from this contact will fail instead of falling back.
-                </p>
-              )}
+              <p className="mt-2 text-xs leading-snug text-muted-foreground">
+                {rawMediaTextTransport ? (
+                  <>
+                    On: a photo you open from this contact arrives as a run of ordinary messages.
+                    Replies still mirror however a request reached us, so a MeshCore SAR client that
+                    asks in raw packets is answered in raw packets.
+                  </>
+                ) : (
+                  <>
+                    Off: if this node&apos;s firmware has no <code>CMD_SEND_RAW_DATA</code>, opening
+                    a standard photo or voice note from this contact will fail with an error rather
+                    than spend the extra airtime.
+                  </>
+                )}
+              </p>
             </div>
           )}
         </div>
