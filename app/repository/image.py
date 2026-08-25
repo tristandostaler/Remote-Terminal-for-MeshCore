@@ -33,9 +33,16 @@ class ImageRepository:
             ) as cursor:
                 existing = await cursor.fetchone()
             if existing is not None:
+                # More than one message can legitimately carry the same envelope:
+                # a re-sent or pasted IE4 line, or an image sent to yourself,
+                # which arrives back as a second message row. They describe one
+                # picture and share its fragments, so the row keeps its first
+                # message id rather than rejecting the others. Only the envelope
+                # metadata is guarded -- disagreeing there means two different
+                # pictures picked the same id, and merging them would corrupt both.
                 metadata = (format_id, width, height, size_bytes, fragment_count)
-                if tuple(existing[1:]) != metadata or existing[0] not in (None, message_id):
-                    raise ValueError("image session ID conflicts with existing metadata")
+                if tuple(existing[1:]) != metadata:
+                    raise ValueError("image session ID describes a different picture")
                 await conn.execute(
                     "UPDATE image_sessions SET message_id=COALESCE(message_id, ?), "
                     "peer_public_key=COALESCE(peer_public_key, ?), expires_at=? WHERE session_id=?",
@@ -51,9 +58,20 @@ class ImageRepository:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    session_id, message_id, direction, conversation_type, conversation_key,
-                    peer_public_key, format_id, width, height, size_bytes, fragment_count,
-                    state, now, now + ttl_seconds,
+                    session_id,
+                    message_id,
+                    direction,
+                    conversation_type,
+                    conversation_key,
+                    peer_public_key,
+                    format_id,
+                    width,
+                    height,
+                    size_bytes,
+                    fragment_count,
+                    state,
+                    now,
+                    now + ttl_seconds,
                 ),
             )
 
@@ -114,7 +132,9 @@ class ImageRepository:
     @staticmethod
     async def enforce_cache_limit(max_sessions: int = 128) -> int:
         async with db.tx() as conn:
-            await conn.execute("DELETE FROM image_sessions WHERE expires_at < ?", (int(time.time()),))
+            await conn.execute(
+                "DELETE FROM image_sessions WHERE expires_at < ?", (int(time.time()),)
+            )
             async with conn.execute(
                 """DELETE FROM image_sessions WHERE session_id IN (
                     SELECT session_id FROM image_sessions ORDER BY created_at DESC, session_id DESC

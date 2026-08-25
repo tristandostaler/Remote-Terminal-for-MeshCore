@@ -1,4 +1,3 @@
-
 import pytest
 
 import app.repository.image as image_module
@@ -50,8 +49,37 @@ async def test_image_session_rejects_bad_fragment_and_conflicting_metadata(test_
         await _create_session()
         with pytest.raises(ValueError, match="fragment size"):
             await ImageRepository.add_fragment("00112233", 0, b"short")
-        with pytest.raises(ValueError, match="conflicts"):
+        with pytest.raises(ValueError, match="different picture"):
             await _create_session(width=31)
+    finally:
+        image_module.db = original
+
+
+async def test_image_session_is_shared_by_every_message_carrying_the_envelope(test_db):
+    """Pasting or re-sending an IE4 line makes a second message for one picture.
+
+    Both bubbles describe the same fragments, so opening the second one has to
+    reuse the stored session. Treating its message id as a conflict answered 409
+    "image session ID conflicts with existing metadata" and the picture could
+    never be opened again.
+    """
+    original = image_module.db
+    image_module.db = test_db
+    try:
+        async with test_db.tx() as conn:
+            for message_id in (11, 22):
+                await conn.execute(
+                    "INSERT INTO messages (id, type, conversation_key, text, received_at, outgoing) "
+                    "VALUES (?, 'PRIV', ?, 'IE4:...', 1700000000, 1)",
+                    (message_id, "aa" * 32),
+                )
+        await _create_session(message_id=11)
+        await _create_session(message_id=22)
+
+        session = await ImageRepository.get("00112233")
+        assert session is not None
+        # The first binding stands, so progress events keep pointing at one bubble.
+        assert session["message_id"] == 11
     finally:
         image_module.db = original
 

@@ -1,4 +1,10 @@
-"""Bounded MeshCore SAR-compatible voice session transport."""
+"""Bounded MeshCore SAR-compatible voice session transport.
+
+Also home to :func:`send_raw_to_contact`, the raw-data send that both the voice
+and the SAR image transports use to move fragments. Anything shared with images
+is worded for "raw media", not voice: its failures surface verbatim in the UI,
+and "raw voice send failed" while opening a picture told the reader nothing.
+"""
 
 from __future__ import annotations
 
@@ -19,8 +25,27 @@ from app.voice_protocol import (
 from app.websocket import broadcast_event
 
 logger = logging.getLogger(__name__)
-MAX_RAW_VOICE_HOPS = 3
+MAX_RAW_MEDIA_HOPS = 3
 RAW_MEDIA_FRAGMENT_DELAY_SECONDS = 0.350
+UNSUPPORTED_CMD_ERROR_CODE = 1
+"""``ERR_CODE_UNSUPPORTED_CMD`` in the companion protocol's error table."""
+
+
+class RawDataUnsupportedError(RuntimeError):
+    """The node's firmware does not implement ``CMD_SEND_RAW_DATA`` (25).
+
+    A distinct type because this is not a transient radio failure: without that
+    command neither the SAR image nor the voice transport can move a single
+    fragment in either direction, so retrying can never succeed and the caller
+    should say what has to change instead.
+    """
+
+
+def _is_unsupported_cmd(payload: object) -> bool:
+    return isinstance(payload, dict) and (
+        payload.get("error_code") == UNSUPPORTED_CMD_ERROR_CODE
+        or payload.get("code_string") == "ERR_CODE_UNSUPPORTED_CMD"
+    )
 
 
 def _raw_frame_for_contact(
@@ -28,14 +53,14 @@ def _raw_frame_for_contact(
 ) -> bytes:
     path, path_len, hash_mode = route or contact.effective_route_tuple()
     if path_len < 0:
-        raise ValueError("voice transfer requires a direct or learned route")
-    if path_len > MAX_RAW_VOICE_HOPS:
-        raise ValueError(f"voice transfer is limited to {MAX_RAW_VOICE_HOPS} routed hops")
+        raise ValueError("raw media transfer requires a direct or learned route")
+    if path_len > MAX_RAW_MEDIA_HOPS:
+        raise ValueError(f"raw media transfer is limited to {MAX_RAW_MEDIA_HOPS} routed hops")
     if hash_mode not in (0, 1, 2):
         raise ValueError("contact route has an unsupported path hash mode")
     path_bytes = bytes.fromhex(path)
     if len(path_bytes) != path_len * (hash_mode + 1):
-        raise ValueError("contact route is not valid for raw voice")
+        raise ValueError("contact route is not valid for raw media")
     packed_path_len = (hash_mode << 6) | path_len
     return bytes([packed_path_len]) + path_bytes + payload
 
@@ -59,13 +84,22 @@ async def _raw_route_for_contact(contact) -> tuple[str, int, int]:
 
 
 async def send_raw_to_contact(radio_manager, contact, payload: bytes) -> None:
+    """Send one raw-data frame to a contact. Shared by voice AND image transfer."""
     route = await _raw_route_for_contact(contact)
     frame = _raw_frame_for_contact(contact, payload, route=route)
-    async with radio_manager.radio_operation("voice_raw_send", blocking=True) as mc:
+    async with radio_manager.radio_operation("raw_media_send", blocking=True) as mc:
         result = await mc.commands.send_raw_data(frame)
     if result is None or result.type == EventType.ERROR:
         detail = result.payload if result is not None else "no radio response"
-        raise RuntimeError(f"raw voice send failed: {detail}")
+        if result is not None and _is_unsupported_cmd(result.payload):
+            version = getattr(radio_manager, "firmware_version", None)
+            raise RawDataUnsupportedError(
+                f"This node's firmware{f' ({version})' if version else ''} cannot send "
+                "raw data packets, which the standard image and voice formats use to "
+                "move fragments. Update the node to a firmware build that supports "
+                "CMD_SEND_RAW_DATA."
+            )
+        raise RuntimeError(f"raw data send failed: {detail}")
 
 
 async def request_voice_session(radio_manager, session: dict) -> None:

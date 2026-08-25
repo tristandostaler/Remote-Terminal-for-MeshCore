@@ -19,6 +19,7 @@ from app.services.message_send import (
     send_direct_message_to_contact,
 )
 from app.services.radio_runtime import radio_runtime as radio_manager
+from app.services.voice import RawDataUnsupportedError
 from app.websocket import broadcast_error, broadcast_event
 
 router = APIRouter(prefix="/images", tags=["images"])
@@ -40,8 +41,10 @@ def _validate_encoded_image(data: bytes, format_id: ImageFormat) -> None:
     if format_id == ImageFormat.JPEG:
         valid = len(data) >= 4 and data[:2] == b"\xff\xd8" and data[-2:] == b"\xff\xd9"
     else:
-        valid = len(data) >= 16 and data[4:8] == b"ftyp" and (
-            b"avif" in data[8:32] or b"avis" in data[8:32]
+        valid = (
+            len(data) >= 16
+            and data[4:8] == b"ftyp"
+            and (b"avif" in data[8:32] or b"avis" in data[8:32])
         )
     if not valid:
         raise HTTPException(status_code=422, detail="encoded image does not match its format")
@@ -173,7 +176,18 @@ async def fetch_image(message_id: int) -> dict:
     assert session is not None
     if len(session["fragments"]) != session["fragment_count"]:
         radio_manager.require_connected()
-        await request_image_session(radio_manager, session)
+        # Asking the sender for fragments fails for reasons the person tapping the
+        # image can act on -- an unknown sender, no route, firmware without raw
+        # data -- so each one has to reach the toast. Letting them out as a 500
+        # showed "Internal Server Error" and nothing else.
+        try:
+            await request_image_session(radio_manager, session)
+        except RawDataUnsupportedError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
     return _session_payload(session)
 
 
@@ -196,7 +210,9 @@ async def get_image_content(session_id: str) -> Response:
     if len(encoded) != session["size_bytes"]:
         raise HTTPException(status_code=409, detail="reassembled image size is invalid")
     media_type = "image/avif" if session["format"] == 0 else "image/jpeg"
-    return Response(encoded, media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
+    return Response(
+        encoded, media_type=media_type, headers={"Cache-Control": "private, max-age=3600"}
+    )
 
 
 def _session_payload(session: dict) -> dict:
@@ -211,7 +227,8 @@ def _session_payload(session: dict) -> dict:
         "fragment_count": session["fragment_count"],
         "received_count": received,
         "missing_indices": [
-            index for index in range(session["fragment_count"])
+            index
+            for index in range(session["fragment_count"])
             if index not in {fragment[0] for fragment in session["fragments"]}
         ],
     }
