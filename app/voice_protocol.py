@@ -64,6 +64,17 @@ def _base36(value: int) -> str:
     return out
 
 
+def envelope_duration_seconds(duration_ms: int) -> int:
+    """Duration as VE3 actually carries it: whole seconds, rounded up.
+
+    The wire field is one base36 digit, so a 3457 ms recording travels as 4 s and
+    parses back as 4000 ms. Anything comparing a stored duration against one that
+    came off the wire has to put both through here first, or every recording
+    whose length is not a whole number of seconds looks like a different one.
+    """
+    return min(600, max(0, (duration_ms + 999) // 1000))
+
+
 @dataclass(frozen=True)
 class VoiceEnvelope:
     session_id: str
@@ -75,7 +86,7 @@ class VoiceEnvelope:
         sid = _validate_session_id(self.session_id)
         if not 1 <= self.total <= MAX_VOICE_PACKETS:
             raise ValueError("voice packet count must be 1..255")
-        duration_s = min(600, max(0, (self.duration_ms + 999) // 1000))
+        duration_s = envelope_duration_seconds(self.duration_ms)
         return f"VE3:{_base36(int(sid, 16))}:{_base36(int(self.mode))}:{_base36(self.total)}:{_base36(duration_s)}"
 
     @classmethod

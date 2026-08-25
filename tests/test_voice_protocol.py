@@ -12,6 +12,7 @@ from app.voice_protocol import (
     VoiceFetchRequest,
     VoicePacket,
     encode_fragment_ack,
+    envelope_duration_seconds,
     fragment_codec2,
     parse_fragment_ack,
 )
@@ -21,6 +22,21 @@ def test_meshcore_sar_ve3_compatibility_vector():
     parsed = VoiceEnvelope.parse("VE3:jbxb73:3:c:a")
     assert parsed == VoiceEnvelope("45abcdef", VoiceMode.MODE_1300, 12, 10_000)
     assert parsed.encode() == "VE3:jbxb73:3:c:a"
+
+
+@pytest.mark.parametrize("duration_ms", [1, 999, 1000, 3457, 9_999, 10_000])
+def test_envelope_duration_survives_its_own_wire_form(duration_ms):
+    """The VE3 duration field is one base36 digit of whole seconds.
+
+    So a stored duration and the same duration read back off the wire are not
+    equal, and anything comparing the two has to quantise both. Nothing may
+    compare raw durations across that boundary.
+    """
+    envelope = VoiceEnvelope("45abcdef", VoiceMode.MODE_1300, 12, duration_ms)
+    parsed = VoiceEnvelope.parse(envelope.encode())
+
+    assert parsed is not None
+    assert envelope_duration_seconds(duration_ms) == envelope_duration_seconds(parsed.duration_ms)
 
 
 def test_private_voice_body_is_passed_to_parser_unchanged():
