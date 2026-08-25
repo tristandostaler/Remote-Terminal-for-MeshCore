@@ -4,6 +4,10 @@ import time
 from typing import Any
 
 from app.database import db
+from app.repository.media_sessions import (
+    record_session_message,
+    sweep_unreferenced_sessions,
+)
 
 
 class VoiceRepository:
@@ -53,6 +57,9 @@ class VoiceRepository:
                     now + ttl_seconds,
                 ),
             )
+            await record_session_message(
+                conn, kind="voice", session_id=session_id, message_id=message_id
+            )
 
     @staticmethod
     async def add_fragment(session_id: str, index: int, data: bytes) -> bool:
@@ -100,18 +107,8 @@ class VoiceRepository:
 
     @staticmethod
     async def enforce_cache_limit(max_sessions: int = 128) -> int:
-        """Expire stale sessions and retain only the newest bounded cache."""
+        """Sweep age and surplus, but never a recording a message still plays."""
         async with db.tx() as conn:
-            await conn.execute(
-                "DELETE FROM voice_sessions WHERE expires_at < ?", (int(time.time()),)
+            return await sweep_unreferenced_sessions(
+                conn, kind="voice", max_sessions=max_sessions, now=int(time.time())
             )
-            async with conn.execute(
-                """
-                DELETE FROM voice_sessions WHERE session_id IN (
-                    SELECT session_id FROM voice_sessions
-                    ORDER BY created_at DESC, session_id DESC LIMIT -1 OFFSET ?
-                )
-                """,
-                (max_sessions,),
-            ) as cursor:
-                return cursor.rowcount

@@ -16,7 +16,7 @@ from app.services.message_send import (
     send_direct_message_to_contact,
 )
 from app.services.radio_runtime import radio_runtime as radio_manager
-from app.services.voice import request_voice_session
+from app.services.voice import RawDataUnsupportedError, request_voice_session
 from app.voice_codec import Codec2, Codec2Unavailable, codec2_available
 from app.voice_protocol import (
     MAX_VOICE_DURATION_MS,
@@ -170,8 +170,20 @@ async def fetch_voice(message_id: int) -> dict:
     if envelope.duration_ms > MAX_VOICE_DURATION_MS:
         raise HTTPException(status_code=422, detail="voice message exceeds the 10 second limit")
     existing = await VoiceRepository.get(envelope.session_id)
-    if existing is not None and existing["message_id"] not in (None, message.id):
-        raise HTTPException(status_code=409, detail="voice session ID belongs to another message")
+    # A second message may legitimately carry the same envelope -- a re-sent or
+    # pasted VE3 line, or a voice message sent to yourself -- and it plays the
+    # same stored audio, so a differing message id is not a conflict. Only a
+    # differing recording is: ``upsert_session`` leaves mode, duration and packet
+    # count on the existing row, so without this check two recordings sharing an
+    # id would play back through each other's metadata.
+    if existing is not None and (
+        existing["mode"],
+        existing["duration_ms"],
+        existing["packet_count"],
+    ) != (int(envelope.mode), envelope.duration_ms, envelope.total):
+        raise HTTPException(
+            status_code=409, detail="voice session ID describes a different recording"
+        )
     peer_key = message.conversation_key if message.type == "PRIV" else message.sender_key
     await VoiceRepository.upsert_session(
         session_id=envelope.session_id,
@@ -192,6 +204,8 @@ async def fetch_voice(message_id: int) -> dict:
         radio_manager.require_connected()
         try:
             await request_voice_session(radio_manager, session)
+        except RawDataUnsupportedError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
