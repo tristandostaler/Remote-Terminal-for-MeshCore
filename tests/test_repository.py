@@ -661,9 +661,11 @@ class TestAppSettingsRepository:
         - ``tracked_telemetry_repeaters`` (migration 53)
         - ``auto_resend_channel`` (migration 54)
         - ``telemetry_interval_hours`` (migration 57)
+        - ``max_message_retries`` (migration 74)
         """
         from unittest.mock import MagicMock
 
+        from app.send_attempts import DEFAULT_MAX_MESSAGE_RETRIES
         from app.telemetry_interval import DEFAULT_TELEMETRY_INTERVAL_HOURS
 
         # sqlite3.Row raises KeyError for missing columns when accessed by
@@ -686,7 +688,8 @@ class TestAppSettingsRepository:
                 "blocked_names": "[]",
                 "discovery_blocked_types": "[]",
                 # intentionally missing: tracked_telemetry_repeaters,
-                # auto_resend_channel, telemetry_interval_hours
+                # auto_resend_channel, telemetry_interval_hours,
+                # max_message_retries
             }
         )
 
@@ -710,6 +713,7 @@ class TestAppSettingsRepository:
         assert settings.tracked_telemetry_repeaters == []
         assert settings.auto_resend_channel is False
         assert settings.telemetry_interval_hours == DEFAULT_TELEMETRY_INTERVAL_HOURS
+        assert settings.max_message_retries == DEFAULT_MAX_MESSAGE_RETRIES
 
 
 class TestMessageRepositoryGetById:

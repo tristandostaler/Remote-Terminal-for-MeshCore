@@ -66,6 +66,7 @@ function createArgs(overrides: Partial<Parameters<typeof useConversationActions>
     setContacts: vi.fn(),
     setChannels: vi.fn(),
     observeMessage: vi.fn(() => ({ added: true, activeConversation: true })),
+    removeMessageFromView: vi.fn(),
     messageInputRef: { current: { appendText: vi.fn(), focus: vi.fn() } },
     ...overrides,
   };

@@ -386,6 +386,13 @@ class TestContactMessageCLIFiltering:
             "packet_id",
             "transport_code",
             "region",
+            "compression",
+            "plain_bytes",
+            "wire_bytes",
+            "payload_bytes",
+            "send_attempts",
+            "send_max_attempts",
+            "send_state",
         }
 
         with patch("app.event_handlers.broadcast_event") as mock_broadcast:

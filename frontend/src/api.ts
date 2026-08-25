@@ -25,6 +25,7 @@ import type {
   RadioDiscoveryTarget,
   PathDiscoveryResponse,
   PushSubscriptionInfo,
+  MessageActionResponse,
   ResendChannelMessageResponse,
   RepeaterAclResponse,
   RepeaterAdvertIntervalsResponse,
@@ -456,6 +457,23 @@ export const api = {
       `/messages/channel/${messageId}/resend${newTimestamp ? '?new_timestamp=true' : ''}`,
       { method: 'POST' }
     ),
+  /**
+   * Retransmit an outgoing message. Direct messages go out byte-identical under
+   * their original timestamp (so the recipient dedups it as a retry rather than
+   * showing it twice) and restart their retry run; `newTimestamp` applies to
+   * channel messages only, where it creates a new message row.
+   */
+  retryMessage: (messageId: number, newTimestamp?: boolean) =>
+    fetchJson<MessageActionResponse>(
+      `/messages/${messageId}/retry${newTimestamp ? '?new_timestamp=true' : ''}`,
+      { method: 'POST' }
+    ),
+  /** Stop the attempts not yet made. Whatever is already on air cannot be recalled. */
+  cancelMessage: (messageId: number) =>
+    fetchJson<MessageActionResponse>(`/messages/${messageId}/cancel`, { method: 'POST' }),
+  /** Drop our copy and stop retransmitting. The mesh has no unsend. */
+  deleteMessage: (messageId: number) =>
+    fetchJson<MessageActionResponse>(`/messages/${messageId}`, { method: 'DELETE' }),
 
   // Packets
   getPacket: (packetId: number) => fetchJson<RawPacket>(`/packets/${packetId}`),

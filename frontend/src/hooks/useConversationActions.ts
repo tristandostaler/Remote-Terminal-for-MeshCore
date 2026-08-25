@@ -11,12 +11,16 @@ interface UseConversationActionsArgs {
   setContacts: React.Dispatch<React.SetStateAction<Contact[]>>;
   setChannels: React.Dispatch<React.SetStateAction<Channel[]>>;
   observeMessage: (msg: Message) => { added: boolean; activeConversation: boolean };
+  removeMessageFromView: (messageId: number) => void;
   messageInputRef: RefObject<MessageInputHandle | null>;
 }
 
 interface UseConversationActionsResult {
   handleSendMessage: (text: string) => Promise<void>;
   handleResendChannelMessage: (messageId: number, newTimestamp?: boolean) => Promise<void>;
+  handleRetryMessage: (message: Message, newTimestamp?: boolean) => Promise<void>;
+  handleCancelMessage: (message: Message) => Promise<void>;
+  handleDeleteMessage: (message: Message) => Promise<void>;
   handleSetChannelFloodScopeOverride: (
     channelKey: string,
     floodScopeOverride: string
@@ -36,6 +40,7 @@ export function useConversationActions({
   setContacts,
   setChannels,
   observeMessage,
+  removeMessageFromView,
   messageInputRef,
 }: UseConversationActionsArgs): UseConversationActionsResult {
   const mergeChannelIntoList = useCallback(
@@ -91,6 +96,62 @@ export function useConversationActions({
       }
     },
     [activeConversationRef, observeMessage]
+  );
+
+  const handleRetryMessage = useCallback(
+    async (message: Message, newTimestamp?: boolean) => {
+      try {
+        const result = await api.retryMessage(message.id, newTimestamp);
+        // A channel retry under a fresh timestamp lands as a new row; a direct
+        // retry updates the existing one, which arrives over the WebSocket.
+        const retried = result.message;
+        if (
+          retried &&
+          retried.id !== message.id &&
+          activeConversationRef.current?.id === retried.conversation_key
+        ) {
+          observeMessage(retried);
+        }
+        toast.success('Retrying send');
+      } catch (err) {
+        toast.error('Failed to retry', {
+          description: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    },
+    [activeConversationRef, observeMessage]
+  );
+
+  const handleCancelMessage = useCallback(async (message: Message) => {
+    try {
+      const result = await api.cancelMessage(message.id);
+      toast.success(
+        result.stopped_pending_sends
+          ? 'Cancelled the remaining attempts'
+          : 'Nothing left to send — the message was already finished'
+      );
+    } catch (err) {
+      toast.error('Failed to cancel', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      });
+    }
+  }, []);
+
+  const handleDeleteMessage = useCallback(
+    async (message: Message) => {
+      try {
+        await api.deleteMessage(message.id);
+        // Drop it locally too rather than waiting for our own broadcast, so the
+        // row disappears the moment the user confirms.
+        removeMessageFromView(message.id);
+        toast.success('Message deleted');
+      } catch (err) {
+        toast.error('Failed to delete', {
+          description: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    },
+    [removeMessageFromView]
   );
 
   const handleSetChannelFloodScopeOverride = useCallback(
@@ -165,6 +226,9 @@ export function useConversationActions({
   return {
     handleSendMessage,
     handleResendChannelMessage,
+    handleRetryMessage,
+    handleCancelMessage,
+    handleDeleteMessage,
     handleSetChannelFloodScopeOverride,
     handleSetChannelPathHashModeOverride,
     handleSenderClick,

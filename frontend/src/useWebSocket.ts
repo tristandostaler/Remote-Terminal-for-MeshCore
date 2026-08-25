@@ -10,6 +10,7 @@ import type {
 } from './types';
 import { recordBotLog } from './stores/botLogStore';
 import { parseWsEvent } from './wsEvents';
+import type { MessageDeletedPayload, MessageStatusPayload } from './wsEvents';
 
 interface ErrorEvent {
   message: string;
@@ -36,6 +37,8 @@ export interface UseWebSocketOptions {
     paths?: MessagePath[],
     packetId?: number | null
   ) => void;
+  onMessageStatus?: (payload: MessageStatusPayload) => void;
+  onMessageDeleted?: (messageId: number) => void;
   onError?: (error: ErrorEvent) => void;
   onSuccess?: (success: SuccessEvent) => void;
   onReconnect?: () => void;
@@ -159,6 +162,12 @@ export function useWebSocket(options: UseWebSocketOptions) {
             );
             break;
           }
+          case 'message_status':
+            handlers.onMessageStatus?.(msg.data as MessageStatusPayload);
+            break;
+          case 'message_deleted':
+            handlers.onMessageDeleted?.((msg.data as MessageDeletedPayload).message_id);
+            break;
           case 'error':
             handlers.onError?.(msg.data as ErrorEvent);
             break;

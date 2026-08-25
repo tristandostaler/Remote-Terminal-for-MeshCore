@@ -86,6 +86,9 @@ interface ConversationPaneProps {
   onChannelReferenceClick?: (channelName: string) => void;
   onLoadOlder: () => Promise<void>;
   onResendChannelMessage: (messageId: number, newTimestamp?: boolean) => Promise<void>;
+  onRetryMessage: (message: Message, newTimestamp?: boolean) => Promise<void>;
+  onCancelMessage: (message: Message) => Promise<void>;
+  onDeleteMessage: (message: Message) => Promise<void>;
   onTargetReached: () => void;
   onLoadNewer: () => Promise<void>;
   onJumpToBottom: () => void;
@@ -168,6 +171,9 @@ export function ConversationPane({
   onChannelReferenceClick,
   onLoadOlder,
   onResendChannelMessage,
+  onRetryMessage,
+  onCancelMessage,
+  onDeleteMessage,
   onTargetReached,
   onLoadNewer,
   onJumpToBottom,
@@ -424,6 +430,9 @@ export function ConversationPane({
           onResendChannelMessage={
             activeConversation.type === 'channel' ? onResendChannelMessage : undefined
           }
+          onRetryMessage={onRetryMessage}
+          onCancelMessage={onCancelMessage}
+          onDeleteMessage={onDeleteMessage}
           radioName={config?.name}
           config={config}
           onOpenContactInfo={onOpenContactInfo}

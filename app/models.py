@@ -6,6 +6,11 @@ from pydantic import BaseModel, Field
 
 from app.bot_scope import default_bot_scope
 from app.path_utils import normalize_contact_route, normalize_route_override
+from app.send_attempts import (
+    DEFAULT_MAX_MESSAGE_RETRIES,
+    MAX_MESSAGE_RETRIES,
+    MIN_MESSAGE_RETRIES,
+)
 
 # Valid MeshCore contact types: 0=unknown, 1=client, 2=repeater, 3=room, 4=sensor.
 # Corrupted radio data can produce values outside this range.
@@ -463,12 +468,77 @@ class Message(BaseModel):
         default=None,
         description="Resolved region name for the transport code, if it matched a known region",
     )
+    compression: str | None = Field(
+        default=None,
+        description=(
+            "Codec the body rode under ('mcmp2'/'mcmp3'), or None when it went as plain "
+            "text. Always None for messages stored before compression tracking existed."
+        ),
+    )
+    plain_bytes: int | None = Field(
+        default=None, description="UTF-8 size of the plaintext body, when known"
+    )
+    wire_bytes: int | None = Field(
+        default=None, description="UTF-8 size of the payload actually transmitted, when known"
+    )
+    payload_bytes: int | None = Field(
+        default=None,
+        description=(
+            "Compressed-text segment the compression ratio is measured against. Equals "
+            "wire_bytes for v2; excludes the container header for v3, matching meshcore-open."
+        ),
+    )
+    send_attempts: int | None = Field(
+        default=None,
+        description=(
+            "Transmissions made for an outgoing message (1 = sent once, no retry). None for "
+            "incoming messages and for outgoing ones stored before attempt tracking existed."
+        ),
+    )
+    send_max_attempts: int | None = Field(
+        default=None,
+        description=(
+            "Attempt cap in force when this message was sent, so the displayed 'N of M' "
+            "stays truthful after the user changes the setting"
+        ),
+    )
+    send_state: str | None = Field(
+        default=None,
+        description=(
+            "Outgoing send progress: 'sending' (retries still running), 'sent' (radio "
+            "accepted it, nothing more scheduled), 'failed' (attempts exhausted unacked) "
+            "or 'canceled' (user stopped it). Delivery is not a state -- it stays derived "
+            "from acked > 0. None for incoming and legacy rows."
+        ),
+    )
 
 
 class MessagesAroundResponse(BaseModel):
     messages: list[Message]
     has_older: bool
     has_newer: bool
+
+
+class MessageActionResponse(BaseModel):
+    """Outcome of a per-message action: retry, cancel or delete."""
+
+    status: str
+    message_id: int
+    message: Message | None = Field(
+        default=None,
+        description=(
+            "The resulting row when the action produced one -- a channel retry with a "
+            "fresh timestamp creates a new message, so this id differs from the one asked for"
+        ),
+    )
+    stopped_pending_sends: bool = Field(
+        default=False,
+        description=(
+            "Whether background retransmissions were still scheduled and have now been "
+            "stopped. False means the send had already finished on its own; the message is "
+            "marked cancelled either way."
+        ),
+    )
 
 
 class ResendChannelMessageResponse(BaseModel):
@@ -1208,6 +1278,17 @@ class AppSettings(BaseModel):
         description=(
             "When enabled, outgoing channel messages that receive no echo within 2 seconds "
             "are automatically byte-perfect resent once (within the 30-second dedup window)"
+        ),
+    )
+    max_message_retries: int = Field(
+        default=DEFAULT_MAX_MESSAGE_RETRIES,
+        ge=MIN_MESSAGE_RETRIES,
+        le=MAX_MESSAGE_RETRIES,
+        description=(
+            "How many times a direct message may be transmitted before it is marked failed "
+            "(1 = send once, never retry). Each retry waits out the firmware-suggested ACK "
+            "window first, so a high cap costs airtime only on messages that go unacked. "
+            "Channel messages are unaffected -- they keep the one-shot echo resend."
         ),
     )
 

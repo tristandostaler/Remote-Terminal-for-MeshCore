@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from app.compression import CompressionInfo
 from app.database import db
 from app.models import (
     ContactAnalyticsHourlyBucket,
@@ -67,6 +68,10 @@ class MessageRepository:
         sender_key: str | None = None,
         transport_code: int | None = None,
         region: str | None = None,
+        compression: CompressionInfo | None = None,
+        send_attempts: int | None = None,
+        send_max_attempts: int | None = None,
+        send_state: str | None = None,
     ) -> int | None:
         """Create a message, returning the ID or None if duplicate.
 
@@ -76,6 +81,9 @@ class MessageRepository:
           raw-packet and fallback observations merge onto one row
 
         The path parameter is converted to the paths JSON array format.
+        ``compression`` carries the codec/byte counts for the body that actually
+        went over the air (see :func:`app.compression.describe_compression`);
+        ``None`` records "rode as plain text".
         """
         # Convert single path to paths array format
         paths_json = None
@@ -97,8 +105,11 @@ class MessageRepository:
                 """
                 INSERT OR IGNORE INTO messages (type, conversation_key, text, sender_timestamp,
                                                 received_at, paths, txt_type, signature, outgoing,
-                                                sender_name, sender_key, transport_code, region)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                                sender_name, sender_key, transport_code, region,
+                                                compression, plain_bytes, wire_bytes,
+                                                payload_bytes, send_attempts, send_max_attempts,
+                                                send_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     msg_type,
@@ -114,6 +125,13 @@ class MessageRepository:
                     normalized_sender_key,
                     transport_code,
                     region,
+                    compression.codec if compression else None,
+                    compression.plain_bytes if compression else None,
+                    compression.wire_bytes if compression else None,
+                    compression.payload_bytes if compression else None,
+                    send_attempts,
+                    send_max_attempts,
+                    send_state,
                 ),
             ) as cursor:
                 rowcount = cursor.rowcount
@@ -358,20 +376,33 @@ class MessageRepository:
 
         return f"NOT ({prefix}outgoing = 0 AND ({' OR '.join(blocked_matchers)}))", params
 
+    # Columns added by migration 74. Selected with `messages.*`, so a row from a
+    # database that has not been migrated yet simply lacks them -- read through
+    # `_optional` rather than indexing, and the Message model's defaults apply.
+    _OPTIONAL_COLUMNS = (
+        "packet_id",
+        "transport_code",
+        "region",
+        "compression",
+        "plain_bytes",
+        "wire_bytes",
+        "payload_bytes",
+        "send_attempts",
+        "send_max_attempts",
+        "send_state",
+    )
+
     @staticmethod
     def _row_to_message(row: Any) -> Message:
         """Convert a database row to a Message model."""
-        packet_id = None
-        transport_code = None
-        region = None
-        if hasattr(row, "keys"):
-            row_keys = row.keys()
-            if "packet_id" in row_keys:
-                packet_id = row["packet_id"]
-            if "transport_code" in row_keys:
-                transport_code = row["transport_code"]
-            if "region" in row_keys:
-                region = row["region"]
+        row_keys = row.keys() if hasattr(row, "keys") else ()
+        optional = {
+            column: (row[column] if column in row_keys else None)
+            for column in MessageRepository._OPTIONAL_COLUMNS
+        }
+        packet_id = optional["packet_id"]
+        transport_code = optional["transport_code"]
+        region = optional["region"]
 
         return Message(
             id=row["id"],
@@ -390,6 +421,13 @@ class MessageRepository:
             packet_id=packet_id,
             transport_code=transport_code,
             region=region,
+            compression=optional["compression"],
+            plain_bytes=optional["plain_bytes"],
+            wire_bytes=optional["wire_bytes"],
+            payload_bytes=optional["payload_bytes"],
+            send_attempts=optional["send_attempts"],
+            send_max_attempts=optional["send_max_attempts"],
+            send_state=optional["send_state"],
         )
 
     @staticmethod
@@ -620,6 +658,90 @@ class MessageRepository:
             return None
 
         return MessageRepository._row_to_message(row)
+
+    @staticmethod
+    async def record_send_attempt(message_id: int, *, state: str = "sending") -> tuple[int, int]:
+        """Count one more transmission of an outgoing message.
+
+        Returns the new ``(send_attempts, send_max_attempts)`` pair so the caller
+        can broadcast it without a second read. ``send_attempts`` starts at NULL
+        for rows written before attempt tracking existed; COALESCE treats that as
+        zero so the first counted attempt reports 1 either way.
+        """
+        async with db.tx() as conn:
+            async with conn.execute(
+                """
+                UPDATE messages
+                   SET send_attempts = COALESCE(send_attempts, 0) + 1,
+                       send_state = ?
+                 WHERE id = ?
+                """,
+                (state, message_id),
+            ):
+                pass
+            async with conn.execute(
+                "SELECT send_attempts, send_max_attempts FROM messages WHERE id = ?",
+                (message_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row is None:
+            return 0, 0
+        return row["send_attempts"] or 0, row["send_max_attempts"] or 0
+
+    @staticmethod
+    async def set_send_state(
+        message_id: int,
+        state: str,
+        *,
+        attempts: int | None = None,
+        max_attempts: int | None = None,
+    ) -> None:
+        """Record where an outgoing message got to.
+
+        ``attempts`` and ``max_attempts`` are written alongside when a fresh send
+        run starts (a manual retry), so the displayed "attempt N of M" describes
+        the run in progress rather than accumulating across runs -- N stays within
+        the cap the user actually set.
+        """
+        columns = ["send_state = ?"]
+        params: list[Any] = [state]
+        if attempts is not None:
+            columns.append("send_attempts = ?")
+            params.append(attempts)
+        if max_attempts is not None:
+            columns.append("send_max_attempts = ?")
+            params.append(max_attempts)
+        params.append(message_id)
+        async with db.tx() as conn:
+            async with conn.execute(
+                f"UPDATE messages SET {', '.join(columns)} WHERE id = ?",
+                params,
+            ):
+                pass
+
+    @staticmethod
+    async def set_compression(message_id: int, compression: CompressionInfo | None) -> None:
+        """Attach (or clear) the compression facts for an already-stored message.
+
+        Used by the resend paths, where the body is re-encoded after the row
+        exists, and by ingest routes that store before decoding.
+        """
+        async with db.tx() as conn:
+            async with conn.execute(
+                """
+                UPDATE messages
+                   SET compression = ?, plain_bytes = ?, wire_bytes = ?, payload_bytes = ?
+                 WHERE id = ?
+                """,
+                (
+                    compression.codec if compression else None,
+                    compression.plain_bytes if compression else None,
+                    compression.wire_bytes if compression else None,
+                    compression.payload_bytes if compression else None,
+                    message_id,
+                ),
+            ):
+                pass
 
     @staticmethod
     async def delete_by_id(message_id: int) -> None:

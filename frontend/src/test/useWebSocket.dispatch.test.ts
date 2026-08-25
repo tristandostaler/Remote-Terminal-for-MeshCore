@@ -166,6 +166,32 @@ describe('useWebSocket dispatch', () => {
     expect(onMessageAcked).toHaveBeenCalledWith(7, 2, undefined, 99);
   });
 
+  it('routes message_status to onMessageStatus', () => {
+    const onMessageStatus = vi.fn();
+    renderHook(() => useWebSocket({ onMessageStatus }));
+
+    const data = {
+      message_id: 42,
+      send_state: 'sending',
+      send_attempts: 2,
+      send_max_attempts: 3,
+    };
+    fireMessage({ type: 'message_status', data });
+
+    expect(onMessageStatus).toHaveBeenCalledOnce();
+    expect(onMessageStatus).toHaveBeenCalledWith(data);
+  });
+
+  it('routes message_deleted to onMessageDeleted with just the id', () => {
+    const onMessageDeleted = vi.fn();
+    renderHook(() => useWebSocket({ onMessageDeleted }));
+
+    fireMessage({ type: 'message_deleted', data: { message_id: 42 } });
+
+    expect(onMessageDeleted).toHaveBeenCalledOnce();
+    expect(onMessageDeleted).toHaveBeenCalledWith(42);
+  });
+
   it('routes error event to onError', () => {
     const onError = vi.fn();
     renderHook(() => useWebSocket({ onError }));

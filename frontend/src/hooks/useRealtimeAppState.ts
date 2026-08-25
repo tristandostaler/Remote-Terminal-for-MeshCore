@@ -7,6 +7,8 @@ import {
 } from 'react';
 import { api } from '../api';
 import type { UseWebSocketOptions } from '../useWebSocket';
+import type { MessageStatusPayload } from '../wsEvents';
+import type { MessageSendStatusUpdate } from './useConversationMessages';
 import { toast } from '../components/ui/sonner';
 import { getStateKey } from '../utils/conversationState';
 import { mergeContactIntoList } from '../utils/contactMerge';
@@ -56,6 +58,8 @@ interface UseRealtimeAppStateArgs {
     paths?: MessagePath[],
     packetId?: number | null
   ) => void;
+  receiveMessageStatus: (messageId: number, status: MessageSendStatusUpdate) => void;
+  receiveMessageDeleted: (messageId: number) => void;
   notifyIncomingMessage?: (msg: Message) => void;
   /** Buffer cap override. Defaults to the store's own cap; tests use it to force eviction. */
   maxRawPackets?: number;
@@ -105,6 +109,8 @@ export function useRealtimeAppState({
   renameConversationMessages,
   removeConversationMessages,
   receiveMessageAck,
+  receiveMessageStatus,
+  receiveMessageDeleted,
   notifyIncomingMessage,
   maxRawPackets = MAX_RAW_PACKETS,
 }: UseRealtimeAppStateArgs): UseWebSocketOptions {
@@ -271,6 +277,16 @@ export function useRealtimeAppState({
       ) => {
         receiveMessageAck(messageId, ackCount, paths, packetId);
       },
+      onMessageStatus: (payload: MessageStatusPayload) => {
+        receiveMessageStatus(payload.message_id, {
+          send_state: payload.send_state,
+          send_attempts: payload.send_attempts,
+          send_max_attempts: payload.send_max_attempts,
+        });
+      },
+      onMessageDeleted: (messageId: number) => {
+        receiveMessageDeleted(messageId);
+      },
     }),
     [
       activeConversationRef,
@@ -288,6 +304,8 @@ export function useRealtimeAppState({
       prevHealthRef,
       recordMessageEvent,
       receiveMessageAck,
+      receiveMessageStatus,
+      receiveMessageDeleted,
       observeMessage,
       refreshUnreads,
       reconcileOnReconnect,

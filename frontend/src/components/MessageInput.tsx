@@ -11,7 +11,7 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from 'react';
-import { ImagePlus, Loader2, Mic, Smile, X } from 'lucide-react';
+import { ImagePlus, Loader2, Mic, Plus, Smile, X } from 'lucide-react';
 import { api } from '../api';
 import {
   encodeMeshImage,
@@ -133,6 +133,9 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
   const [cancelVoice, setCancelVoice] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  // Emoji, photo and voice live behind one "+" so the resting composer is a
+  // single button and the text field gets the width.
+  const [actionsOpen, setActionsOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageSize, setImageSize] = useState<64 | 128 | 256>(256);
@@ -141,6 +144,12 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
   const [imagePreparing, setImagePreparing] = useState(false);
   const [imageSending, setImageSending] = useState(false);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+
+  // A tray left open in one conversation should not greet you in the next.
+  useEffect(() => {
+    setActionsOpen(false);
+    setEmojiPickerOpen(false);
+  }, [voiceConversation?.key]);
 
   useEffect(() => {
     const blob = imagePreview?.blob ?? aeicPreview?.previewBlob ?? null;
@@ -430,6 +439,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
       try {
         await onSend(trimmed);
         setText('');
+        setActionsOpen(false);
       } catch (err) {
         console.error('Failed to send message:', err);
         const description = err instanceof Error ? err.message : 'Check radio connection';
@@ -493,6 +503,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
       const end = input?.selectionEnd ?? start;
       setText((current) => `${current.slice(0, start)}${emoji}${current.slice(end)}`);
       setEmojiPickerOpen(false);
+      setActionsOpen(false);
       requestAnimationFrame(() => {
         const cursor = start + emoji.length;
         textareaRef.current?.focus();
@@ -707,41 +718,11 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
           </div>
         ) : (
           <>
-            <div className="relative flex-shrink-0">
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                className="rounded-full"
-                aria-label="Add emoji"
-                aria-expanded={emojiPickerOpen}
-                disabled={disabled || sending}
-                onClick={() => setEmojiPickerOpen((open) => !open)}
-              >
-                <Smile size={18} />
-              </Button>
-              {emojiPickerOpen && (
-                <div
-                  role="dialog"
-                  aria-label="Emoji picker"
-                  className="absolute bottom-12 left-0 z-20 grid w-56 grid-cols-6 gap-1 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
-                >
-                  {COMPOSER_EMOJIS.map((emoji) => (
-                    <button
-                      key={emoji}
-                      type="button"
-                      className="flex h-8 w-8 items-center justify-center rounded-md text-lg hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      aria-label={`Insert ${emoji}`}
-                      onClick={() => insertEmoji(emoji)}
-                    >
-                      {emoji}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
             {voiceConversation && (
               <>
+                {/* Mounted whether or not the tray is open: the tray closes the
+                    moment a file is picked, and an unmounted input would drop
+                    the change event the OS dialog is about to deliver. */}
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -752,6 +733,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
                     const file = event.target.files?.[0];
                     if (!file) return;
                     setImageFile(file);
+                    setActionsOpen(false);
                   }}
                 />
                 <Button
@@ -759,43 +741,102 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
                   variant="outline"
                   size="icon"
                   className="flex-shrink-0 rounded-full"
-                  disabled={disabled || sending || imagePreparing || imageSending}
-                  aria-label="Attach image"
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <ImagePlus size={18} />
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  className="flex-shrink-0 touch-none rounded-full"
-                  disabled={disabled || voiceSending}
-                  aria-label="Hold to record voice message"
-                  onPointerDown={startVoice}
-                  onPointerUp={() => {
-                    voiceHeldRef.current = false;
-                    void finishVoice();
-                  }}
-                  onPointerCancel={() => {
-                    voiceHeldRef.current = false;
-                    void finishVoice(true);
-                  }}
-                  onPointerMove={(event) => {
-                    const bounds = event.currentTarget.getBoundingClientRect();
-                    const movedAway =
-                      event.clientY < bounds.top - 60 ||
-                      event.clientY > bounds.bottom + 60 ||
-                      event.clientX < bounds.left - 60 ||
-                      event.clientX > bounds.right + 60;
-                    if (recording && movedAway) {
-                      cancelVoiceRef.current = true;
-                      setCancelVoice(true);
-                    }
+                  aria-label={actionsOpen ? 'Hide message options' : 'Show message options'}
+                  aria-expanded={actionsOpen}
+                  title="Emoji, photo and voice message"
+                  disabled={disabled || sending}
+                  onClick={() => {
+                    setActionsOpen((open) => !open);
+                    setEmojiPickerOpen(false);
                   }}
                 >
-                  <Mic size={18} />
+                  {actionsOpen ? <X size={18} /> : <Plus size={18} />}
                 </Button>
+              </>
+            )}
+            {/* With no attachments available the tray would hide a single emoji
+                button behind a second tap, so it is skipped entirely. */}
+            {(actionsOpen || !voiceConversation) && (
+              <>
+                <div className="relative flex-shrink-0">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="rounded-full"
+                    aria-label="Add emoji"
+                    aria-expanded={emojiPickerOpen}
+                    disabled={disabled || sending}
+                    onClick={() => setEmojiPickerOpen((open) => !open)}
+                  >
+                    <Smile size={18} />
+                  </Button>
+                  {emojiPickerOpen && (
+                    <div
+                      role="dialog"
+                      aria-label="Emoji picker"
+                      className="absolute bottom-12 left-0 z-20 grid w-56 grid-cols-6 gap-1 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
+                    >
+                      {COMPOSER_EMOJIS.map((emoji) => (
+                        <button
+                          key={emoji}
+                          type="button"
+                          className="flex h-8 w-8 items-center justify-center rounded-md text-lg hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          aria-label={`Insert ${emoji}`}
+                          onClick={() => insertEmoji(emoji)}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {voiceConversation && (
+                  <>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="flex-shrink-0 rounded-full"
+                      disabled={disabled || sending || imagePreparing || imageSending}
+                      aria-label="Attach image"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <ImagePlus size={18} />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="flex-shrink-0 touch-none rounded-full"
+                      disabled={disabled || voiceSending}
+                      aria-label="Hold to record voice message"
+                      onPointerDown={startVoice}
+                      onPointerUp={() => {
+                        voiceHeldRef.current = false;
+                        void finishVoice();
+                      }}
+                      onPointerCancel={() => {
+                        voiceHeldRef.current = false;
+                        void finishVoice(true);
+                      }}
+                      onPointerMove={(event) => {
+                        const bounds = event.currentTarget.getBoundingClientRect();
+                        const movedAway =
+                          event.clientY < bounds.top - 60 ||
+                          event.clientY > bounds.bottom + 60 ||
+                          event.clientX < bounds.left - 60 ||
+                          event.clientX > bounds.right + 60;
+                        if (recording && movedAway) {
+                          cancelVoiceRef.current = true;
+                          setCancelVoice(true);
+                        }
+                      }}
+                    >
+                      <Mic size={18} />
+                    </Button>
+                  </>
+                )}
               </>
             )}
             <textarea

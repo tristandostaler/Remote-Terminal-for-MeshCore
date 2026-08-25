@@ -4,12 +4,13 @@ import asyncio
 import logging
 import time as _time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException
 from meshcore import EventType
 
-from app.compression import encode_outbound
+from app.compression import CompressionInfo, describe_compression, encode_outbound
 from app.models import ResendChannelMessageResponse
 from app.radio import RadioOperationBusyError
 from app.region_scope import is_unscoped, normalize_region_scope
@@ -19,11 +20,13 @@ from app.repository import (
     ContactRepository,
     MessageRepository,
 )
-from app.services import dm_ack_tracker
+from app.send_attempts import clamp_message_retries
+from app.services import dm_ack_tracker, send_tracker
 from app.services.flood_scope import set_radio_flood_scope
 from app.services.messages import (
     BroadcastFn,
     broadcast_message,
+    broadcast_message_status,
     build_stored_outgoing_channel_message,
     create_outgoing_channel_message,
     create_outgoing_direct_message,
@@ -67,9 +70,32 @@ WATCHDOG_TEMP_RADIO_SLOT = 0
 _pending_outgoing_timestamp_reservations: dict[OutgoingReservationKey, set[int]] = {}
 _outgoing_timestamp_reservations_lock = asyncio.Lock()
 
-DM_SEND_MAX_ATTEMPTS = 3
 DEFAULT_DM_ACK_TIMEOUT_MS = 10000
 DM_RETRY_WAIT_MARGIN = 1.2
+
+# Outgoing send states persisted on the message row. Delivery is not among them:
+# it stays derived from ``acked > 0`` so there is one source of truth for it.
+SEND_STATE_SENDING = "sending"
+SEND_STATE_SENT = "sent"
+SEND_STATE_FAILED = "failed"
+SEND_STATE_CANCELED = "canceled"
+
+
+async def resolve_max_send_attempts(*, settings_repository=AppSettingsRepository) -> int:
+    """The attempt cap to honour for a direct message starting now.
+
+    Read per send rather than cached: the user can move the dial between two
+    messages, and each message then carries the cap that its own run honoured
+    (persisted as ``send_max_attempts``) so the displayed "attempt N of M" stays
+    truthful afterwards. Falls back to the default if settings cannot be read --
+    a send must not fail because of a settings hiccup.
+    """
+    try:
+        settings = await settings_repository.get()
+    except Exception:
+        logger.warning("Could not read max_message_retries; using the default", exc_info=True)
+        return clamp_message_retries(None)
+    return clamp_message_retries(getattr(settings, "max_message_retries", None))
 
 
 async def allocate_outgoing_sender_timestamp(
@@ -139,6 +165,19 @@ async def release_outgoing_sender_timestamp(
             _pending_outgoing_timestamp_reservations.pop(reservation_key, None)
 
 
+@dataclass(frozen=True)
+class ChannelSendOutcome:
+    """What a channel transmission produced: the radio's reply, and what went out.
+
+    The compression facts have to travel back to the caller because only the
+    caller knows which message row to attach them to, while only the send knows
+    what it actually encoded.
+    """
+
+    result: Any
+    compression: CompressionInfo | None
+
+
 async def send_channel_message_with_effective_scope(
     *,
     mc,
@@ -153,7 +192,7 @@ async def send_channel_message_with_effective_scope(
     error_broadcast_fn: BroadcastFn,
     flood_scope_override: str | _ScopeUnset = SCOPE_UNSET,
     app_settings_repository=AppSettingsRepository,
-) -> Any:
+) -> ChannelSendOutcome:
     """Send a channel message, temporarily overriding flood scope and/or path hash mode.
 
     ``flood_scope_override`` lets a single send override the channel's persisted
@@ -318,12 +357,14 @@ async def send_channel_message_with_effective_scope(
             if channel.mcmp_enabled
             else text
         )
-        if wire_msg != text:
+        compression = describe_compression(plain_text=text, wire_text=wire_msg)
+        if compression is not None:
             logger.debug(
-                "MCMP-compressed channel body for %s (%d -> %d bytes)",
+                "MCMP-compressed channel body for %s (%d -> %d bytes, %d%% saved)",
                 channel.name,
-                len(text.encode("utf-8")),
-                len(wire_msg.encode("utf-8")),
+                compression.plain_bytes,
+                compression.wire_bytes,
+                compression.savings_percent,
             )
         send_result = await mc.commands.send_chan_msg(
             chan=channel_slot,
@@ -353,7 +394,7 @@ async def send_channel_message_with_effective_scope(
                 send_result.payload,
             )
             radio_manager.note_channel_slot_used(channel_key)
-        return send_result
+        return ChannelSendOutcome(result=send_result, compression=compression)
     finally:
         if apply_scope:
             restored = False
@@ -504,6 +545,31 @@ async def _is_message_acked(*, message_id: int, message_repository) -> bool:
     return acked_count > 0
 
 
+async def _finish_direct_message_send(
+    *,
+    message_id: int,
+    state: str,
+    broadcast_fn: BroadcastFn,
+    message_repository,
+) -> None:
+    """Record and announce the end of a direct message's retry run."""
+    try:
+        await message_repository.set_send_state(message_id, state)
+    except Exception:
+        logger.warning(
+            "Could not record send state %r for message %d", state, message_id, exc_info=True
+        )
+        return
+    msg = await message_repository.get_by_id(message_id)
+    broadcast_message_status(
+        message_id=message_id,
+        send_state=state,
+        send_attempts=msg.send_attempts if msg else None,
+        send_max_attempts=msg.send_max_attempts if msg else None,
+        broadcast_fn=broadcast_fn,
+    )
+
+
 async def _retry_direct_message_until_acked(
     *,
     contact,
@@ -516,10 +582,66 @@ async def _retry_direct_message_until_acked(
     wait_timeout_ms: int,
     sleep_fn,
     message_repository,
+    max_attempts: int,
+) -> None:
+    """Retransmit until the ACK arrives or ``max_attempts`` transmissions are made.
+
+    Attempt 1 was the caller's original send, so this loop makes at most
+    ``max_attempts - 1`` more. Every transmission is counted on the message row
+    and broadcast, so the conversation view can show "attempt 2 of 3" live.
+
+    Cancellation (a user cancelling or deleting the message) is not an error: the
+    message is marked ``canceled`` and the loop exits without a further send.
+    """
+    try:
+        await _run_direct_message_retries(
+            contact=contact,
+            text=text,
+            message_id=message_id,
+            sender_timestamp=sender_timestamp,
+            radio_manager=radio_manager,
+            track_pending_ack_fn=track_pending_ack_fn,
+            broadcast_fn=broadcast_fn,
+            wait_timeout_ms=wait_timeout_ms,
+            sleep_fn=sleep_fn,
+            message_repository=message_repository,
+            max_attempts=max_attempts,
+        )
+    except asyncio.CancelledError:
+        # The canceller records and broadcasts the cancelled state: an await in a
+        # cancellation handler can be interrupted again before it completes.
+        logger.debug("Retry run for message %d cancelled", message_id)
+        raise
+
+    # Out of attempts. An ACK may still land late (the tracker keeps matching),
+    # which flips the display to delivered -- so "failed" means "we stopped
+    # trying", not "definitely never arrived".
+    if not await _is_message_acked(message_id=message_id, message_repository=message_repository):
+        await _finish_direct_message_send(
+            message_id=message_id,
+            state=SEND_STATE_FAILED,
+            broadcast_fn=broadcast_fn,
+            message_repository=message_repository,
+        )
+
+
+async def _run_direct_message_retries(
+    *,
+    contact,
+    text: str,
+    message_id: int,
+    sender_timestamp: int,
+    radio_manager,
+    track_pending_ack_fn: TrackAckFn,
+    broadcast_fn: BroadcastFn,
+    wait_timeout_ms: int,
+    sleep_fn,
+    message_repository,
+    max_attempts: int,
 ) -> None:
     next_wait_timeout_ms = wait_timeout_ms
     attempt = 1
-    while attempt < DM_SEND_MAX_ATTEMPTS:
+    while attempt < max_attempts:
         await sleep_fn((next_wait_timeout_ms / 1000) * DM_RETRY_WAIT_MARGIN)
         if await _is_message_acked(message_id=message_id, message_repository=message_repository):
             return
@@ -538,7 +660,7 @@ async def _retry_direct_message_until_acked(
                 if not cached_contact:
                     cached_contact = contact_data
 
-                if attempt == DM_SEND_MAX_ATTEMPTS - 1:
+                if attempt == max_attempts - 1:
                     reset_result = await mc.commands.reset_path(contact.public_key)
                     if reset_result is None:
                         logger.warning(
@@ -567,11 +689,22 @@ async def _retry_direct_message_until_acked(
                     timestamp=sender_timestamp,
                     attempt=attempt,
                 )
+                if result is not None and result.type != EventType.ERROR:
+                    counted, counted_max = await message_repository.record_send_attempt(
+                        message_id, state=SEND_STATE_SENDING
+                    )
+                    broadcast_message_status(
+                        message_id=message_id,
+                        send_state=SEND_STATE_SENDING,
+                        send_attempts=counted,
+                        send_max_attempts=counted_max or max_attempts,
+                        broadcast_fn=broadcast_fn,
+                    )
         except RadioOperationBusyError:
             logger.debug(
                 "Radio busy during DM retry attempt %d/%d for %s, will retry without consuming attempt",
                 attempt + 1,
-                DM_SEND_MAX_ATTEMPTS,
+                max_attempts,
                 contact.public_key[:12],
             )
             continue
@@ -579,7 +712,7 @@ async def _retry_direct_message_until_acked(
             logger.exception(
                 "Background DM retry attempt %d/%d failed for %s",
                 attempt + 1,
-                DM_SEND_MAX_ATTEMPTS,
+                max_attempts,
                 contact.public_key[:12],
             )
             attempt += 1
@@ -589,7 +722,7 @@ async def _retry_direct_message_until_acked(
             logger.warning(
                 "No response from radio after background DM retry attempt %d/%d to %s",
                 attempt + 1,
-                DM_SEND_MAX_ATTEMPTS,
+                max_attempts,
                 contact.public_key[:12],
             )
             attempt += 1
@@ -599,7 +732,7 @@ async def _retry_direct_message_until_acked(
             logger.warning(
                 "Background DM retry attempt %d/%d failed for %s: %s",
                 attempt + 1,
-                DM_SEND_MAX_ATTEMPTS,
+                max_attempts,
                 contact.public_key[:12],
                 result.payload,
             )
@@ -615,7 +748,7 @@ async def _retry_direct_message_until_acked(
                 "Background DM retry attempt %d/%d for %s returned no expected_ack; "
                 "continuing with previous timeout",
                 attempt + 1,
-                DM_SEND_MAX_ATTEMPTS,
+                max_attempts,
                 contact.public_key[:12],
             )
             attempt += 1
@@ -654,6 +787,7 @@ async def send_direct_message_to_contact(
     if retry_sleep_fn is None:
         retry_sleep_fn = asyncio.sleep
 
+    max_attempts = await resolve_max_send_attempts()
     contact_data = contact.to_radio_dict()
     sent_at: int | None = None
     sender_timestamp: int | None = None
@@ -682,13 +816,15 @@ async def send_direct_message_to_contact(
             # Compress on the wire when the contact opts in; the stored/dedup
             # text stays plaintext (below). encode_outbound() is deterministic so
             # the retry path sends identical bytes.
+            wire_text = (
+                encode_outbound(text, version=contact.mcmp_version, timestamp=sender_timestamp)
+                if contact.mcmp_enabled
+                else text
+            )
+            compression = describe_compression(plain_text=text, wire_text=wire_text)
             result = await mc.commands.send_msg(
                 dst=cached_contact,
-                msg=(
-                    encode_outbound(text, version=contact.mcmp_version, timestamp=sender_timestamp)
-                    if contact.mcmp_enabled
-                    else text
-                ),
+                msg=wire_text,
                 timestamp=sender_timestamp,
             )
 
@@ -708,12 +844,21 @@ async def send_direct_message_to_contact(
             result.payload,
         )
 
+        # Needed before the row is written: without an expected-ACK code there is
+        # nothing to wait on, so the message is 'sent' rather than 'sending' and
+        # no retry run is scheduled.
+        ack_code = _extract_expected_ack_code(result)
+
         message = await create_outgoing_direct_message(
             conversation_key=contact.public_key.lower(),
             text=text,
             sender_timestamp=sender_timestamp,
             received_at=sent_at,
             broadcast_fn=broadcast_fn,
+            compression=compression,
+            send_attempts=1,
+            send_max_attempts=max_attempts,
+            send_state=(SEND_STATE_SENDING if max_attempts > 1 and ack_code else SEND_STATE_SENT),
             message_repository=message_repository,
         )
         if message is None:
@@ -735,7 +880,6 @@ async def send_direct_message_to_contact(
 
     await contact_repository.update_last_contacted(contact.public_key.lower(), sent_at)
 
-    ack_code = _extract_expected_ack_code(result)
     retry_timeout_ms = _get_direct_message_retry_timeout_ms(result)
     ack_count = await _apply_direct_message_ack_tracking(
         result=result,
@@ -747,8 +891,8 @@ async def send_direct_message_to_contact(
         message.acked = ack_count
         return message
 
-    if DM_SEND_MAX_ATTEMPTS > 1 and ack_code:
-        retry_task_scheduler(
+    if max_attempts > 1 and ack_code:
+        retry_task = retry_task_scheduler(
             _retry_direct_message_until_acked(
                 contact=contact,
                 text=text,
@@ -760,10 +904,153 @@ async def send_direct_message_to_contact(
                 wait_timeout_ms=retry_timeout_ms,
                 sleep_fn=retry_sleep_fn,
                 message_repository=message_repository,
+                max_attempts=max_attempts,
             )
         )
+        # Tracked so the user can cancel the remaining attempts. Schedulers that
+        # do not hand back a task (tests) simply leave nothing to cancel.
+        if isinstance(retry_task, asyncio.Task):
+            send_tracker.register(message.id, retry_task)
 
     return message
+
+
+async def retry_direct_message_record(
+    *,
+    message,
+    contact,
+    radio_manager,
+    broadcast_fn: BroadcastFn,
+    track_pending_ack_fn: TrackAckFn,
+    retry_task_scheduler: RetryTaskScheduler | None = None,
+    retry_sleep_fn=None,
+    message_repository=MessageRepository,
+) -> None:
+    """Retransmit a stored outgoing direct message and restart its retry run.
+
+    The original ``sender_timestamp`` is reused, which makes this a retry rather
+    than a new message: ``encode_outbound`` is deterministic given the timestamp,
+    so the recipient sees byte-identical content and dedups it against whatever
+    already arrived. A fresh timestamp would land as a second message.
+
+    The attempt cap is re-read here, so a user who raises the limit and then hits
+    retry gets the new allowance.
+    """
+    if message.sender_timestamp is None:
+        raise HTTPException(status_code=400, detail="Message has no timestamp to retry with")
+
+    if retry_task_scheduler is None:
+        retry_task_scheduler = asyncio.create_task
+    if retry_sleep_fn is None:
+        retry_sleep_fn = asyncio.sleep
+
+    # Supersede whatever run is still going, so the two do not interleave
+    # transmissions or race on the attempt counter.
+    send_tracker.cancel(message.id)
+
+    max_attempts = await resolve_max_send_attempts()
+    sender_timestamp = message.sender_timestamp
+    text = message.text
+
+    async with radio_manager.radio_operation("retry_direct_message") as mc:
+        contact_data = contact.to_radio_dict()
+        add_result = await mc.commands.add_contact(contact_data)
+        if add_result.type == EventType.ERROR:
+            logger.warning(
+                "Failed to reload contact %s on radio before manual DM retry: %s",
+                contact.public_key[:12],
+                add_result.payload,
+            )
+        cached_contact = mc.get_contact_by_key_prefix(contact.public_key[:12]) or contact_data
+
+        wire_text = (
+            encode_outbound(text, version=contact.mcmp_version, timestamp=sender_timestamp)
+            if contact.mcmp_enabled
+            else text
+        )
+        result = await mc.commands.send_msg(
+            dst=cached_contact,
+            msg=wire_text,
+            timestamp=sender_timestamp,
+        )
+
+    if result is None:
+        raise HTTPException(status_code=408, detail=NO_RADIO_RESPONSE_AFTER_SEND_DETAIL)
+    if result.type == EventType.ERROR:
+        raise HTTPException(status_code=422, detail=f"Failed to resend message: {result.payload}")
+
+    await message_repository.set_compression(
+        message.id, describe_compression(plain_text=text, wire_text=wire_text)
+    )
+    ack_code = _extract_expected_ack_code(result)
+    state = SEND_STATE_SENDING if max_attempts > 1 and ack_code else SEND_STATE_SENT
+    # A manual retry restarts the run: attempt 1 of the current cap. Accumulating
+    # instead would eventually display "attempt 7 of 3".
+    await message_repository.set_send_state(
+        message.id, state, attempts=1, max_attempts=max_attempts
+    )
+    broadcast_message_status(
+        message_id=message.id,
+        send_state=state,
+        send_attempts=1,
+        send_max_attempts=max_attempts,
+        broadcast_fn=broadcast_fn,
+    )
+
+    ack_count = await _apply_direct_message_ack_tracking(
+        result=result,
+        message_id=message.id,
+        track_pending_ack_fn=track_pending_ack_fn,
+        broadcast_fn=broadcast_fn,
+    )
+    if ack_count > 0:
+        return
+
+    if max_attempts > 1 and ack_code:
+        retry_task = retry_task_scheduler(
+            _retry_direct_message_until_acked(
+                contact=contact,
+                text=text,
+                message_id=message.id,
+                sender_timestamp=sender_timestamp,
+                radio_manager=radio_manager,
+                track_pending_ack_fn=track_pending_ack_fn,
+                broadcast_fn=broadcast_fn,
+                wait_timeout_ms=_get_direct_message_retry_timeout_ms(result),
+                sleep_fn=retry_sleep_fn,
+                message_repository=message_repository,
+                max_attempts=max_attempts,
+            )
+        )
+        if isinstance(retry_task, asyncio.Task):
+            send_tracker.register(message.id, retry_task)
+
+
+async def cancel_message_send(
+    *,
+    message,
+    broadcast_fn: BroadcastFn,
+    message_repository=MessageRepository,
+) -> bool:
+    """Stop any further transmissions of an outgoing message.
+
+    Returns whether background work was actually still running. Either way the
+    message ends up marked ``canceled``, because that is what the user asked for
+    -- a send that had already finished on its own is simply already there.
+
+    The transmission currently on air cannot be recalled; only the attempts not
+    yet made are prevented.
+    """
+    stopped = send_tracker.cancel(message.id)
+    await message_repository.set_send_state(message.id, SEND_STATE_CANCELED)
+    broadcast_message_status(
+        message_id=message.id,
+        send_state=SEND_STATE_CANCELED,
+        send_attempts=message.send_attempts,
+        send_max_attempts=message.send_max_attempts,
+        broadcast_fn=broadcast_fn,
+    )
+    return stopped
 
 
 async def _channel_echo_watchdog(
@@ -822,7 +1109,7 @@ async def _channel_echo_watchdog(
             if radio_name and text_to_send.startswith(f"{radio_name}: "):
                 text_to_send = text_to_send[len(f"{radio_name}: ") :]
 
-            result = await send_channel_message_with_effective_scope(
+            outcome = await send_channel_message_with_effective_scope(
                 mc=mc,
                 channel=channel,
                 channel_key=msg.conversation_key,
@@ -834,11 +1121,28 @@ async def _channel_echo_watchdog(
                 temp_radio_slot=WATCHDOG_TEMP_RADIO_SLOT,
                 error_broadcast_fn=error_broadcast_fn,
             )
+            result = outcome.result
             if result is not None and result.type != EventType.ERROR:
                 logger.info("Echo watchdog: resent message %d successfully", message_id)
+                # The watchdog transmission is a real attempt, so it counts --
+                # otherwise the meta line would claim one send for a message
+                # that went out twice.
+                attempts, max_attempts = await MessageRepository.record_send_attempt(
+                    message_id, state=SEND_STATE_SENT
+                )
+                broadcast_message_status(
+                    message_id=message_id,
+                    send_state=SEND_STATE_SENT,
+                    send_attempts=attempts,
+                    send_max_attempts=max_attempts or None,
+                    broadcast_fn=broadcast_fn,
+                )
             else:
                 logger.debug("Echo watchdog: resend got no/error result for message %d", message_id)
 
+    except asyncio.CancelledError:
+        logger.debug("Echo watchdog: cancelled for message %d", message_id)
+        raise
     except RadioOperationBusyError:
         logger.debug("Echo watchdog: radio busy, skipping resend for message %d", message_id)
     except Exception:
@@ -898,6 +1202,8 @@ async def send_channel_message_to_channel(
                 channel_name=channel.name,
                 broadcast_fn=broadcast_fn,
                 broadcast=False,
+                send_attempts=1,
+                send_state=SEND_STATE_SENT,
                 message_repository=message_repository,
             )
             if outgoing_message is None:
@@ -906,7 +1212,7 @@ async def send_channel_message_to_channel(
                     detail="Failed to store outgoing message - unexpected duplicate",
                 )
 
-            result = await send_channel_message_with_effective_scope(
+            outcome = await send_channel_message_with_effective_scope(
                 mc=mc,
                 channel=channel,
                 channel_key=channel_key_upper,
@@ -919,6 +1225,8 @@ async def send_channel_message_to_channel(
                 error_broadcast_fn=error_broadcast_fn,
                 flood_scope_override=flood_scope_override,
             )
+            result = outcome.result
+            compression = outcome.compression
 
             if result is None:
                 logger.warning(
@@ -948,6 +1256,11 @@ async def send_channel_message_to_channel(
     if sent_at is None or sender_timestamp is None or outgoing_message is None:
         raise HTTPException(status_code=422, detail="Failed to store outgoing message")
 
+    # The row is created before the transmission (so a failed send can delete it
+    # again), but only the transmission knows what it encoded -- so the
+    # compression facts are attached afterwards.
+    await message_repository.set_compression(outgoing_message.id, compression)
+
     outgoing_message = await build_stored_outgoing_channel_message(
         message_id=outgoing_message.id,
         conversation_key=channel_key_upper,
@@ -957,6 +1270,9 @@ async def send_channel_message_to_channel(
         sender_name=radio_name or None,
         sender_key=our_public_key,
         channel_name=channel.name,
+        compression=compression,
+        send_attempts=1,
+        send_state=SEND_STATE_SENT,
         message_repository=message_repository,
     )
     broadcast_message(message=outgoing_message, broadcast_fn=broadcast_fn)
@@ -965,13 +1281,16 @@ async def send_channel_message_to_channel(
     try:
         settings = await AppSettingsRepository.get()
         if settings.auto_resend_channel:
-            asyncio.create_task(
-                _channel_echo_watchdog(
-                    message_id=outgoing_message.id,
-                    radio_manager=radio_manager,
-                    broadcast_fn=broadcast_fn,
-                    error_broadcast_fn=error_broadcast_fn,
-                )
+            send_tracker.register(
+                outgoing_message.id,
+                asyncio.create_task(
+                    _channel_echo_watchdog(
+                        message_id=outgoing_message.id,
+                        radio_manager=radio_manager,
+                        broadcast_fn=broadcast_fn,
+                        error_broadcast_fn=error_broadcast_fn,
+                    )
+                ),
             )
     except Exception:
         logger.error("Echo watchdog setup failed", exc_info=True)
@@ -1036,6 +1355,8 @@ async def resend_channel_message_record(
                     channel_name=channel.name,
                     broadcast_fn=broadcast_fn,
                     broadcast=False,
+                    send_attempts=1,
+                    send_state=SEND_STATE_SENT,
                     message_repository=message_repository,
                 )
                 if new_message is None:
@@ -1044,7 +1365,7 @@ async def resend_channel_message_record(
                         detail="Failed to store resent message - unexpected duplicate",
                     )
 
-            result = await send_channel_message_with_effective_scope(
+            outcome = await send_channel_message_with_effective_scope(
                 mc=mc,
                 channel=channel,
                 channel_key=message.conversation_key,
@@ -1056,6 +1377,8 @@ async def resend_channel_message_record(
                 temp_radio_slot=temp_radio_slot,
                 error_broadcast_fn=error_broadcast_fn,
             )
+            result = outcome.result
+            compression = outcome.compression
             if result is None:
                 logger.warning(
                     "No response from radio after channel resend to %s; send outcome is unknown",
@@ -1085,6 +1408,7 @@ async def resend_channel_message_record(
         if sent_at is None or new_message is None:
             raise HTTPException(status_code=422, detail="Failed to assign resend timestamp")
 
+        await message_repository.set_compression(new_message.id, compression)
         new_message = await build_stored_outgoing_channel_message(
             message_id=new_message.id,
             conversation_key=message.conversation_key,
@@ -1094,6 +1418,9 @@ async def resend_channel_message_record(
             sender_name=radio_name or None,
             sender_key=resend_public_key,
             channel_name=channel.name,
+            compression=compression,
+            send_attempts=1,
+            send_state=SEND_STATE_SENT,
             message_repository=message_repository,
         )
         broadcast_message(message=new_message, broadcast_fn=broadcast_fn)
@@ -1110,5 +1437,17 @@ async def resend_channel_message_record(
             message=new_message,
         )
 
+    # Byte-perfect resend reuses the original row, so the extra transmission is
+    # counted there rather than creating a second message.
+    attempts, max_attempts = await message_repository.record_send_attempt(
+        message.id, state=SEND_STATE_SENT
+    )
+    broadcast_message_status(
+        message_id=message.id,
+        send_state=SEND_STATE_SENT,
+        send_attempts=attempts,
+        send_max_attempts=max_attempts or None,
+        broadcast_fn=broadcast_fn,
+    )
     logger.info("Resent channel message %d to %s", message.id, channel.name)
     return ResendChannelMessageResponse(status="ok", message_id=message.id)

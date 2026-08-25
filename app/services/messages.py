@@ -3,7 +3,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from app.compression import decode_incoming_body
+from app.compression import CompressionInfo, decode_and_describe
 from app.imaging.aeic.ingest import note_inbound_chunk
 from app.models import Message, MessagePath
 from app.repository import ContactRepository, MessageRepository, RawPacketRepository
@@ -73,6 +73,10 @@ def build_message_model(
     packet_id: int | None = None,
     transport_code: int | None = None,
     region: str | None = None,
+    compression: CompressionInfo | None = None,
+    send_attempts: int | None = None,
+    send_max_attempts: int | None = None,
+    send_state: str | None = None,
 ) -> Message:
     """Build a Message model with the canonical backend payload shape."""
     return Message(
@@ -93,6 +97,13 @@ def build_message_model(
         packet_id=packet_id,
         transport_code=transport_code,
         region=region,
+        compression=compression.codec if compression else None,
+        plain_bytes=compression.plain_bytes if compression else None,
+        wire_bytes=compression.wire_bytes if compression else None,
+        payload_bytes=compression.payload_bytes if compression else None,
+        send_attempts=send_attempts,
+        send_max_attempts=send_max_attempts,
+        send_state=send_state,
     )
 
 
@@ -123,6 +134,9 @@ async def build_stored_outgoing_channel_message(
     sender_name: str | None,
     sender_key: str | None,
     channel_name: str | None,
+    compression: CompressionInfo | None = None,
+    send_attempts: int | None = None,
+    send_state: str | None = None,
     message_repository=MessageRepository,
 ) -> Message:
     """Build the current payload for a stored outgoing channel message."""
@@ -140,6 +154,34 @@ async def build_stored_outgoing_channel_message(
         sender_name=sender_name,
         sender_key=sender_key,
         channel_name=channel_name,
+        compression=compression,
+        send_attempts=send_attempts,
+        send_state=send_state,
+    )
+
+
+def broadcast_message_status(
+    *,
+    message_id: int,
+    send_state: str | None,
+    send_attempts: int | None,
+    send_max_attempts: int | None,
+    broadcast_fn: BroadcastFn,
+) -> None:
+    """Broadcast an outgoing message's send progress.
+
+    Separate from ``message_acked`` because progress and delivery are different
+    facts: a message can reach its last attempt without ever being acked, and an
+    ACK can land after the attempts are done.
+    """
+    broadcast_fn(
+        "message_status",
+        {
+            "message_id": message_id,
+            "send_state": send_state,
+            "send_attempts": send_attempts,
+            "send_max_attempts": send_max_attempts,
+        },
     )
 
 
@@ -289,8 +331,11 @@ async def create_message_from_decrypted(
     received = received_at or int(time.time())
     # MCMP-compressed bodies ride as ordinary text behind an mcmp2:/mcmp3:
     # prefix; decode to plaintext before storage/dedup so the DB, search and bots
-    # see the real message (non-MCMP text is returned unchanged).
-    message_text = decode_incoming_body(message_text)
+    # see the real message (non-MCMP text is returned unchanged). The compression
+    # facts are measured against the body alone -- the firmware adds the
+    # "<name>: " prefix outside the compressed payload, so counting it would
+    # understate the ratio.
+    message_text, compression = decode_and_describe(message_text)
     text = f"{sender}: {message_text}" if sender else message_text
     channel_key_normalized = channel_key.upper()
 
@@ -314,6 +359,7 @@ async def create_message_from_decrypted(
         sender_key=resolved_sender_key,
         transport_code=transport_code,
         region=region,
+        compression=compression,
     )
 
     if msg_id is None:
@@ -357,6 +403,7 @@ async def create_message_from_decrypted(
             packet_id=packet_id,
             transport_code=transport_code,
             region=region,
+            compression=compression,
         ),
         broadcast_fn=broadcast_fn,
         realtime=realtime,
@@ -470,7 +517,7 @@ async def create_fallback_channel_message(
     # Decode MCMP here too: this get_msg() drain route must decode at parity with
     # the raw-RF route (create_message_from_decrypted) or the same message
     # arriving via both paths would store two rows (dedup keys on text).
-    message_text = decode_incoming_body(message_text)
+    message_text, compression = decode_and_describe(message_text)
     text = f"{sender_name}: {message_text}" if sender_name else message_text
 
     resolved_sender_key: str | None = None
@@ -490,6 +537,7 @@ async def create_fallback_channel_message(
         txt_type=txt_type,
         sender_name=sender_name,
         sender_key=resolved_sender_key,
+        compression=compression,
     )
     if msg_id is None:
         await handle_duplicate_message(
@@ -518,6 +566,7 @@ async def create_fallback_channel_message(
         sender_name=sender_name,
         sender_key=resolved_sender_key,
         channel_name=channel_name,
+        compression=compression,
     )
     broadcast_message(message=message, broadcast_fn=broadcast_fn)
 
@@ -543,6 +592,10 @@ async def create_outgoing_direct_message(
     sender_timestamp: int,
     received_at: int,
     broadcast_fn: BroadcastFn,
+    compression: CompressionInfo | None = None,
+    send_attempts: int | None = None,
+    send_max_attempts: int | None = None,
+    send_state: str | None = None,
     message_repository=MessageRepository,
 ) -> Message | None:
     """Store and broadcast an outgoing direct message."""
@@ -553,6 +606,10 @@ async def create_outgoing_direct_message(
         sender_timestamp=sender_timestamp,
         received_at=received_at,
         outgoing=True,
+        compression=compression,
+        send_attempts=send_attempts,
+        send_max_attempts=send_max_attempts,
+        send_state=send_state,
     )
     if msg_id is None:
         return None
@@ -566,6 +623,10 @@ async def create_outgoing_direct_message(
         received_at=received_at,
         outgoing=True,
         acked=0,
+        compression=compression,
+        send_attempts=send_attempts,
+        send_max_attempts=send_max_attempts,
+        send_state=send_state,
     )
     broadcast_message(message=message, broadcast_fn=broadcast_fn)
     return message
@@ -582,6 +643,9 @@ async def create_outgoing_channel_message(
     channel_name: str | None,
     broadcast_fn: BroadcastFn,
     broadcast: bool = True,
+    compression: CompressionInfo | None = None,
+    send_attempts: int | None = None,
+    send_state: str | None = None,
     message_repository=MessageRepository,
 ) -> Message | None:
     """Store and broadcast an outgoing channel message."""
@@ -594,6 +658,9 @@ async def create_outgoing_channel_message(
         outgoing=True,
         sender_name=sender_name,
         sender_key=sender_key,
+        compression=compression,
+        send_attempts=send_attempts,
+        send_state=send_state,
     )
     if msg_id is None:
         return None
@@ -607,6 +674,9 @@ async def create_outgoing_channel_message(
         sender_name=sender_name,
         sender_key=sender_key,
         channel_name=channel_name,
+        compression=compression,
+        send_attempts=send_attempts,
+        send_state=send_state,
         message_repository=message_repository,
     )
     if broadcast:

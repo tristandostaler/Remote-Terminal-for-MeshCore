@@ -345,12 +345,55 @@ export interface Message {
   transport_code?: number | null;
   /** Resolved region name for the transport code, if it matched a known region. */
   region?: string | null;
+  /** Codec the body rode under, or null when it went as plain text. */
+  compression?: MessageCompression | null;
+  /** UTF-8 size of the plaintext body. Null for messages stored before tracking existed. */
+  plain_bytes?: number | null;
+  /** UTF-8 size of the payload actually transmitted, container and all. */
+  wire_bytes?: number | null;
+  /**
+   * Compressed-text segment the ratio is measured against. Equals wire_bytes for v2;
+   * for v3 it excludes the container header, matching MCO Advanced's percentage.
+   */
+  payload_bytes?: number | null;
+  /** Transmissions made for an outgoing message (1 = sent once, never retried). */
+  send_attempts?: number | null;
+  /** The attempt cap that this message's send run honoured. */
+  send_max_attempts?: number | null;
+  /** Outgoing send progress. Delivery is not here -- it stays derived from `acked`. */
+  send_state?: MessageSendState | null;
 }
+
+/** Compression codecs a message body can arrive or leave under. */
+export type MessageCompression = 'mcmp2' | 'mcmp3';
+
+/**
+ * Where an outgoing message's send got to. Delivery is deliberately absent:
+ * `acked > 0` is the single source of truth for that, so a late ACK on a
+ * `failed` message still shows as delivered.
+ */
+export type MessageSendState = 'sending' | 'sent' | 'failed' | 'canceled';
 
 export interface MessagesAroundResponse {
   messages: Message[];
   has_older: boolean;
   has_newer: boolean;
+}
+
+/** Outcome of a per-message action: retry, cancel or delete. */
+export interface MessageActionResponse {
+  status: string;
+  message_id: number;
+  /**
+   * The resulting row when the action produced one. A channel retry with a fresh
+   * timestamp creates a new message, so this id can differ from the one asked for.
+   */
+  message?: Message | null;
+  /**
+   * Whether background retransmissions were still scheduled and have now stopped.
+   * False means the send had already finished; the message is marked cancelled either way.
+   */
+  stopped_pending_sends: boolean;
 }
 
 export interface ResendChannelMessageResponse {
@@ -419,15 +462,22 @@ export interface AppSettings {
   tracked_telemetry_repeaters: string[];
   tracked_telemetry_contacts: string[];
   auto_resend_channel: boolean;
+  max_message_retries: number;
   telemetry_interval_hours: number;
   telemetry_routed_hourly: boolean;
 }
+
+/** Bounds and default for `max_message_retries`, mirroring app/send_attempts.py. */
+export const MIN_MESSAGE_RETRIES = 1;
+export const DEFAULT_MESSAGE_RETRIES = 3;
+export const MAX_MESSAGE_RETRIES = 10;
 
 export interface AppSettingsUpdate {
   max_radio_contacts?: number;
   auto_decrypt_dm_on_advert?: boolean;
   advert_interval?: number;
   auto_resend_channel?: boolean;
+  max_message_retries?: number;
   flood_scope?: string;
   known_regions?: string[];
   blocked_keys?: string[];

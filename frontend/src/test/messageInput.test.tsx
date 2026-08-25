@@ -123,6 +123,11 @@ describe('MessageInput', () => {
     return screen.getByPlaceholderText('Type a message...') as HTMLTextAreaElement;
   }
 
+  /** Emoji, photo and voice live behind the composer's "+" tray. */
+  function openActions() {
+    fireEvent.click(screen.getByRole('button', { name: 'Show message options' }));
+  }
+
   function getSendButton() {
     return screen.getByRole('button', { name: /send/i }) as HTMLButtonElement;
   }
@@ -333,9 +338,19 @@ describe('MessageInput', () => {
     it('places media controls left of the text field and always keeps send visible', () => {
       renderInput({ conversationType: 'contact', voice: true });
 
+      // At rest the three are collapsed behind "+", so the text field gets the width.
+      expect(screen.queryByRole('button', { name: /attach image/i })).toBeNull();
+      expect(screen.queryByRole('button', { name: /hold to record voice/i })).toBeNull();
+
+      openActions();
+      const toggle = screen.getByRole('button', { name: 'Hide message options' });
+      const emoji = screen.getByRole('button', { name: 'Add emoji' });
       const image = screen.getByRole('button', { name: /attach image/i });
       const microphone = screen.getByRole('button', { name: /hold to record voice/i });
       const input = getInput();
+      // Left to right: the toggle, then the three it reveals, then the field.
+      expect(toggle.compareDocumentPosition(emoji) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(emoji.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(
         image.compareDocumentPosition(microphone) & Node.DOCUMENT_POSITION_FOLLOWING
       ).toBeTruthy();
@@ -349,6 +364,7 @@ describe('MessageInput', () => {
     it('preserves text send and keeps image attachment available when text is entered', () => {
       renderInput({ conversationType: 'contact', voice: true });
       fireEvent.change(getInput(), { target: { value: 'Hello' } });
+      openActions();
 
       expect(screen.getByRole('button', { name: /^send$/i })).toBeVisible();
       expect(screen.getByRole('button', { name: /attach image/i })).toBeVisible();
@@ -358,6 +374,7 @@ describe('MessageInput', () => {
     it('shows recording state on pointer down and sends on pointer up', async () => {
       Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
       renderInput({ conversationType: 'contact', voice: true });
+      openActions();
       const microphone = screen.getByRole('button', { name: /hold to record voice/i });
 
       fireEvent.pointerDown(microphone, { pointerId: 1 });
@@ -372,6 +389,7 @@ describe('MessageInput', () => {
     it('does not send after the slide-up cancel gesture', async () => {
       Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
       renderInput({ conversationType: 'contact', voice: true });
+      openActions();
       const microphone = screen.getByRole('button', { name: /hold to record voice/i });
 
       fireEvent.pointerDown(microphone, { pointerId: 1 });
@@ -388,6 +406,7 @@ describe('MessageInput', () => {
     it('explains the HTTPS requirement before requesting a microphone', () => {
       Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
       renderInput({ conversationType: 'contact', voice: true });
+      openActions();
       fireEvent.pointerDown(screen.getByRole('button', { name: /hold to record voice/i }));
       expect(mockToast.error).toHaveBeenCalledWith(
         'Voice recording requires HTTPS to access your microphone.',
@@ -401,6 +420,7 @@ describe('MessageInput', () => {
       renderInput({ conversationType: 'contact', voice: true });
       const picker = screen.getByLabelText('Choose image') as HTMLInputElement;
       const click = vi.spyOn(picker, 'click');
+      openActions();
       fireEvent.click(screen.getByRole('button', { name: /attach image/i }));
       expect(click).toHaveBeenCalledOnce();
 
@@ -540,10 +560,91 @@ describe('MessageInput', () => {
     });
   });
 
+  describe('the "+" options tray', () => {
+    it('rests as one button and reveals all three actions when opened', () => {
+      renderInput({ conversationType: 'contact', voice: true });
+
+      expect(screen.getByRole('button', { name: 'Show message options' })).toBeVisible();
+      expect(screen.queryByRole('button', { name: 'Add emoji' })).toBeNull();
+
+      openActions();
+
+      expect(screen.getByRole('button', { name: 'Add emoji' })).toBeVisible();
+      expect(screen.getByRole('button', { name: /attach image/i })).toBeVisible();
+      expect(screen.getByRole('button', { name: /hold to record voice/i })).toBeVisible();
+    });
+
+    it('reports its state to assistive tech and closes again on a second press', () => {
+      renderInput({ conversationType: 'contact', voice: true });
+
+      const toggle = screen.getByRole('button', { name: 'Show message options' });
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+      openActions();
+      const open = screen.getByRole('button', { name: 'Hide message options' });
+      expect(open).toHaveAttribute('aria-expanded', 'true');
+
+      fireEvent.click(open);
+      expect(screen.queryByRole('button', { name: 'Add emoji' })).toBeNull();
+    });
+
+    it('skips the tray when emoji is the only action available', () => {
+      // Hiding a lone button behind a second tap buys nothing.
+      renderInput({ conversationType: 'contact' });
+
+      expect(screen.queryByRole('button', { name: 'Show message options' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Add emoji' })).toBeVisible();
+    });
+
+    it('collapses once an emoji has been inserted', () => {
+      renderInput({ conversationType: 'contact', voice: true });
+
+      openActions();
+      fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Insert 😀' }));
+
+      expect(getInput()).toHaveValue('😀');
+      expect(screen.getByRole('button', { name: 'Show message options' })).toBeVisible();
+    });
+
+    it('collapses once a photo has been chosen', async () => {
+      renderInput({ conversationType: 'contact', voice: true });
+
+      openActions();
+      const file = new File(['source'], 'photo.png', { type: 'image/png' });
+      fireEvent.change(screen.getByLabelText('Choose image'), { target: { files: [file] } });
+
+      expect(await screen.findByAltText('Image attachment preview')).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Show message options' })).toBeVisible();
+    });
+
+    it('keeps the file input mounted while collapsed', () => {
+      // The tray closes the instant a file is picked, so an input that unmounted
+      // with it would drop the change event the OS dialog is about to deliver.
+      renderInput({ conversationType: 'contact', voice: true });
+
+      expect(screen.getByLabelText('Choose image')).toBeInTheDocument();
+    });
+
+    it('collapses after a message is sent', async () => {
+      renderInput({ conversationType: 'contact', voice: true });
+
+      openActions();
+      fireEvent.change(getInput(), { target: { value: 'Hello' } });
+      fireEvent.click(getSendButton());
+
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith('Hello'));
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Show message options' })).toBeVisible()
+      );
+    });
+  });
+
   describe('emoji picker', () => {
     it('opens the picker and inserts an emoji into the message', () => {
       renderInput({ conversationType: 'contact', voice: true });
 
+      openActions();
       fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
       expect(screen.getByRole('dialog', { name: 'Emoji picker' })).toBeVisible();
       fireEvent.click(screen.getByRole('button', { name: 'Insert 😀' }));

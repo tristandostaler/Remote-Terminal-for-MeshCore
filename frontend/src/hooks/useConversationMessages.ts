@@ -4,6 +4,24 @@ import { api, isAbortError } from '../api';
 import type { Conversation, Message, MessagePath } from '../types';
 import { getMessageContentKey } from '../utils/messageIdentity';
 
+/** The send-progress fields a `message_status` event carries. */
+export interface MessageSendStatusUpdate {
+  send_state: Message['send_state'];
+  send_attempts: number | null;
+  send_max_attempts: number | null;
+}
+
+function applySendStatus(message: Message, status: MessageSendStatusUpdate): Message {
+  return {
+    ...message,
+    send_state: status.send_state,
+    // The cap is only rewritten when the event carries one, so a status event
+    // that omits it does not blank out the "N of M" the message already knows.
+    send_attempts: status.send_attempts ?? message.send_attempts,
+    send_max_attempts: status.send_max_attempts ?? message.send_max_attempts,
+  };
+}
+
 const MAX_PENDING_ACKS = 500;
 const MESSAGE_PAGE_SIZE = 200;
 export const MAX_CACHED_CONVERSATIONS = 20;
@@ -104,6 +122,34 @@ export class ConversationMessageCache {
         ...(packetId !== undefined && { packet_id: packetId }),
       };
       entry.messages = updated;
+      return;
+    }
+  }
+
+  /**
+   * Apply a send-progress update. Unlike `updateAck` this does not take a max --
+   * progress only moves forward when the backend says so, and the backend is the
+   * only writer.
+   */
+  updateSendStatus(messageId: number, status: MessageSendStatusUpdate): void {
+    for (const entry of this.cache.values()) {
+      const index = entry.messages.findIndex((message) => message.id === messageId);
+      if (index < 0) continue;
+      const updated = [...entry.messages];
+      updated[index] = applySendStatus(updated[index], status);
+      entry.messages = updated;
+      return;
+    }
+  }
+
+  /** Drop a deleted message from every conversation that holds it. */
+  removeMessage(messageId: number): void {
+    for (const entry of this.cache.values()) {
+      const index = entry.messages.findIndex((message) => message.id === messageId);
+      if (index < 0) continue;
+      const removed = entry.messages[index];
+      entry.messages = entry.messages.filter((message) => message.id !== messageId);
+      entry.contentKeys.delete(getMessageContentKey(removed));
       return;
     }
   }
@@ -268,6 +314,8 @@ interface UseConversationMessagesResult {
     paths?: MessagePath[],
     packetId?: number | null
   ) => void;
+  receiveMessageStatus: (messageId: number, status: MessageSendStatusUpdate) => void;
+  receiveMessageDeleted: (messageId: number) => void;
   reconcileOnReconnect: () => void;
   renameConversationMessages: (oldId: string, newId: string) => void;
   removeConversationMessages: (conversationId: string) => void;
@@ -868,6 +916,31 @@ export function useConversationMessages(
     [updateMessageAck]
   );
 
+  const receiveMessageStatus = useCallback(
+    (messageId: number, status: MessageSendStatusUpdate) => {
+      // No pending-update bookkeeping as ACKs have: send progress is cosmetic,
+      // and a message that is not loaded yet will carry the current state when it
+      // is fetched.
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === messageId);
+        if (idx < 0) return prev;
+        const updated = [...prev];
+        updated[idx] = applySendStatus(updated[idx], status);
+        return updated;
+      });
+      conversationMessageCache.updateSendStatus(messageId, status);
+    },
+    [setMessages]
+  );
+
+  const receiveMessageDeleted = useCallback(
+    (messageId: number) => {
+      setMessages((prev) => prev.filter((message) => message.id !== messageId));
+      conversationMessageCache.removeMessage(messageId);
+    },
+    [setMessages]
+  );
+
   const observeMessage = useCallback(
     (msg: Message): { added: boolean; activeConversation: boolean } => {
       const msgWithPendingAck = applyPendingAck(msg);
@@ -923,6 +996,8 @@ export function useConversationMessages(
     reloadCurrentConversation,
     observeMessage,
     receiveMessageAck,
+    receiveMessageStatus,
+    receiveMessageDeleted,
     reconcileOnReconnect,
     renameConversationMessages,
     removeConversationMessages,

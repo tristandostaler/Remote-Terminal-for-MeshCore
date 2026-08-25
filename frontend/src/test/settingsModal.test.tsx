@@ -74,6 +74,7 @@ const baseSettings: AppSettings = {
   tracked_telemetry_repeaters: [],
   tracked_telemetry_contacts: [],
   auto_resend_channel: false,
+  max_message_retries: 3,
   telemetry_interval_hours: 8,
   telemetry_routed_hourly: false,
 };

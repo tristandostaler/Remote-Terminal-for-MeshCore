@@ -30,6 +30,8 @@ import { ContactAvatar } from './ContactAvatar';
 import { PathModal } from './PathModal';
 import { RawPacketInspectorDialog } from './RawPacketDetailModal';
 import { toast } from './ui/sonner';
+import { Button } from './ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { handleKeyboardActivate } from '../utils/a11y';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { cn } from '@/lib/utils';
@@ -101,7 +103,14 @@ function ImageMessage({ message, content }: { message: Message; content: string 
           ) : (
             <Download size={30} />
           )}
-          <span className="text-xs">
+          <span
+            className="text-xs"
+            title={
+              state === 'loading'
+                ? `${received} of ${envelope.fragmentCount} fragments received so far`
+                : undefined
+            }
+          >
             {state === 'loading'
               ? `${received}/${envelope.fragmentCount}`
               : state === 'unavailable'
@@ -110,7 +119,14 @@ function ImageMessage({ message, content }: { message: Message; content: string 
           </span>
         </button>
       )}
-      <div className="mt-1 text-[0.6875rem] text-muted-foreground">
+      <div
+        className="mt-1 text-[0.6875rem] text-muted-foreground"
+        title={
+          `${label}, split across ${envelope.fragmentCount} mesh messages. ` +
+          'The time is the estimated airtime for one hop to carry all of them — ' +
+          'each further hop repeats that cost.'
+        }
+      >
         {label} · {envelope.fragmentCount} fragments · ~
         {Math.max(
           1,
@@ -288,7 +304,13 @@ function AeicImageMessage({ message, chunk }: { message: Message; chunk?: AeicCh
           </span>
         </button>
       )}
-      <div className="mt-1 text-[0.6875rem] text-muted-foreground">
+      <div
+        className="mt-1 text-[0.6875rem] text-muted-foreground"
+        title={
+          `${square}×${square} pixels, encoded by the AI image codec into ` +
+          `${approxBytes} bytes and carried as ${parts} mesh message${parts === 1 ? '' : 's'}`
+        }
+      >
         {square}px AI · {approxBytes} B · {parts} msg{parts === 1 ? '' : 's'}
       </div>
       {fullscreen && contentUrl && (
@@ -392,6 +414,12 @@ interface MessageListProps {
   onSenderClick?: (sender: string) => void;
   onLoadOlder?: () => void;
   onResendChannelMessage?: (messageId: number, newTimestamp?: boolean) => void;
+  /** Retransmit an outgoing message. `newTimestamp` applies to channel messages only. */
+  onRetryMessage?: (message: Message, newTimestamp?: boolean) => void;
+  /** Stop the transmissions not yet made for an outgoing message. */
+  onCancelMessage?: (message: Message) => void;
+  /** Drop the message from our history. Local only -- the mesh has no unsend. */
+  onDeleteMessage?: (message: Message) => void;
   onChannelReferenceClick?: (channelName: string) => void;
   radioName?: string;
   config?: RadioConfig | null;
@@ -662,23 +690,52 @@ function renderTextWithMentions(
 interface HopCountBadgeProps {
   paths: MessagePath[];
   onClick: () => void;
-  variant: 'header' | 'inline';
+  /** Our own message, so the paths are echoes coming back rather than an arrival. */
+  outgoing?: boolean;
 }
 
-function HopCountBadge({ paths, onClick, variant }: HopCountBadgeProps) {
+/** One entry of the hop badge in words: "direct", "1 hop", "3 hops". */
+function describeHopCount(part: string): string {
+  if (part === 'd') return 'direct';
+  return part === '1' ? '1 hop' : `${part} hops`;
+}
+
+/**
+ * Spell out what the hop badge's digits mean.
+ *
+ * "(d/2/3)" is compact enough to be unreadable if you do not already know the
+ * convention, so the tooltip names every number instead of only advertising the
+ * click. One entry per receive path, ascending.
+ */
+function hopCountTitle(display: string, widthLabel: string | null, outgoing: boolean): string {
+  const parts = display.split('/');
+  const readable = parts.map(describeHopCount);
+  const width = widthLabel ? `, ${widthLabel} per hop` : '';
+
+  let summary: string;
+  if (parts.length > 1) {
+    const verb = outgoing ? 'Echoed back' : 'Heard';
+    summary = `${verb} ${parts.length} times: ${readable.join(', ')}`;
+  } else {
+    const verb = outgoing ? 'Echoed back' : 'Arrived';
+    summary =
+      readable[0] === 'direct'
+        ? `${verb} direct, with no repeaters in between`
+        : `${verb} over ${readable[0]}`;
+  }
+  return `${summary}${width} — click to see the route`;
+}
+
+function HopCountBadge({ paths, onClick, outgoing = false }: HopCountBadgeProps) {
   const { showPathHopWidth } = usePathHopWidth();
   const hopInfo = formatHopCounts(paths);
   const widthLabel = showPathHopWidth ? formatPathHopWidths(paths) : null;
   const label = widthLabel ? `(${hopInfo.display} · ${widthLabel})` : `(${hopInfo.display})`;
-
-  const className =
-    variant === 'header'
-      ? 'font-normal text-muted-foreground ml-1 text-[0.6875rem] cursor-pointer hover:text-primary hover:underline'
-      : 'text-[0.625rem] text-muted-foreground ml-1 cursor-pointer hover:text-primary hover:underline';
+  const title = hopCountTitle(hopInfo.display, widthLabel, outgoing);
 
   return (
     <span
-      className={className}
+      className="text-[0.625rem] text-muted-foreground cursor-pointer hover:text-primary hover:underline"
       role="button"
       tabIndex={0}
       onKeyDown={handleKeyboardActivate}
@@ -686,8 +743,8 @@ function HopCountBadge({ paths, onClick, variant }: HopCountBadgeProps) {
         e.stopPropagation();
         onClick();
       }}
-      title={widthLabel ? `View message path (${widthLabel} per hop)` : 'View message path'}
-      aria-label={`${hopInfo.display}${widthLabel ? `, ${widthLabel} per hop` : ''}, view path`}
+      title={title}
+      aria-label={title}
     >
       {label}
     </span>
@@ -698,11 +755,295 @@ function HopCountBadge({ paths, onClick, variant }: HopCountBadgeProps) {
 function RegionBadge({ region }: { region: string }) {
   return (
     <span
-      className="ml-1.5 align-middle text-[0.625rem] uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
-      title={`Regional scope: ${region}`}
+      className="align-middle text-[0.625rem] uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
+      title={`Region-scoped flood: only repeaters configured for "${region}" relay this`}
     >
       {region}
     </span>
+  );
+}
+
+/**
+ * Where an outgoing message's send got to, for display. `delivered` wins over
+ * everything: an ACK that lands after the attempts ran out still means it
+ * arrived. `unknown` covers rows stored before send tracking existed.
+ */
+type DisplaySendStatus = 'delivered' | 'sending' | 'sent' | 'failed' | 'canceled' | 'unknown';
+
+function displaySendStatus(msg: Message): DisplaySendStatus {
+  if (msg.acked > 0) return 'delivered';
+  if (!msg.send_state) return 'unknown';
+  return msg.send_state;
+}
+
+const SEND_STATUS_GLYPHS: Record<DisplaySendStatus, string> = {
+  delivered: '✓✓',
+  sent: '✓',
+  sending: '···',
+  failed: '✕',
+  canceled: '⊘',
+  unknown: '?',
+};
+
+/**
+ * The compression badge, e.g. "53% mcmp3". Null when the body rode as plain text
+ * (MCMP off for the conversation, or v2's "only if smaller" gate declined).
+ *
+ * The percentage is measured the way MCO Advanced measures it -- over the
+ * compressed-text segment, which for v3 excludes the container header -- so the
+ * two clients quote the same number for the same message. The true on-air size
+ * lives in the tooltip, where it cannot be mistaken for the ratio.
+ */
+function compressionLabel(msg: Message): string | null {
+  if (!msg.compression) return null;
+  const plainBytes = msg.plain_bytes ?? 0;
+  const ratioBytes = msg.payload_bytes ?? msg.wire_bytes ?? 0;
+  if (plainBytes <= 0) return msg.compression;
+  const saved = Math.max(
+    0,
+    Math.min(100, Math.round(((plainBytes - ratioBytes) * 100) / plainBytes))
+  );
+  return `${saved}% ${msg.compression}`;
+}
+
+function compressionTitle(msg: Message): string | undefined {
+  if (!msg.compression) return undefined;
+  const version = msg.compression === 'mcmp3' ? 'v3' : 'v2';
+  const parts = [`Compressed with MCMP ${version}`];
+  if (msg.plain_bytes != null && msg.wire_bytes != null) {
+    parts.push(`${msg.plain_bytes} B of text went out as ${msg.wire_bytes} B on air`);
+  }
+  if (
+    msg.compression === 'mcmp3' &&
+    msg.payload_bytes != null &&
+    msg.wire_bytes != null &&
+    msg.payload_bytes !== msg.wire_bytes
+  ) {
+    parts.push(
+      `the percentage covers the ${msg.payload_bytes} B of compressed text, excluding the v3 container`
+    );
+  }
+  return parts.join(' — ');
+}
+
+const SEND_STATUS_TITLES: Record<DisplaySendStatus, string> = {
+  // One tick versus two is the WhatsApp convention, and it is *relative* -- it
+  // only means anything if you know the other mark exists. So each tooltip names
+  // its own tick count instead of leaving the reader to infer the scale from a
+  // mark they may never have seen. Meaning first, glyph second, so the sentence
+  // still reads sensibly to a screen reader that cannot see either.
+  delivered: 'Delivered (two ticks)',
+  sent: 'Sent (one tick) — the radio accepted it, but nothing has confirmed it yet',
+  sending: 'Sending — still retrying',
+  failed: 'Out of attempts without an acknowledgement',
+  canceled: 'Sending cancelled',
+  // Refined by conversation type in sendStatusTitle; this is the neutral fallback.
+  unknown: 'No confirmation heard yet',
+};
+
+/**
+ * What the status glyph means, including the number stuck to it.
+ *
+ * A bare "✓✓3" says nothing about what was counted, and the answer differs by
+ * conversation: on a channel each count is a repeater that echoed us back, on a
+ * direct message it is an acknowledgement from the recipient.
+ */
+function sendStatusTitle(message: Message, status: DisplaySendStatus): string {
+  const base = SEND_STATUS_TITLES[status];
+  if (status === 'unknown') {
+    // A channel message is confirmed by repeater echoes, a direct one by an ACK
+    // from the recipient -- saying "repeats" on a DM would name the wrong thing.
+    return message.type === 'CHAN'
+      ? 'No repeater echoes heard yet'
+      : 'No acknowledgement heard yet';
+  }
+  if (status !== 'delivered') return base;
+  if (message.type === 'CHAN') {
+    const count = Math.max(1, message.acked);
+    return `${base} — ${count} repeater echo${count === 1 ? '' : 'es'} heard`;
+  }
+  return `${base} — acknowledged by the recipient`;
+}
+
+/** The time, said in full and labelled by direction. */
+function timestampTitle(message: Message): string {
+  const stamp = new Date(message.received_at * 1000).toLocaleString();
+  return `${message.outgoing ? 'Sent' : 'Received'} ${stamp}`;
+}
+
+/** Both halves of the "2/3" counter, and where the limit comes from. */
+function attemptsTitle(attempts: number, maxAttempts: number): string {
+  return (
+    `Transmitted ${attempts} time${attempts === 1 ? '' : 's'}, ` +
+    `up to ${maxAttempts} allowed for this message ` +
+    '(Settings › Radio › Direct Message Send Attempts)'
+  );
+}
+
+/**
+ * The small line under every message: when it happened, how it travelled, and --
+ * for our own messages -- how the send went. MCO Advanced puts the same facts in
+ * one row rather than scattering them around the bubble, which keeps the bubble
+ * itself readable as the message grows a codec badge and an attempt counter.
+ */
+function MessageMetaLine({
+  message,
+  paths,
+  onShowPaths,
+  onOpenActions,
+}: {
+  message: Message;
+  paths: MessagePath[] | null;
+  onShowPaths?: () => void;
+  onOpenActions?: () => void;
+}) {
+  const status = message.outgoing ? displaySendStatus(message) : null;
+  const compression = compressionLabel(message);
+  const attempts = message.send_attempts ?? 0;
+  const maxAttempts = message.send_max_attempts ?? 0;
+  // Only worth saying once a retry has actually happened -- "1 of 3" on every
+  // message would be noise.
+  const showAttempts = attempts > 1 && maxAttempts > 0;
+  // Multiple echoes on a channel message are worth showing as a count: each one
+  // is a separate repeater that heard us.
+  const glyph = status
+    ? SEND_STATUS_GLYPHS[status] +
+      (status === 'delivered' && message.acked > 1 ? message.acked : '')
+    : null;
+  const statusTitle = status ? sendStatusTitle(message, status) : null;
+
+  return (
+    <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[0.625rem] leading-tight text-muted-foreground">
+      <span title={timestampTitle(message)}>{formatTime(message.received_at)}</span>
+      {paths && paths.length > 0 && onShowPaths && (
+        <HopCountBadge paths={paths} onClick={onShowPaths} outgoing={message.outgoing} />
+      )}
+      {message.region && <RegionBadge region={message.region} />}
+      {status &&
+        glyph &&
+        statusTitle &&
+        (onShowPaths ? (
+          <span
+            className="cursor-pointer hover:text-primary"
+            role="button"
+            tabIndex={0}
+            onKeyDown={handleKeyboardActivate}
+            onClick={(e) => {
+              e.stopPropagation();
+              onShowPaths();
+            }}
+            title={`${statusTitle} — click to see the delivery detail`}
+            aria-label={`${statusTitle}, click to see the delivery detail`}
+          >
+            {glyph}
+          </span>
+        ) : (
+          <span title={statusTitle} aria-label={statusTitle}>
+            {glyph}
+          </span>
+        ))}
+      {showAttempts && (
+        <span title={attemptsTitle(attempts, maxAttempts)}>
+          {attempts}/{maxAttempts}
+        </span>
+      )}
+      {compression && (
+        <span className="font-mono" title={compressionTitle(message)}>
+          {compression}
+        </span>
+      )}
+      {onOpenActions && (
+        <button
+          type="button"
+          className="ml-auto px-1 leading-none hover:text-primary"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenActions();
+          }}
+          title="Message actions — copy, retry, cancel or delete"
+          aria-label="Message actions"
+        >
+          ⋯
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Per-message actions. A dialog rather than an inline popover: the list is
+ * virtualized, so a popover anchored inside a row gets clipped by the scroll
+ * container -- and a centred sheet is the same interaction on phone and desktop.
+ *
+ * Cancel is offered only while transmissions are still scheduled; delete is
+ * always offered and cancels as a side effect, which is what "delete" has to mean
+ * for a message we might otherwise keep re-transmitting.
+ */
+function MessageActionsDialog({
+  message,
+  onClose,
+  onCopy,
+  onRetry,
+  onCancel,
+  onDelete,
+}: {
+  message: Message;
+  onClose: () => void;
+  onCopy: (message: Message) => void | Promise<void>;
+  onRetry?: (message: Message, newTimestamp?: boolean) => void;
+  onCancel?: (message: Message) => void;
+  onDelete?: (message: Message) => void;
+}) {
+  const status = message.outgoing ? displaySendStatus(message) : null;
+  const canCancel = !!onCancel && status === 'sending';
+  const canRetry = !!onRetry && message.outgoing;
+
+  const run = (action: () => void | Promise<void>) => () => {
+    onClose();
+    void action();
+  };
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Message actions</DialogTitle>
+          <DialogDescription className="line-clamp-2 break-words">{message.text}</DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-2">
+          <Button variant="outline" onClick={run(() => onCopy(message))}>
+            Copy text
+          </Button>
+          {canRetry && (
+            <Button
+              variant="outline"
+              onClick={run(() =>
+                // A channel message cannot be retried byte-perfect outside its
+                // 30s dedup window, so a manual channel retry always goes out
+                // under a fresh timestamp as a new packet.
+                onRetry!(message, message.type === 'CHAN')
+              )}
+            >
+              Retry sending
+            </Button>
+          )}
+          {canCancel && (
+            <Button variant="outline" onClick={run(() => onCancel!(message))}>
+              Cancel sending
+            </Button>
+          )}
+          {onDelete && (
+            <Button variant="destructive" onClick={run(() => onDelete(message))}>
+              Delete from history
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Retry and cancel only affect what we transmit next — anything already on air cannot be
+          recalled, and deleting removes our copy only.
+        </p>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -740,6 +1081,9 @@ export function MessageList({
   onSenderClick,
   onLoadOlder,
   onResendChannelMessage,
+  onRetryMessage,
+  onCancelMessage,
+  onDeleteMessage,
   onChannelReferenceClick,
   radioName,
   config,
@@ -780,6 +1124,7 @@ export function MessageList({
     isOutgoingChan?: boolean;
   } | null>(null);
   const [resendableIds, setResendableIds] = useState<Set<number>>(new Set());
+  const [actionsTarget, setActionsTarget] = useState<Message | null>(null);
   const resendTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
   const packetCacheRef = useRef<Map<number, RawPacket>>(new Map());
   const packetSignalOverrideRef = useRef<{ rssi: number | null; snr: number | null } | undefined>(
@@ -1256,6 +1601,19 @@ export function MessageList({
     [config?.name, config?.public_key, config?.lat, config?.lon, config?.path_hash_mode]
   );
 
+  // Copy / retry / cancel / delete: the menu only appears when the host wired at
+  // least one of them, so a read-only embedding of the list stays read-only.
+  const hasMessageActions = !!(onRetryMessage || onCancelMessage || onDeleteMessage);
+
+  const copyMessageText = useCallback(async (message: Message) => {
+    try {
+      await navigator.clipboard.writeText(message.text);
+      toast.success('Message copied');
+    } catch {
+      toast.error('Could not copy the message');
+    }
+  }, []);
+
   // Derive live so the byte-perfect button disables if the 30s window expires while modal is open
   const isSelectedMessageResendable =
     selectedPath?.messageId !== undefined && resendableIds.has(selectedPath.messageId);
@@ -1627,6 +1985,16 @@ export function MessageList({
                       msg.outgoing ? 'bg-msg-outgoing' : 'bg-msg-incoming',
                       highlightedMessageId === msg.id && 'message-highlight'
                     )}
+                    // Right-click anywhere on the bubble is the desktop habit;
+                    // the meta line's ⋯ button covers touch and keyboard.
+                    onContextMenu={
+                      hasMessageActions
+                        ? (e) => {
+                            e.preventDefault();
+                            setActionsTarget(msg);
+                          }
+                        : undefined
+                    }
                   >
                     {showAvatar && (
                       <div className="text-[0.8125rem] font-semibold text-foreground mb-0.5">
@@ -1644,24 +2012,6 @@ export function MessageList({
                         ) : (
                           displaySender
                         )}
-                        <span className="font-normal text-muted-foreground ml-2 text-[0.6875rem]">
-                          {formatTime(msg.received_at)}
-                        </span>
-                        {!msg.outgoing && msg.paths && msg.paths.length > 0 && (
-                          <HopCountBadge
-                            paths={msg.paths}
-                            variant="header"
-                            onClick={() =>
-                              setSelectedPath({
-                                paths: msg.paths!,
-                                senderInfo: getSenderInfo(msg, contact, directSenderName || sender),
-                                messageId: msg.id,
-                                packetId: msg.packet_id,
-                              })
-                            }
-                          />
-                        )}
-                        {msg.region && <RegionBadge region={msg.region} />}
                       </div>
                     )}
                     <div className="break-words whitespace-pre-wrap">
@@ -1687,85 +2037,30 @@ export function MessageList({
                           </span>
                         ))
                       )}
-                      {!showAvatar && (
-                        <>
-                          <span className="text-[0.625rem] text-muted-foreground ml-2">
-                            {formatTime(msg.received_at)}
-                          </span>
-                          {!msg.outgoing && msg.paths && msg.paths.length > 0 && (
-                            <HopCountBadge
-                              paths={msg.paths}
-                              variant="inline"
-                              onClick={() =>
-                                setSelectedPath({
-                                  paths: msg.paths!,
-                                  senderInfo: getSenderInfo(
-                                    msg,
-                                    contact,
-                                    directSenderName || sender
-                                  ),
-                                  messageId: msg.id,
-                                  packetId: msg.packet_id,
-                                })
-                              }
-                            />
-                          )}
-                          {msg.region && <RegionBadge region={msg.region} />}
-                        </>
-                      )}
-                      {msg.outgoing &&
-                        (msg.acked > 0 ? (
-                          msg.paths && msg.paths.length > 0 ? (
-                            <span
-                              className="text-muted-foreground cursor-pointer hover:text-primary"
-                              role="button"
-                              tabIndex={0}
-                              onKeyDown={handleKeyboardActivate}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedPath({
-                                  paths: msg.paths!,
-                                  senderInfo: selfSenderInfo,
-                                  messageId: msg.id,
-                                  packetId: msg.packet_id,
-                                  isOutgoingChan: msg.type === 'CHAN' && !!onResendChannelMessage,
-                                });
-                              }}
-                              title="View echo paths"
-                              aria-label={`Acknowledged, ${msg.acked} echo${msg.acked !== 1 ? 's' : ''} — view paths`}
-                            >{` ✓${msg.acked > 1 ? msg.acked : ''}`}</span>
-                          ) : (
-                            <span className="text-muted-foreground">{` ✓${msg.acked > 1 ? msg.acked : ''}`}</span>
-                          )
-                        ) : onResendChannelMessage && msg.type === 'CHAN' ? (
-                          <span
-                            className="text-muted-foreground cursor-pointer hover:text-primary"
-                            role="button"
-                            tabIndex={0}
-                            onKeyDown={handleKeyboardActivate}
-                            onClick={(e) => {
-                              e.stopPropagation();
+                    </div>
+                    <MessageMetaLine
+                      message={msg}
+                      paths={msg.paths ?? null}
+                      onShowPaths={
+                        // The paths dialog doubles as the outgoing-channel status
+                        // panel, so an unechoed channel message still opens it.
+                        (msg.paths && msg.paths.length > 0) ||
+                        (msg.outgoing && msg.type === 'CHAN' && !!onResendChannelMessage)
+                          ? () =>
                               setSelectedPath({
-                                paths: [],
-                                senderInfo: selfSenderInfo,
+                                paths: msg.paths ?? [],
+                                senderInfo: msg.outgoing
+                                  ? selfSenderInfo
+                                  : getSenderInfo(msg, contact, directSenderName || sender),
                                 messageId: msg.id,
                                 packetId: msg.packet_id,
-                                isOutgoingChan: true,
-                              });
-                            }}
-                            title="Message status"
-                            aria-label="No echoes yet — view message status"
-                          >
-                            {' '}
-                            ?
-                          </span>
-                        ) : (
-                          <span className="text-muted-foreground" title="No repeats heard yet">
-                            {' '}
-                            ?
-                          </span>
-                        ))}
-                    </div>
+                                isOutgoingChan:
+                                  msg.outgoing && msg.type === 'CHAN' && !!onResendChannelMessage,
+                              })
+                          : undefined
+                      }
+                      onOpenActions={hasMessageActions ? () => setActionsTarget(msg) : undefined}
+                    />
                   </div>
                 </div>
               </div>
@@ -1889,6 +2184,16 @@ export function MessageList({
           description="On-demand raw packet analysis for a message-backed archival packet."
           notice={ANALYZE_PACKET_NOTICE}
           signalOverride={packetSignalOverrideRef.current}
+        />
+      )}
+      {actionsTarget && (
+        <MessageActionsDialog
+          message={actionsTarget}
+          onClose={() => setActionsTarget(null)}
+          onCopy={copyMessageText}
+          onRetry={onRetryMessage}
+          onCancel={onCancelMessage}
+          onDelete={onDeleteMessage}
         />
       )}
     </div>

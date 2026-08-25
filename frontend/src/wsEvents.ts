@@ -5,6 +5,7 @@ import type {
   HealthStatus,
   Message,
   MessagePath,
+  MessageSendState,
   RawPacket,
 } from './types';
 
@@ -13,6 +14,22 @@ export interface MessageAckedPayload {
   ack_count: number;
   paths?: MessagePath[];
   packet_id?: number | null;
+}
+
+/**
+ * Send progress for an outgoing message. Separate from `message_acked` because
+ * progress and delivery are different facts: a message can exhaust its attempts
+ * without an ACK, and an ACK can land after the attempts are done.
+ */
+export interface MessageStatusPayload {
+  message_id: number;
+  send_state: MessageSendState | null;
+  send_attempts: number | null;
+  send_max_attempts: number | null;
+}
+
+export interface MessageDeletedPayload {
+  message_id: number;
 }
 
 export interface ContactDeletedPayload {
@@ -43,6 +60,8 @@ export type KnownWsEvent =
   | { type: 'channel_deleted'; data: ChannelDeletedPayload }
   | { type: 'raw_packet'; data: RawPacket }
   | { type: 'message_acked'; data: MessageAckedPayload }
+  | { type: 'message_status'; data: MessageStatusPayload }
+  | { type: 'message_deleted'; data: MessageDeletedPayload }
   | { type: 'bot_log'; data: BotLogEntry }
   | { type: 'error'; data: ToastPayload }
   | { type: 'success'; data: ToastPayload }
@@ -77,6 +96,8 @@ export function parseWsEvent(raw: string): ParsedWsEvent {
     case 'channel_deleted':
     case 'raw_packet':
     case 'message_acked':
+    case 'message_status':
+    case 'message_deleted':
     case 'bot_log':
     case 'error':
     case 'success':
