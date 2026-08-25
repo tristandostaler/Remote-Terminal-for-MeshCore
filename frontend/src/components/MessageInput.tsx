@@ -128,7 +128,14 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
   const voiceHeldRef = useRef(false);
   const cancelVoiceRef = useRef(false);
   const voiceStartedAtRef = useRef(0);
+  // The 10s cap has to be cancellable. Left running, the timer from a released
+  // recording fires part-way through the *next* one and cuts it short.
+  const voiceTimeoutRef = useRef<number | null>(null);
   const [recording, setRecording] = useState(false);
+  // getUserMedia is awaited inside the press, and on a phone that is hundreds of
+  // milliseconds (plus a permission prompt the first time). Without a state for
+  // "pressed but not yet capturing" the button looks dead for that whole window.
+  const [arming, setArming] = useState(false);
   const [voiceSending, setVoiceSending] = useState(false);
   const [cancelVoice, setCancelVoice] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -250,17 +257,29 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
 
   const finishVoice = useCallback(
     async (cancel = false) => {
+      if (voiceTimeoutRef.current !== null) {
+        window.clearTimeout(voiceTimeoutRef.current);
+        voiceTimeoutRef.current = null;
+      }
       const capture = captureRef.current;
       if (!capture) return;
       captureRef.current = null;
       setRecording(false);
+      setArming(false);
       try {
         if (cancel || cancelVoiceRef.current) {
           await capture.cancel();
           return;
         }
         const result = await capture.stop();
-        if (result.durationMs < 200) return;
+        if (result.durationMs < 200) {
+          // Silence here is indistinguishable from a broken button, and a tap
+          // instead of a hold is the easiest mistake to make on a touchscreen.
+          toast.info('Hold the microphone to record', {
+            description: 'That press was too short to capture anything.',
+          });
+          return;
+        }
         if (!voiceConversation) return;
         setVoiceSending(true);
         await api.sendVoice(voiceConversation.type, voiceConversation.key, result.pcm);
@@ -281,6 +300,8 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
   const startVoice = useCallback(
     async (event: PointerEvent<HTMLButtonElement>) => {
       if (!voiceConversation || disabled || voiceSending) return;
+      // A second press while one capture is already live would orphan the first.
+      if (recording || arming || captureRef.current) return;
       if (!window.isSecureContext) {
         toast.error('Voice recording requires HTTPS to access your microphone.', {
           action: {
@@ -294,26 +315,33 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
       }
       event.currentTarget.setPointerCapture?.(event.pointerId);
       voiceHeldRef.current = true;
+      // Acknowledge the press before awaiting the microphone, so the composer
+      // shows something is happening during the getUserMedia round trip.
+      setArming(true);
       const capture = new VoiceCapture();
       try {
         await capture.start();
         if (!voiceHeldRef.current) {
           await capture.cancel();
+          setArming(false);
           return;
         }
         captureRef.current = capture;
         voiceStartedAtRef.current = performance.now();
+        setArming(false);
         setRecording(true);
-        window.setTimeout(() => {
+        voiceTimeoutRef.current = window.setTimeout(() => {
+          voiceTimeoutRef.current = null;
           void finishVoice(false);
         }, 10_000);
       } catch (error) {
+        setArming(false);
         toast.error('Microphone unavailable', {
           description: error instanceof Error ? error.message : String(error),
         });
       }
     },
-    [disabled, finishVoice, voiceConversation, voiceSending]
+    [arming, disabled, finishVoice, recording, voiceConversation, voiceSending]
   );
 
   /** Resize textarea to fit content, clamped between 1 row and ~6 rows. */
@@ -496,6 +524,11 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
 
   const canSubmit = text.trim().length > 0;
 
+  // "The voice gesture owns the composer": true from the moment the mic is
+  // pressed, not from the moment audio starts flowing, so the row does not sit
+  // unchanged through the getUserMedia round trip.
+  const voiceActive = arming || recording;
+
   const insertEmoji = useCallback(
     (emoji: string) => {
       const input = textareaRef.current;
@@ -636,18 +669,116 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
         </div>
       )}
       <div className="relative flex gap-2 items-end">
-        {recording && voiceConversation && (
+        {voiceConversation && (
+          <>
+            {/* Mounted whether or not the tray is open: the tray closes the
+                moment a file is picked, and an unmounted input would drop the
+                change event the OS dialog is about to deliver. */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/avif"
+              className="sr-only"
+              aria-label="Choose image"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (!file) return;
+                setImageFile(file);
+                setActionsOpen(false);
+              }}
+            />
+          </>
+        )}
+        {!voiceActive && voiceConversation && (
           <Button
             type="button"
-            variant={recording ? 'destructive' : 'outline'}
+            variant="outline"
+            size="icon"
+            className="flex-shrink-0 rounded-full"
+            aria-label={actionsOpen ? 'Hide message options' : 'Show message options'}
+            aria-expanded={actionsOpen}
+            title="Emoji, photo and voice message"
+            disabled={disabled || sending}
+            onClick={() => {
+              setActionsOpen((open) => !open);
+              setEmojiPickerOpen(false);
+            }}
+          >
+            {actionsOpen ? <X size={18} /> : <Plus size={18} />}
+          </Button>
+        )}
+        {/* With no attachments available the tray would hide a single emoji
+            button behind a second tap, so it is skipped entirely. */}
+        {!voiceActive && (actionsOpen || !voiceConversation) && (
+          <div className="relative flex-shrink-0">
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="rounded-full"
+              aria-label="Add emoji"
+              aria-expanded={emojiPickerOpen}
+              disabled={disabled || sending}
+              onClick={() => setEmojiPickerOpen((open) => !open)}
+            >
+              <Smile size={18} />
+            </Button>
+            {emojiPickerOpen && (
+              <div
+                role="dialog"
+                aria-label="Emoji picker"
+                className="absolute bottom-12 left-0 z-20 grid w-56 grid-cols-6 gap-1 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
+              >
+                {COMPOSER_EMOJIS.map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-lg hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label={`Insert ${emoji}`}
+                    onClick={() => insertEmoji(emoji)}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {!voiceActive && actionsOpen && voiceConversation && (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="flex-shrink-0 rounded-full"
+            disabled={disabled || sending || imagePreparing || imageSending}
+            aria-label="Attach image"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <ImagePlus size={18} />
+          </Button>
+        )}
+        {/* ONE mic button, in a slot whose position does not change when
+            recording starts. The old code swapped it for a second button
+            elsewhere in the row, which disconnected the element the pointer was
+            captured to -- on touch that loses the pointerup that stops the
+            recording, leaving the 10s timeout as the only terminator. Keeping
+            the same DOM node across the state flip is the whole fix. */}
+        {voiceConversation && (actionsOpen || voiceActive) && (
+          <Button
+            type="button"
+            variant={voiceActive ? 'destructive' : 'outline'}
             size="icon"
             className={cn(
-              'flex-shrink-0 touch-none rounded-full',
+              'flex-shrink-0 touch-none select-none rounded-full',
               recording && !cancelVoice && 'animate-pulse'
             )}
+            // Stops iOS/Android raising the text-selection callout on a long
+            // press, which otherwise fights the gesture mid-recording.
+            style={{ WebkitTouchCallout: 'none' }}
+            onContextMenu={(event) => event.preventDefault()}
             disabled={disabled || voiceSending}
             aria-label={
-              recording ? 'Release to send voice message' : 'Hold to record voice message'
+              voiceActive ? 'Release to send voice message' : 'Hold to record voice message'
             }
             onPointerDown={startVoice}
             onPointerUp={() => {
@@ -674,7 +805,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
             {cancelVoice ? <X size={18} /> : <Mic size={18} />}
           </Button>
         )}
-        {recording ? (
+        {voiceActive ? (
           <div
             role="status"
             aria-live="polite"
@@ -685,160 +816,53 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
                 : 'border-border bg-muted/50 text-foreground'
             )}
           >
-            <span
-              className={cn(
-                'h-2 w-2 shrink-0 rounded-full bg-destructive',
-                !cancelVoice && 'animate-pulse'
-              )}
-            />
-            <span className="w-10 shrink-0 tabular-nums font-medium">
-              {Math.floor(elapsed / 60)}:
-              {Math.floor(elapsed % 60)
-                .toString()
-                .padStart(2, '0')}
-            </span>
-            <span
-              className="flex h-5 flex-1 items-center justify-center gap-0.5"
-              aria-hidden="true"
-            >
-              {[2, 4, 3, 5, 3, 4, 2].map((height, index) => (
+            {/* A red dot and a running clock before any audio is flowing would
+                claim a recording that has not started. While arming, the bar
+                says only that the press was received. */}
+            {arming ? (
+              <>
+                <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  Starting microphone...
+                </span>
+              </>
+            ) : (
+              <>
                 <span
-                  key={index}
                   className={cn(
-                    'w-0.5 rounded-full bg-current opacity-60',
+                    'h-2 w-2 shrink-0 rounded-full bg-destructive',
                     !cancelVoice && 'animate-pulse'
                   )}
-                  style={{ height: `${height * 2}px`, animationDelay: `${index * 90}ms` }}
                 />
-              ))}
-            </span>
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {cancelVoice ? 'Release to cancel' : 'Release to send'}
-            </span>
+                <span className="w-10 shrink-0 tabular-nums font-medium">
+                  {Math.floor(elapsed / 60)}:
+                  {Math.floor(elapsed % 60)
+                    .toString()
+                    .padStart(2, '0')}
+                </span>
+                <span
+                  className="flex h-5 flex-1 items-center justify-center gap-0.5"
+                  aria-hidden="true"
+                >
+                  {[2, 4, 3, 5, 3, 4, 2].map((height, index) => (
+                    <span
+                      key={index}
+                      className={cn(
+                        'w-0.5 rounded-full bg-current opacity-60',
+                        !cancelVoice && 'animate-pulse'
+                      )}
+                      style={{ height: `${height * 2}px`, animationDelay: `${index * 90}ms` }}
+                    />
+                  ))}
+                </span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {cancelVoice ? 'Release to cancel' : 'Release to send'}
+                </span>
+              </>
+            )}
           </div>
         ) : (
           <>
-            {voiceConversation && (
-              <>
-                {/* Mounted whether or not the tray is open: the tray closes the
-                    moment a file is picked, and an unmounted input would drop
-                    the change event the OS dialog is about to deliver. */}
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp,image/avif"
-                  className="sr-only"
-                  aria-label="Choose image"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (!file) return;
-                    setImageFile(file);
-                    setActionsOpen(false);
-                  }}
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  className="flex-shrink-0 rounded-full"
-                  aria-label={actionsOpen ? 'Hide message options' : 'Show message options'}
-                  aria-expanded={actionsOpen}
-                  title="Emoji, photo and voice message"
-                  disabled={disabled || sending}
-                  onClick={() => {
-                    setActionsOpen((open) => !open);
-                    setEmojiPickerOpen(false);
-                  }}
-                >
-                  {actionsOpen ? <X size={18} /> : <Plus size={18} />}
-                </Button>
-              </>
-            )}
-            {/* With no attachments available the tray would hide a single emoji
-                button behind a second tap, so it is skipped entirely. */}
-            {(actionsOpen || !voiceConversation) && (
-              <>
-                <div className="relative flex-shrink-0">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    className="rounded-full"
-                    aria-label="Add emoji"
-                    aria-expanded={emojiPickerOpen}
-                    disabled={disabled || sending}
-                    onClick={() => setEmojiPickerOpen((open) => !open)}
-                  >
-                    <Smile size={18} />
-                  </Button>
-                  {emojiPickerOpen && (
-                    <div
-                      role="dialog"
-                      aria-label="Emoji picker"
-                      className="absolute bottom-12 left-0 z-20 grid w-56 grid-cols-6 gap-1 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
-                    >
-                      {COMPOSER_EMOJIS.map((emoji) => (
-                        <button
-                          key={emoji}
-                          type="button"
-                          className="flex h-8 w-8 items-center justify-center rounded-md text-lg hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          aria-label={`Insert ${emoji}`}
-                          onClick={() => insertEmoji(emoji)}
-                        >
-                          {emoji}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                {voiceConversation && (
-                  <>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      className="flex-shrink-0 rounded-full"
-                      disabled={disabled || sending || imagePreparing || imageSending}
-                      aria-label="Attach image"
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <ImagePlus size={18} />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      className="flex-shrink-0 touch-none rounded-full"
-                      disabled={disabled || voiceSending}
-                      aria-label="Hold to record voice message"
-                      onPointerDown={startVoice}
-                      onPointerUp={() => {
-                        voiceHeldRef.current = false;
-                        void finishVoice();
-                      }}
-                      onPointerCancel={() => {
-                        voiceHeldRef.current = false;
-                        void finishVoice(true);
-                      }}
-                      onPointerMove={(event) => {
-                        const bounds = event.currentTarget.getBoundingClientRect();
-                        const movedAway =
-                          event.clientY < bounds.top - 60 ||
-                          event.clientY > bounds.bottom + 60 ||
-                          event.clientX < bounds.left - 60 ||
-                          event.clientX > bounds.right + 60;
-                        if (recording && movedAway) {
-                          cancelVoiceRef.current = true;
-                          setCancelVoice(true);
-                        }
-                      }}
-                    >
-                      <Mic size={18} />
-                    </Button>
-                  </>
-                )}
-              </>
-            )}
             <textarea
               ref={textareaRef}
               name="chat-message-input"
@@ -864,7 +888,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
         )}
         <Button
           type="submit"
-          disabled={disabled || sending || recording || !canSubmit}
+          disabled={disabled || sending || voiceActive || !canSubmit}
           className="flex-shrink-0"
         >
           {sending ? 'Sending...' : 'Send'}

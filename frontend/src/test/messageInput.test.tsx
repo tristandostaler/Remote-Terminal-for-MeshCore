@@ -5,7 +5,7 @@
  * behavior for both DM and channel conversations.
  */
 
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import { MessageInput } from '../components/MessageInput';
@@ -48,7 +48,7 @@ vi.mock('../services/imageCodec', () => ({
 
 // Mock sonner (toast)
 vi.mock('../components/ui/sonner', () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
 // ONE api mock. There must not be a second vi.mock('../api') in this file: the
@@ -78,6 +78,7 @@ const mockApi = api as unknown as { estimateMcmp: ReturnType<typeof vi.fn> };
 const mockToast = toast as unknown as {
   success: ReturnType<typeof vi.fn>;
   error: ReturnType<typeof vi.fn>;
+  info: ReturnType<typeof vi.fn>;
 };
 
 const textEncoder = new TextEncoder();
@@ -401,6 +402,122 @@ describe('MessageInput', () => {
 
       await waitFor(() => expect(voiceCapture.cancel).toHaveBeenCalledTimes(1));
       expect(api.sendVoice).not.toHaveBeenCalled();
+    });
+
+    it('keeps the same mic element when recording starts, so the pointer stays captured', async () => {
+      // The regression this guards: the old code unmounted the pressed button
+      // and mounted a second one elsewhere in the row. Disconnecting the element
+      // a pointer is captured to releases the capture, and on touch that loses
+      // the pointerup which stops the recording -- leaving the 10s cap as the
+      // only terminator, or a pointercancel that discards the take outright.
+      Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+      renderInput({ conversationType: 'contact', voice: true });
+      openActions();
+      const before = screen.getByRole('button', { name: /hold to record voice/i });
+
+      fireEvent.pointerDown(before, { pointerId: 1 });
+      await screen.findByText('Release to send');
+
+      expect(screen.getByRole('button', { name: /release to send voice/i })).toBe(before);
+    });
+
+    it('acknowledges the press before the microphone actually opens', async () => {
+      // getUserMedia takes hundreds of ms on a phone, and prompts for permission
+      // the first time. Until it resolves the composer must not look dead.
+      Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+      let openMicrophone!: () => void;
+      voiceCapture.start.mockReturnValue(
+        new Promise<void>((resolve) => {
+          openMicrophone = resolve;
+        })
+      );
+      renderInput({ conversationType: 'contact', voice: true });
+      openActions();
+
+      fireEvent.pointerDown(screen.getByRole('button', { name: /hold to record voice/i }), {
+        pointerId: 1,
+      });
+
+      expect(await screen.findByText('Starting microphone...')).toBeVisible();
+      // No clock or level meter yet: nothing is being captured to time.
+      expect(screen.queryByText('Release to send')).toBeNull();
+
+      openMicrophone();
+      expect(await screen.findByText('Release to send')).toBeVisible();
+    });
+
+    it('says a too-short press captured nothing instead of failing silently', async () => {
+      Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+      voiceCapture.stop.mockResolvedValue({ pcm: new Blob(['x']), durationMs: 50 });
+      renderInput({ conversationType: 'contact', voice: true });
+      openActions();
+      const microphone = screen.getByRole('button', { name: /hold to record voice/i });
+
+      fireEvent.pointerDown(microphone, { pointerId: 1 });
+      await screen.findByText('Release to send');
+      fireEvent.pointerUp(microphone, { pointerId: 1 });
+
+      await waitFor(() => expect(mockToast.info).toHaveBeenCalledOnce());
+      expect(api.sendVoice).not.toHaveBeenCalled();
+    });
+
+    it('ignores a second press while a recording is already live', async () => {
+      Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+      renderInput({ conversationType: 'contact', voice: true });
+      openActions();
+      const microphone = screen.getByRole('button', { name: /hold to record voice/i });
+
+      fireEvent.pointerDown(microphone, { pointerId: 1 });
+      await screen.findByText('Release to send');
+      fireEvent.pointerDown(microphone, { pointerId: 2 });
+
+      // A second capture would orphan the first, leaving its stream open.
+      expect(voiceCapture.start).toHaveBeenCalledOnce();
+    });
+
+    it("does not let a finished recording's ten-second cap truncate the next one", async () => {
+      // The cap is scheduled per recording. Left uncleared on release, it fires
+      // part-way through whatever recording is live when its ten seconds are up.
+      Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        renderInput({ conversationType: 'contact', voice: true });
+        openActions();
+        const microphone = screen.getByRole('button', { name: /hold to record voice/i });
+
+        fireEvent.pointerDown(microphone, { pointerId: 1 });
+        await screen.findByText('Release to send');
+        fireEvent.pointerUp(microphone, { pointerId: 1 });
+        await waitFor(() => expect(voiceCapture.stop).toHaveBeenCalledOnce());
+
+        // Start a second take five seconds in, so the first cap would land
+        // half-way through it.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5_000);
+        });
+        fireEvent.pointerDown(microphone, { pointerId: 2 });
+        await screen.findByText('Release to send');
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(6_000);
+        });
+
+        // Still going: only the first take has been stopped.
+        expect(voiceCapture.stop).toHaveBeenCalledOnce();
+        expect(screen.getByText('Release to send')).toBeVisible();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('suppresses the long-press menu that would fight the gesture', () => {
+      renderInput({ conversationType: 'contact', voice: true });
+      openActions();
+      const microphone = screen.getByRole('button', { name: /hold to record voice/i });
+
+      const menu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+      microphone.dispatchEvent(menu);
+
+      expect(menu.defaultPrevented).toBe(true);
     });
 
     it('explains the HTTPS requirement before requesting a microphone', () => {
