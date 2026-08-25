@@ -8,7 +8,7 @@ import logging
 from app.image_protocol import MAX_IMAGE_FRAGMENTS, ImageFetchRequest, ImagePacket
 from app.keystore import get_public_key
 from app.repository import ContactRepository, ImageRepository
-from app.services.voice import RAW_MEDIA_FRAGMENT_DELAY_SECONDS, send_raw_to_contact
+from app.services.raw_media import RAW_MEDIA_FRAGMENT_DELAY_SECONDS, send_raw_to_contact
 from app.websocket import broadcast_event
 
 logger = logging.getLogger(__name__)
