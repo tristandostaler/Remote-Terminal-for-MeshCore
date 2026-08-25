@@ -42,7 +42,11 @@ def _reset_radio_state():
 
 @pytest.fixture(autouse=True)
 def _disable_background_dm_retries(monkeypatch):
-    monkeypatch.setattr(message_send_service, "DM_SEND_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(
+        message_send_service,
+        "resolve_max_send_attempts",
+        AsyncMock(return_value=1),
+    )
     yield
 
 

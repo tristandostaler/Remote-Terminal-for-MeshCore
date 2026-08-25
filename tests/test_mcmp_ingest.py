@@ -153,6 +153,111 @@ class TestChannelIngestDecode:
         assert len(matching) == 1
 
 
+class TestIngestRecordsCompressionFacts:
+    """Decoding also records what the body arrived compressed as.
+
+    The conversation view renders the codec and ratio from these columns, so a
+    received message can show the same badge as one we sent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_channel_records_codec_and_bytes(self, test_db, compressor):
+        from app.packet_processor import create_message_from_decrypted
+
+        wire = compressor.encode_if_smaller(LONG_TEXT)
+        packet_id, _ = await RawPacketRepository.create(b"chan_facts", SENDER_TIMESTAMP)
+
+        msg_id = await create_message_from_decrypted(
+            packet_id=packet_id,
+            channel_key=CHANNEL_KEY,
+            sender="Alice",
+            message_text=wire,
+            timestamp=SENDER_TIMESTAMP,
+        )
+        assert msg_id is not None
+        stored = await MessageRepository.get_by_id(msg_id)
+        assert stored is not None
+        assert stored.compression == "mcmp2"
+        # Measured against the body, not the stored "Alice: ..." text: the
+        # firmware adds that prefix outside the compressed payload.
+        assert stored.plain_bytes == len(LONG_TEXT.encode("utf-8"))
+        assert stored.wire_bytes == len(wire.encode("utf-8"))
+
+    @pytest.mark.asyncio
+    async def test_channel_records_nothing_for_plain_text(self, test_db, compressor):
+        from app.packet_processor import create_message_from_decrypted
+
+        packet_id, _ = await RawPacketRepository.create(b"chan_plain_facts", SENDER_TIMESTAMP)
+
+        msg_id = await create_message_from_decrypted(
+            packet_id=packet_id,
+            channel_key=CHANNEL_KEY,
+            sender="Alice",
+            message_text="short and plain",
+            timestamp=SENDER_TIMESTAMP,
+        )
+        assert msg_id is not None
+        stored = await MessageRepository.get_by_id(msg_id)
+        assert stored is not None
+        assert stored.compression is None
+        assert stored.wire_bytes is None
+
+    @pytest.mark.asyncio
+    async def test_v3_dm_ratio_excludes_the_container(
+        self, test_db, captured_broadcasts, compressor
+    ):
+        from app.services.dm_ingest import ingest_fallback_direct_message
+
+        _, mock_broadcast = captured_broadcasts
+        wire = encode_v3_text(compressor, LONG_TEXT, timestamp=SENDER_TIMESTAMP)
+
+        message = await ingest_fallback_direct_message(
+            conversation_key=CONTACT_PUB,
+            text=wire,
+            sender_timestamp=SENDER_TIMESTAMP,
+            received_at=SENDER_TIMESTAMP,
+            path=None,
+            path_len=None,
+            txt_type=0,
+            signature=None,
+            sender_name="Peer",
+            sender_key=CONTACT_PUB,
+            broadcast_fn=mock_broadcast,
+        )
+        assert message is not None
+        assert message.compression == "mcmp3"
+        assert message.wire_bytes == len(wire.encode("utf-8"))
+        # The v3 header is airtime but not part of the ratio, matching meshcore-open.
+        assert message.payload_bytes is not None
+        assert message.payload_bytes < message.wire_bytes
+
+    @pytest.mark.asyncio
+    async def test_incoming_messages_carry_no_send_progress(
+        self, test_db, captured_broadcasts, compressor
+    ):
+        """Attempts and send state describe our own sends only."""
+        from app.services.dm_ingest import ingest_fallback_direct_message
+
+        _, mock_broadcast = captured_broadcasts
+        message = await ingest_fallback_direct_message(
+            conversation_key=CONTACT_PUB,
+            text="hello there",
+            sender_timestamp=SENDER_TIMESTAMP + 5,
+            received_at=SENDER_TIMESTAMP + 5,
+            path=None,
+            path_len=None,
+            txt_type=0,
+            signature=None,
+            sender_name="Peer",
+            sender_key=CONTACT_PUB,
+            broadcast_fn=mock_broadcast,
+        )
+        assert message is not None
+        assert message.send_attempts is None
+        assert message.send_max_attempts is None
+        assert message.send_state is None
+
+
 class TestDirectMessageIngestDecode:
     @pytest.mark.asyncio
     async def test_v2_dm_body_is_decoded(self, test_db, captured_broadcasts, compressor):

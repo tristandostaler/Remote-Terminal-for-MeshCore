@@ -102,7 +102,11 @@ async def _insert_contact(public_key, name="Alice", **overrides):
 
 @pytest.fixture(autouse=True)
 def _disable_background_dm_retries(monkeypatch):
-    monkeypatch.setattr(message_send_service, "DM_SEND_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(
+        message_send_service,
+        "resolve_max_send_attempts",
+        AsyncMock(return_value=1),
+    )
     yield
 
 
@@ -339,7 +343,11 @@ class TestOutgoingDMBroadcast:
             return None
 
         with (
-            patch.object(message_send_service, "DM_SEND_MAX_ATTEMPTS", 3),
+            patch.object(
+                message_send_service,
+                "resolve_max_send_attempts",
+                AsyncMock(return_value=3),
+            ),
             patch("app.routers.messages.track_pending_ack", return_value=False),
             patch("app.routers.messages.radio_manager.require_connected", return_value=mc),
             patch.object(radio_manager, "_meshcore", mc),
@@ -387,7 +395,11 @@ class TestOutgoingDMBroadcast:
             payload = {"code": "deadbeef"}
 
         with (
-            patch.object(message_send_service, "DM_SEND_MAX_ATTEMPTS", 3),
+            patch.object(
+                message_send_service,
+                "resolve_max_send_attempts",
+                AsyncMock(return_value=3),
+            ),
             patch("app.event_handlers.broadcast_event"),
             patch("app.routers.messages.radio_manager.require_connected", return_value=mc),
             patch.object(radio_manager, "_meshcore", mc),
@@ -444,7 +456,11 @@ class TestOutgoingDMBroadcast:
             payload = {"code": "aaaaaa01"}
 
         with (
-            patch.object(message_send_service, "DM_SEND_MAX_ATTEMPTS", 3),
+            patch.object(
+                message_send_service,
+                "resolve_max_send_attempts",
+                AsyncMock(return_value=3),
+            ),
             patch("app.event_handlers.broadcast_event"),
             patch("app.routers.messages.radio_manager.require_connected", return_value=mc),
             patch.object(radio_manager, "_meshcore", mc),

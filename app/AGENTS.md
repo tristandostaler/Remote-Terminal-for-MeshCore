@@ -38,6 +38,7 @@ app/
 │   ├── dm_ingest.py             # Shared direct-message ingest / dedup seam for packet + fallback paths
 │   ├── dm_ack_apply.py          # Shared DM ACK application over pending/buffered ACK state
 │   ├── dm_ack_tracker.py        # Pending DM ACK state
+│   ├── send_tracker.py          # In-flight send tasks by message id, so a send can be cancelled
 │   ├── contact_reconciliation.py # Prefix-claim, sender-key backfill, name-history wiring
 │   ├── flood_scope.py           # Firmware-version-aware flood-scope set/clear command seam
 │   ├── radio_lifecycle.py       # Post-connect setup and reconnect/setup helpers
@@ -59,6 +60,7 @@ app/
 ├── bots/                # Bots workspace engine: triggers, cron, feeds, i18n (see bots/AGENTS_bots.md)
 ├── fanout/              # Fanout bus: MQTT, bots, webhooks, Apprise, SQS (see fanout/AGENTS_fanout.md)
 ├── stats_windows.py     # Statistics time-window keys and chart bucket sizing
+├── send_attempts.py     # Bounds + clamp for the configurable direct-message attempt cap
 ├── telemetry_interval.py # Shared telemetry interval math for tracked-repeater scheduler
 ├── path_utils.py        # Path hex rendering and hop-width helpers
 ├── region_scope.py      # Normalize/validate regional flood-scope values
@@ -182,6 +184,17 @@ The retry deliberately does not re-run `_ensure_on_radio` — re-adding the cont
 - **Encode on send:** opt-in per conversation via `contacts.mcmp_enabled` / `channels.mcmp_enabled` (migration 066); the transport is selectable via `mcmp_version` (2 or 3; migration 067, default 2). `message_send.py` compresses only the transmitted body — v2 uses "only if smaller", v3 always wraps its container (carrying the message timestamp). The stored/broadcast text stays plaintext. `encode_outbound(text, version=, timestamp=)` is deterministic (v3 uses the sender timestamp) so DM retries and channel resends send identical bytes.
 - **Bots:** MCMP is transparent to bots. Incoming handlers see decoded plaintext (decode runs at ingest, before the broadcast the bot engine consumes), and `ctx.reply`/`send`/`send_dm` go through the same send path, so bot replies compress per the target conversation's `mcmp_enabled`/`mcmp_version`. `ctx.reply_split` sizes parts by their *compressed* wire length when the conversation has MCMP enabled (`split_text_compressed`), so it packs more text per message. Its budget comes from `resolve_message_budget` (156 bytes for a DM, 156 minus the radio's `"<name>: "` framing for a channel) -- the same number the image transport and the compose counter use; a flat budget let channel parts overrun the frame, and a truncated MCMP part just decodes short with no error.
 - **Not implemented:** v3 Ed25519 signing (needs firmware) — v3 is sent unsigned and signed v3 from peers is decoded with the signature skipped, never verified. Decode is lenient (no re-encode verify) to tolerate cross-libm float drift.
+- **Per-message facts:** `app/compression/metadata.py` turns a (plaintext, wire payload) pair into the codec + byte counts the chat meta line renders. One symmetric entry point serves both directions — `describe_compression()` on send, `decode_and_describe()` on ingest — so a sent and a received copy of the same message report identical numbers. Persisted on the row (see below), never recomputed at render time.
+  - The **ratio** is measured over `payload_bytes`, the compressed-text segment, which for v3 *excludes* the container header. That matches meshcore-open (`lib/models/message_compression.dart`) so both clients quote the same percentage for one message. `wire_bytes` separately records what actually went on air, because a v3 container can be *larger* on air than v2 for the same text — quoting only the ratio would misrepresent the airtime, so the UI puts `wire_bytes` in the tooltip.
+  - The ratio is measured against the message **body**, not the stored text: the firmware prepends `"<name>: "` to channel messages outside the compressed payload, so counting the prefix would understate the saving.
+
+### Message send progress
+
+- `messages` carries `send_attempts` / `send_max_attempts` / `send_state` (migration 074) so the chat can show "attempt 2 of 3" and distinguish a send still being retried from one that gave up or was cancelled. **Delivery is not a state** — it stays derived from `acked > 0`, so a late ACK on a `failed` message still displays as delivered, and there is one source of truth for delivery.
+- `send_max_attempts` is written per message from the cap in force at send time (`resolve_max_send_attempts`), not read from settings at render time, so the displayed "N of M" stays truthful after the user moves the dial. A manual retry starts a **fresh run** (attempts reset to 1 under the current cap) rather than accumulating, which would eventually display "attempt 7 of 3".
+- The cap is `app_settings.max_message_retries`, bounded 1–10 by `app/send_attempts.py` and clamped on both read and write. It applies to **direct messages only** — channel messages have no ACK to wait for and keep their one-shot echo watchdog (`auto_resend_channel`). Every transmission counts, including that watchdog resend and a byte-perfect channel resend, or the meta line would claim one send for a message that went out twice.
+- `app/services/send_tracker.py` maps message id → the background task still working on it, which is what makes cancelling possible. Cancelling is best-effort by nature: only attempts *not yet made* can be stopped. The **canceller** records and broadcasts the `canceled` state, not the unwinding task — an `await` inside a `CancelledError` handler can be interrupted again before it completes.
+- Progress is broadcast as `message_status` (separate from `message_acked`: progress and delivery are different facts). Deleting broadcasts `message_deleted`; it cancels first, since "delete" has to mean we stop transmitting it. Delete is local only — the mesh has no unsend.
 
 ### Region scope decoding (transport codes)
 
@@ -326,6 +339,9 @@ The background room poller (`app/radio_sync.py` `_room_poll_loop`, started post-
 - `POST /messages/direct`
 - `POST /messages/channel`
 - `POST /messages/channel/{message_id}/resend`
+- `POST /messages/{message_id}/retry` — retransmit an outgoing message. DMs reuse the original timestamp (byte-identical, so the recipient dedups it as a retry) and restart their retry run under the current cap; channel messages route to the resend machinery, where `?new_timestamp=true` creates a new row
+- `POST /messages/{message_id}/cancel` — stop the attempts not yet made; `stopped_pending_sends` says whether anything was still scheduled (either way the message ends up `canceled`)
+- `DELETE /messages/{message_id}` — cancel then drop our copy, broadcasting `message_deleted`. Local only
 - `POST /messages/mcmp-estimate` — compressed wire size of a draft (`{text, version}` → `{wire_bytes, compressed}`) for the live compose counter; pure computation, `text` capped at 4096 chars
 
 ### Packets
@@ -479,6 +495,8 @@ tests/
 ├── test_keystore.py            # Ephemeral keystore
 ├── test_main_startup.py        # App startup and lifespan
 ├── test_map_upload.py          # Map upload fanout module
+├── test_compression_metadata.py # Per-message codec/ratio facts, both directions
+├── test_message_actions.py     # Per-message retry/cancel/delete + persisted send metadata
 ├── test_message_pagination.py  # Cursor-based message pagination
 ├── test_message_prefix_claim.py # Message prefix claim logic
 ├── test_mqtt.py                # MQTT publisher topic routing and lifecycle
@@ -508,6 +526,8 @@ tests/
 ├── test_repeater_telemetry.py  # Repeater telemetry history recording
 ├── test_service_installer.py   # Service installer script behavior
 ├── test_sqs_fanout.py          # SQS fanout module
+├── test_send_attempts.py       # Direct-message attempt cap: clamping and resolution
+├── test_send_tracker.py        # In-flight send registry: cancel, supersede, housekeeping
 ├── test_statistics.py          # Statistics aggregation
 ├── test_stats_windows.py       # Statistics window keys and chart bucketing
 ├── test_telemetry_interval.py  # Telemetry interval scheduling math

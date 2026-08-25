@@ -8,6 +8,7 @@ import aiosqlite
 from app.database import db
 from app.models import AppSettings
 from app.path_utils import bucket_path_hash_widths, bucket_region_scope, parse_packet_envelope
+from app.send_attempts import clamp_message_retries
 from app.stats_windows import DEFAULT_STATS_WINDOW, bucket_seconds_for_span, window_cutoff
 from app.telemetry_interval import DEFAULT_TELEMETRY_INTERVAL_HOURS
 
@@ -48,7 +49,7 @@ class AppSettingsRepository:
                    advert_interval, last_advert_time, flood_scope, known_regions,
                    blocked_keys, blocked_names, discovery_blocked_types,
                    tracked_telemetry_repeaters, tracked_telemetry_contacts,
-                   auto_resend_channel,
+                   auto_resend_channel, max_message_retries,
                    telemetry_interval_hours, telemetry_routed_hourly
             FROM app_settings WHERE id = 1
             """
@@ -128,6 +129,13 @@ class AppSettingsRepository:
         except (KeyError, TypeError):
             auto_resend_channel = False
 
+        # Parse max_message_retries. Clamped on read so a value written by a
+        # future version (or by hand) cannot reach the retry loop out of range.
+        try:
+            max_message_retries = clamp_message_retries(row["max_message_retries"])
+        except (KeyError, TypeError):
+            max_message_retries = clamp_message_retries(None)
+
         # Parse telemetry_interval_hours (migration adds the column with
         # default=8, but guard against older rows / partial migrations).
         try:
@@ -158,6 +166,7 @@ class AppSettingsRepository:
             tracked_telemetry_repeaters=tracked_telemetry_repeaters,
             tracked_telemetry_contacts=tracked_telemetry_contacts,
             auto_resend_channel=auto_resend_channel,
+            max_message_retries=max_message_retries,
             telemetry_interval_hours=telemetry_interval_hours,
             telemetry_routed_hourly=telemetry_routed_hourly,
         )
@@ -179,6 +188,7 @@ class AppSettingsRepository:
         tracked_telemetry_repeaters: list[str] | None = None,
         tracked_telemetry_contacts: list[str] | None = None,
         auto_resend_channel: bool | None = None,
+        max_message_retries: int | None = None,
         telemetry_interval_hours: int | None = None,
         telemetry_routed_hourly: bool | None = None,
     ) -> None:
@@ -242,6 +252,10 @@ class AppSettingsRepository:
             updates.append("auto_resend_channel = ?")
             params.append(1 if auto_resend_channel else 0)
 
+        if max_message_retries is not None:
+            updates.append("max_message_retries = ?")
+            params.append(clamp_message_retries(max_message_retries))
+
         if telemetry_interval_hours is not None:
             updates.append("telemetry_interval_hours = ?")
             params.append(telemetry_interval_hours)
@@ -279,6 +293,7 @@ class AppSettingsRepository:
         tracked_telemetry_repeaters: list[str] | None = None,
         tracked_telemetry_contacts: list[str] | None = None,
         auto_resend_channel: bool | None = None,
+        max_message_retries: int | None = None,
         telemetry_interval_hours: int | None = None,
         telemetry_routed_hourly: bool | None = None,
     ) -> AppSettings:
@@ -299,6 +314,7 @@ class AppSettingsRepository:
                 tracked_telemetry_repeaters=tracked_telemetry_repeaters,
                 tracked_telemetry_contacts=tracked_telemetry_contacts,
                 auto_resend_channel=auto_resend_channel,
+                max_message_retries=max_message_retries,
                 telemetry_interval_hours=telemetry_interval_hours,
                 telemetry_routed_hourly=telemetry_routed_hourly,
             )

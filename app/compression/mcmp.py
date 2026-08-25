@@ -858,8 +858,38 @@ def encode_v3_body(
     return bytes(out)
 
 
-def decode_v3_body(compressor: MeshCompressor, body: bytes) -> DecodedV3Message:
-    reader = _ByteReader(body)
+class _V3Header:
+    """The fixed and optional fields a v3 container carries before its text."""
+
+    __slots__ = (
+        "timestamp",
+        "sender_name",
+        "is_signed",
+        "reply_author_name",
+        "reply_timestamp",
+    )
+
+    def __init__(
+        self,
+        timestamp: int,
+        sender_name: str | None,
+        is_signed: bool,
+        reply_author_name: str | None,
+        reply_timestamp: int | None,
+    ) -> None:
+        self.timestamp = timestamp
+        self.sender_name = sender_name
+        self.is_signed = is_signed
+        self.reply_author_name = reply_author_name
+        self.reply_timestamp = reply_timestamp
+
+
+def _read_v3_header(reader: _ByteReader) -> _V3Header:
+    """Consume a v3 container header, leaving the reader on the compressed text.
+
+    Shared by :func:`decode_v3_body` and :func:`v3_compressed_text_bytes` so the
+    two cannot drift on where the text segment starts.
+    """
     flags = reader.read_byte()
     if (flags & ~_V3_KNOWN_FLAGS) != 0:
         raise MeshCompressorError("unsupported MCMP v3 flags")
@@ -880,6 +910,24 @@ def decode_v3_body(compressor: MeshCompressor, body: bytes) -> DecodedV3Message:
     if flags & _V3_FLAG_REPLY:
         reply_author_name = reader.read_bytes(reader.read_varuint()).decode("utf-8")
         reply_timestamp = reader.read_uint32_le()
+
+    return _V3Header(
+        timestamp=timestamp,
+        sender_name=sender_name,
+        is_signed=is_signed,
+        reply_author_name=reply_author_name,
+        reply_timestamp=reply_timestamp,
+    )
+
+
+def decode_v3_body(compressor: MeshCompressor, body: bytes) -> DecodedV3Message:
+    reader = _ByteReader(body)
+    header = _read_v3_header(reader)
+    timestamp = header.timestamp
+    sender_name = header.sender_name
+    is_signed = header.is_signed
+    reply_author_name = header.reply_author_name
+    reply_timestamp = header.reply_timestamp
 
     compressed = reader.read_remaining()
     text = compressor.decompress_bytes(compressed)
@@ -916,6 +964,30 @@ def encode_v3_text(
         return f"{_PREFIX_V3}{_b91_encode(body)}"
     except Exception:
         return text
+
+
+def v3_compressed_text_bytes(text: str) -> int | None:
+    """Byte length of the compressed-text segment inside an ``mcmp3:`` payload.
+
+    A v3 container prefixes the compressed text with a timestamp and, optionally,
+    a sender name, a signature and a reply anchor. Measuring a compression ratio
+    against the whole payload would let that overhead mask the actual saving, so
+    meshcore-open reports the ratio over this segment alone -- matching it keeps
+    the two clients' percentages comparable.
+
+    Returns ``None`` when ``text`` is not a well-formed v3 payload. Never raises,
+    and never runs the coder: only the header is walked.
+    """
+    if not is_v3_text_payload(text):
+        return None
+    try:
+        stripped = text.lstrip()
+        body = _b91_decode_v3(stripped[len(_PREFIX_V3) :])
+        reader = _ByteReader(body)
+        _read_v3_header(reader)
+        return len(body) - reader.offset
+    except Exception:
+        return None
 
 
 def try_decode_v3_text(compressor: MeshCompressor, text: str) -> DecodedV3Message | None:

@@ -15,6 +15,11 @@ from app.models import (
 )
 from app.region_scope import normalize_region_scope
 from app.repository import AppSettingsRepository, ChannelRepository, ContactRepository
+from app.send_attempts import (
+    MAX_MESSAGE_RETRIES,
+    MIN_MESSAGE_RETRIES,
+    clamp_message_retries,
+)
 from app.telemetry_interval import (
     DEFAULT_TELEMETRY_INTERVAL_HOURS,
     TELEMETRY_INTERVAL_OPTIONS_HOURS,
@@ -78,6 +83,15 @@ class AppSettingsUpdate(BaseModel):
     auto_resend_channel: bool | None = Field(
         default=None,
         description="Auto-resend channel messages once if no echo heard within 2 seconds",
+    )
+    max_message_retries: int | None = Field(
+        default=None,
+        description=(
+            "How many times a direct message may be transmitted before it is marked "
+            f"failed ({MIN_MESSAGE_RETRIES}-{MAX_MESSAGE_RETRIES}; "
+            f"{MIN_MESSAGE_RETRIES} = send once, never retry). Out-of-range values are "
+            "clamped rather than rejected."
+        ),
     )
     telemetry_interval_hours: int | None = Field(
         default=None,
@@ -258,6 +272,19 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
     # Auto-resend channel
     if update.auto_resend_channel is not None:
         kwargs["auto_resend_channel"] = update.auto_resend_channel
+
+    # Direct-message attempt cap. Clamped rather than 400-ed so a stale client
+    # sending an out-of-range value can't brick settings saves.
+    if update.max_message_retries is not None:
+        clamped = clamp_message_retries(update.max_message_retries)
+        if clamped != update.max_message_retries:
+            logger.warning(
+                "max_message_retries=%r is out of range; clamping to %d",
+                update.max_message_retries,
+                clamped,
+            )
+        logger.info("Updating max_message_retries to %d", clamped)
+        kwargs["max_message_retries"] = clamped
 
     # Telemetry interval preference. Invalid values fall back to default
     # rather than 400-ing so a stale client can't brick settings saves.

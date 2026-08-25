@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.compression import decode_incoming_body
+from app.compression import decode_and_describe
 from app.imaging.aeic.ingest import note_inbound_chunk
 from app.models import CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM, Contact, ContactUpsert, Message
 from app.repository import (
@@ -166,8 +166,9 @@ async def _store_direct_message(
     # MCMP-compressed bodies ride as ordinary text behind an mcmp2:/mcmp3:
     # prefix; decode to plaintext before storage/dedup so the DB, search and bots
     # see the real message. This is the shared point for every DM ingest route,
-    # keeping content dedup consistent (non-MCMP text is returned unchanged).
-    text = decode_incoming_body(text)
+    # keeping content dedup consistent (non-MCMP text is returned unchanged) and
+    # recording the codec/ratio for the conversation view's meta line.
+    text, compression = decode_and_describe(text)
 
     async def store() -> Message | None:
         if linked_packet_dedup and packet_id is not None:
@@ -225,6 +226,7 @@ async def _store_direct_message(
             sender_name=sender_name,
             transport_code=transport_code,
             region=region,
+            compression=compression,
         )
         if msg_id is None:
             await handle_duplicate_message(
@@ -262,6 +264,7 @@ async def _store_direct_message(
             packet_id=packet_id,
             transport_code=transport_code,
             region=region,
+            compression=compression,
         )
         broadcast_message(
             message=message, broadcast_fn=broadcast_fn, realtime=realtime, packet_hash=packet_hash

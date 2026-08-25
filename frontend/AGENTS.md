@@ -187,6 +187,7 @@ frontend/src/
     ├── mapView.test.tsx
     ├── messageCache.test.ts
     ├── messageList.test.tsx
+    ├── messageMetaLine.test.tsx
     ├── messageParser.test.ts
     ├── rawPacketList.test.tsx
     ├── pathUtils.test.ts
@@ -203,6 +204,7 @@ frontend/src/
     ├── localLabel.test.ts
     ├── messageInput.test.tsx
     ├── newMessageModal.test.tsx
+    ├── settingsMessageRetries.test.tsx
     ├── settingsModal.test.tsx
     ├── statisticsView.test.tsx
     ├── sidebar.test.tsx
@@ -291,7 +293,7 @@ That gives the store a load-bearing invariant: **no ancestor of `MessageList` ma
 
 - Outgoing sends are added to UI after the send API returns (not pre-send optimistic insertion), then persisted server-side.
 - Backend also emits WS `message` for outgoing sends so other clients stay in sync.
-- ACK/repeat updates arrive as `message_acked` events.
+- ACK/repeat updates arrive as `message_acked` events; outgoing send progress arrives separately as `message_status`, and a removed message as `message_deleted`. Progress and delivery are kept apart because they are different facts — a send can exhaust its attempts without an ACK, and an ACK can land after the attempts are done.
 - Outgoing channel messages show a 30-second resend control; resend calls `POST /api/messages/channel/{message_id}/resend`.
 - Conversation-scoped message caching now lives inside `useConversationMessages.ts` rather than a standalone `messageCache.ts` module. If you touch message timeline restore/dedup/reconnect behavior, start there.
 - `contact_resolved` is a real-time identity migration event, not just a contact-list update. Changes in that area need to consider active conversation state, cached messages, unread state keys, and reconnect reconciliation together.
@@ -319,10 +321,23 @@ The message list is windowed with `@tanstack/react-virtual`; only the visible ro
 
 jsdom has no layout engine, so none of this is observable from the vitest suite — it needs a real browser.
 
+### Message meta line (`MessageList`)
+
+Every message carries one small row under its text — time, hop badge, region, send status, attempt counter, compression badge, and the `⋯` actions button. It **replaced** the old inline time/`✓` markers and the badges that used to sit in the sender header; there is deliberately only one place these facts live, so a message does not report the same thing twice in two type sizes.
+
+- Send status derives `delivered` from `acked > 0` **before** looking at `send_state`, so a late ACK on a `failed` message shows as delivered. `send_state: null` on an outgoing message means "stored before send tracking existed" and renders `?` — the pre-existing display for an unechoed message — not a false `✓`.
+- The attempt counter appears only once `send_attempts > 1`. "1 of 3" on every message would be noise.
+- The compression percentage is computed from `payload_bytes` (the compressed-text segment) to match MCO Advanced. `wire_bytes` — the true on-air size, which for v3 can *exceed* v2's for the same text — goes in the tooltip only. Do not swap them: the badge is the cross-client-comparable number, the tooltip is the honest airtime.
+- Actions are a **centred dialog**, not an inline popover: the list is virtualized, so anything anchored inside a row gets clipped by the scroll container. Right-click on the bubble opens the same dialog for the desktop habit; the `⋯` button covers touch and keyboard.
+- Cancel is offered only while `send_state === 'sending'`. Delete is always offered and cancels as a side effect — otherwise we would keep transmitting a message the user just removed.
+- A channel retry always goes out under a fresh timestamp (a byte-perfect one is only legal inside the 30s dedup window); a DM retry always reuses its timestamp, which is what makes it a retry rather than a second message.
+- The whole row is suppressed per-action by the host: `MessageList` shows the `⋯` button only when at least one of `onRetryMessage`/`onCancelMessage`/`onDeleteMessage` is wired, so a read-only embedding stays read-only.
+
 ### Radio settings behavior
 
 - `SettingsRadioSection.tsx` surfaces `path_hash_mode` only when `config.path_hash_mode_supported` is true.
 - `SettingsRadioSection.tsx` also exposes `multi_acks_enabled` as a checkbox for the radio's extra direct-ACK transmission behavior.
+- `max_message_retries` (1–10) sits next to `auto_resend_channel`, its closest sibling. It is saved **on blur, not per keystroke**: the field stays free-text while typing so `""` and `"1"` are both reachable, and only a clamped legal value is sent. An empty or unparseable entry snaps back to the stored value and saves nothing. Note this whole section is gated on a live radio config (pre-existing, and true of every app setting that lives here), so the field is unreachable while disconnected.
 - The "Repeat Mesh Packets" checkbox appears only when `config.repeat_supported` is true, and is validated against `config.allowed_repeat_freqs` using the frequency currently in the form (not the saved one) — firmware only relays on the shared off-grid frequencies, so the toggle warns before a save the radio would reject.
 - Advert-location control is intentionally only `off` vs `include node location`. Companion-radio firmware does not reliably distinguish saved coordinates from live GPS in this path.
 - The advert action is mode-aware: the radio settings section exposes both flood and zero-hop manual advert buttons, both routed through the same `onAdvertise(mode)` seam.
@@ -334,7 +349,7 @@ jsdom has no layout engine, so none of this is observable from the vitest suite 
 - Auto reconnect (3s) with cleanup guard on unmount.
 - Heartbeat ping every 30s.
 - Incoming JSON is parsed through `wsEvents.ts`, which validates the top-level envelope and known event type strings, then casts payloads at the handler boundary. It does not schema-validate per-event payload shapes.
-- Event handlers: `health`, `message`, `contact`, `contact_resolved`, `channel`, `raw_packet`, `message_acked`, `contact_deleted`, `channel_deleted`, `error`, `success`, `pong` (ignored).
+- Event handlers: `health`, `message`, `contact`, `contact_resolved`, `channel`, `raw_packet`, `message_acked`, `message_status`, `message_deleted`, `contact_deleted`, `channel_deleted`, `error`, `success`, `pong` (ignored).
 - For `raw_packet` events, use `observation_id` as event identity; `id` is a storage reference and may repeat.
 
 ## URL Hash Navigation (`utils/urlHash.ts`)

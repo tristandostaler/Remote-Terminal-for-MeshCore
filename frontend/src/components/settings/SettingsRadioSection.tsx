@@ -17,6 +17,7 @@ import {
 import { api } from '../../api';
 import { RADIO_PRESETS } from '../../utils/radioPresets';
 import { stripRegionScopePrefix } from '../../utils/regionScope';
+import { DEFAULT_MESSAGE_RETRIES, MAX_MESSAGE_RETRIES, MIN_MESSAGE_RETRIES } from '../../types';
 import type {
   AppSettings,
   AppSettingsUpdate,
@@ -210,6 +211,7 @@ export function SettingsRadioSection({
   const [floodScope, setFloodScope] = useState('');
   const [knownRegions, setKnownRegions] = useState('');
   const [maxRadioContacts, setMaxRadioContacts] = useState('');
+  const [maxMessageRetries, setMaxMessageRetries] = useState(String(DEFAULT_MESSAGE_RETRIES));
   const [floodBusy, setFloodBusy] = useState(false);
   const [floodError, setFloodError] = useState<string | null>(null);
 
@@ -241,7 +243,24 @@ export function SettingsRadioSection({
     setFloodScope(stripRegionScopePrefix(appSettings.flood_scope));
     setKnownRegions((appSettings.known_regions ?? []).join('\n'));
     setMaxRadioContacts(String(appSettings.max_radio_contacts));
+    setMaxMessageRetries(String(appSettings.max_message_retries));
   }, [appSettings]);
+
+  // Saved on blur rather than per keystroke: the field is free-text while being
+  // typed (so "" and "1" are both reachable), and only a legal value is sent.
+  // An out-of-range or empty entry snaps back to what is stored.
+  const commitMaxMessageRetries = () => {
+    const parsed = Number.parseInt(maxMessageRetries, 10);
+    if (!Number.isFinite(parsed)) {
+      setMaxMessageRetries(String(appSettings.max_message_retries));
+      return;
+    }
+    const clamped = Math.max(MIN_MESSAGE_RETRIES, Math.min(MAX_MESSAGE_RETRIES, parsed));
+    setMaxMessageRetries(String(clamped));
+    if (clamped !== appSettings.max_message_retries) {
+      onSaveAppSettings({ max_message_retries: clamped });
+    }
+  };
 
   const currentPreset = useMemo(() => {
     const freqNum = parseFloat(freq);
@@ -1238,6 +1257,27 @@ export function SettingsRadioSection({
               RemoteTerm retry setting.
             </p>
           </div>
+        </div>
+
+        <div className="space-y-2 rounded-md border border-border/60 p-3">
+          <Label htmlFor="max-message-retries">Direct Message Send Attempts</Label>
+          <Input
+            id="max-message-retries"
+            type="number"
+            min={MIN_MESSAGE_RETRIES}
+            max={MAX_MESSAGE_RETRIES}
+            className="w-24"
+            value={maxMessageRetries}
+            onChange={(e) => setMaxMessageRetries(e.target.value)}
+            onBlur={commitMaxMessageRetries}
+          />
+          <p className="text-[0.8125rem] text-muted-foreground">
+            How many times a direct message may be transmitted before it is marked failed (
+            {MIN_MESSAGE_RETRIES}–{MAX_MESSAGE_RETRIES}; {MIN_MESSAGE_RETRIES} = send once, never
+            retry). Each retry waits out the radio&apos;s own ACK window first, so a higher number
+            costs airtime only on messages that go unacknowledged. Channel messages are unaffected —
+            they have no ACK to wait for and keep the one-shot echo resend below.
+          </p>
         </div>
 
         <div className="flex items-start gap-3 rounded-md border border-border/60 p-3">

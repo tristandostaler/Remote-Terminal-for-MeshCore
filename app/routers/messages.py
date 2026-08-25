@@ -9,6 +9,7 @@ from app.models import (
     McmpEstimateRequest,
     McmpEstimateResponse,
     Message,
+    MessageActionResponse,
     MessagesAroundResponse,
     ResendChannelMessageResponse,
     SendChannelMessageRequest,
@@ -17,7 +18,9 @@ from app.models import (
 from app.repository import AmbiguousPublicKeyPrefixError, AppSettingsRepository, MessageRepository
 from app.services.message_send import (
     SCOPE_UNSET,
+    cancel_message_send,
     resend_channel_message_record,
+    retry_direct_message_record,
     send_channel_message_to_channel,
     send_direct_message_to_contact,
 )
@@ -200,30 +203,11 @@ async def send_channel_message(request: SendChannelMessageRequest) -> Message:
 RESEND_WINDOW_SECONDS = 30
 
 
-@router.post(
-    "/channel/{message_id}/resend",
-    response_model=ResendChannelMessageResponse,
-    response_model_exclude_none=True,
-)
-async def resend_channel_message(
-    message_id: int,
-    new_timestamp: bool = Query(default=False),
+async def _resend_channel_message(
+    msg: Message, *, new_timestamp: bool
 ) -> ResendChannelMessageResponse:
-    """Resend a channel message.
-
-    When new_timestamp=False (default): byte-perfect resend using the original timestamp.
-    Only allowed within 30 seconds of the original send.
-
-    When new_timestamp=True: resend with a fresh timestamp so repeaters treat it as a
-    new packet. Creates a new message row in the database. No time window restriction.
-    """
-    radio_manager.require_connected()
-
+    """Validate and perform a channel resend. Shared by the resend and retry routes."""
     from app.repository import ChannelRepository
-
-    msg = await MessageRepository.get_by_id(message_id)
-    if not msg:
-        raise HTTPException(status_code=404, detail="Message not found")
 
     if not msg.outgoing:
         raise HTTPException(status_code=400, detail="Can only resend outgoing messages")
@@ -254,4 +238,146 @@ async def resend_channel_message(
         now_fn=time.time,
         temp_radio_slot=TEMP_RADIO_SLOT,
         message_repository=MessageRepository,
+    )
+
+
+@router.post(
+    "/channel/{message_id}/resend",
+    response_model=ResendChannelMessageResponse,
+    response_model_exclude_none=True,
+)
+async def resend_channel_message(
+    message_id: int,
+    new_timestamp: bool = Query(default=False),
+) -> ResendChannelMessageResponse:
+    """Resend a channel message.
+
+    When new_timestamp=False (default): byte-perfect resend using the original timestamp.
+    Only allowed within 30 seconds of the original send.
+
+    When new_timestamp=True: resend with a fresh timestamp so repeaters treat it as a
+    new packet. Creates a new message row in the database. No time window restriction.
+    """
+    radio_manager.require_connected()
+
+    msg = await MessageRepository.get_by_id(message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    return await _resend_channel_message(msg, new_timestamp=new_timestamp)
+
+
+async def _load_message(message_id: int) -> Message:
+    msg = await MessageRepository.get_by_id(message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return msg
+
+
+@router.post("/{message_id}/cancel", response_model=MessageActionResponse)
+async def cancel_message(message_id: int) -> MessageActionResponse:
+    """Stop retransmitting an outgoing message.
+
+    Only the attempts not yet made can be stopped -- whatever is already on air
+    is gone. Cancelling a send that had already finished is not an error: the
+    message is marked cancelled either way, which is the state the caller asked
+    for.
+    """
+    msg = await _load_message(message_id)
+    if not msg.outgoing:
+        raise HTTPException(status_code=400, detail="Can only cancel outgoing messages")
+
+    stopped = await cancel_message_send(
+        message=msg,
+        broadcast_fn=broadcast_event,
+        message_repository=MessageRepository,
+    )
+    return MessageActionResponse(
+        status="ok",
+        message_id=message_id,
+        message=await MessageRepository.get_by_id(message_id),
+        stopped_pending_sends=stopped,
+    )
+
+
+@router.post("/{message_id}/retry", response_model=MessageActionResponse)
+async def retry_message(
+    message_id: int,
+    new_timestamp: bool = Query(
+        default=False,
+        description=(
+            "Channel messages only: send under a fresh timestamp, which repeaters treat "
+            "as a new packet and which creates a new message row. Ignored for direct "
+            "messages, where reusing the timestamp is what makes the resend a retry "
+            "rather than a duplicate."
+        ),
+    ),
+) -> MessageActionResponse:
+    """Retransmit an outgoing message.
+
+    Direct messages go out byte-identical under their original timestamp and
+    restart their retry run under the current attempt cap. Channel messages reuse
+    the existing resend machinery, including its 30-second byte-perfect window.
+    """
+    radio_manager.require_connected()
+
+    msg = await _load_message(message_id)
+    if not msg.outgoing:
+        raise HTTPException(status_code=400, detail="Can only retry outgoing messages")
+
+    if msg.type == "CHAN":
+        resend = await _resend_channel_message(msg, new_timestamp=new_timestamp)
+        return MessageActionResponse(
+            status=resend.status,
+            message_id=resend.message_id,
+            message=resend.message or await MessageRepository.get_by_id(message_id),
+        )
+
+    from app.repository import ContactRepository
+
+    contact = await ContactRepository.get_by_key_or_prefix(msg.conversation_key)
+    if not contact:
+        raise HTTPException(
+            status_code=404, detail=f"Contact not found in database: {msg.conversation_key[:12]}"
+        )
+
+    await retry_direct_message_record(
+        message=msg,
+        contact=contact,
+        radio_manager=radio_manager,
+        broadcast_fn=broadcast_event,
+        track_pending_ack_fn=track_pending_ack,
+        message_repository=MessageRepository,
+    )
+    return MessageActionResponse(
+        status="ok",
+        message_id=message_id,
+        message=await MessageRepository.get_by_id(message_id),
+    )
+
+
+@router.delete("/{message_id}", response_model=MessageActionResponse)
+async def delete_message(message_id: int) -> MessageActionResponse:
+    """Remove a message from the conversation, cancelling any pending sends first.
+
+    Local only: the mesh has no unsend, so this drops our copy and stops us
+    transmitting it again. Anything already delivered stays delivered.
+    """
+    msg = await _load_message(message_id)
+
+    stopped = False
+    if msg.outgoing:
+        stopped = await cancel_message_send(
+            message=msg,
+            broadcast_fn=broadcast_event,
+            message_repository=MessageRepository,
+        )
+
+    await MessageRepository.delete_by_id(message_id)
+    broadcast_event("message_deleted", {"message_id": message_id})
+    logger.info("Deleted message %d from conversation history", message_id)
+    return MessageActionResponse(
+        status="ok",
+        message_id=message_id,
+        stopped_pending_sends=stopped,
     )
