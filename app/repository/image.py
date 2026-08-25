@@ -4,6 +4,10 @@ import time
 from typing import Any
 
 from app.database import db
+from app.repository.media_sessions import (
+    record_session_message,
+    sweep_unreferenced_sessions,
+)
 
 
 class ImageRepository:
@@ -48,6 +52,9 @@ class ImageRepository:
                     "peer_public_key=COALESCE(peer_public_key, ?), expires_at=? WHERE session_id=?",
                     (message_id, peer_public_key, now + ttl_seconds, session_id),
                 )
+                await record_session_message(
+                    conn, kind="image", session_id=session_id, message_id=message_id
+                )
                 return
             await conn.execute(
                 """
@@ -73,6 +80,9 @@ class ImageRepository:
                     now,
                     now + ttl_seconds,
                 ),
+            )
+            await record_session_message(
+                conn, kind="image", session_id=session_id, message_id=message_id
             )
 
     @staticmethod
@@ -131,15 +141,8 @@ class ImageRepository:
 
     @staticmethod
     async def enforce_cache_limit(max_sessions: int = 128) -> int:
+        """Sweep age and surplus, but never a picture a message still shows."""
         async with db.tx() as conn:
-            await conn.execute(
-                "DELETE FROM image_sessions WHERE expires_at < ?", (int(time.time()),)
+            return await sweep_unreferenced_sessions(
+                conn, kind="image", max_sessions=max_sessions, now=int(time.time())
             )
-            async with conn.execute(
-                """DELETE FROM image_sessions WHERE session_id IN (
-                    SELECT session_id FROM image_sessions ORDER BY created_at DESC, session_id DESC
-                    LIMIT -1 OFFSET ?
-                )""",
-                (max_sessions,),
-            ) as cursor:
-                return cursor.rowcount
