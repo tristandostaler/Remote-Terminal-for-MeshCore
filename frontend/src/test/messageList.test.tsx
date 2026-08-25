@@ -74,7 +74,9 @@ describe('MessageList channel sender rendering', () => {
     );
 
     expect(screen.getByText('nl-gr')).toBeInTheDocument();
-    expect(screen.getByTitle('Regional scope: nl-gr')).toBeInTheDocument();
+    expect(
+      screen.getByTitle('Region-scoped flood: only repeaters configured for "nl-gr" relay this')
+    ).toBeInTheDocument();
   });
 
   it('does not render a region badge for unscoped messages', () => {
@@ -107,7 +109,10 @@ describe('MessageList channel sender rendering', () => {
     );
 
     expect(screen.getByText('(2 · 2B)')).toBeInTheDocument();
-    expect(screen.getByTitle('View message path (2B per hop)')).toBeInTheDocument();
+    // The tooltip names what the digits mean, not just the click.
+    expect(
+      screen.getByTitle('Arrived over 2 hops, 2B per hop — click to see the route')
+    ).toBeInTheDocument();
   });
 
   it('hides the width by default (toggle off) and shows only the hop count', () => {
@@ -126,7 +131,7 @@ describe('MessageList channel sender rendering', () => {
 
     expect(screen.getByText('(2)')).toBeInTheDocument();
     expect(screen.queryByText('(2 · 2B)')).not.toBeInTheDocument();
-    expect(screen.getByTitle('View message path')).toBeInTheDocument();
+    expect(screen.getByTitle('Arrived over 2 hops — click to see the route')).toBeInTheDocument();
   });
 
   it('omits the width for direct (0-hop) paths even when the toggle is on', () => {
@@ -146,7 +151,10 @@ describe('MessageList channel sender rendering', () => {
     );
 
     expect(screen.getByText('(d)')).toBeInTheDocument();
-    expect(screen.getByTitle('View message path')).toBeInTheDocument();
+    // "d" is the least self-explanatory entry, so it gets spelled out.
+    expect(
+      screen.getByTitle('Arrived direct, with no repeaters in between — click to see the route')
+    ).toBeInTheDocument();
   });
 
   it('prefers stored sender_name for channel messages even when text is not sender-prefixed', () => {

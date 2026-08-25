@@ -103,7 +103,14 @@ function ImageMessage({ message, content }: { message: Message; content: string 
           ) : (
             <Download size={30} />
           )}
-          <span className="text-xs">
+          <span
+            className="text-xs"
+            title={
+              state === 'loading'
+                ? `${received} of ${envelope.fragmentCount} fragments received so far`
+                : undefined
+            }
+          >
             {state === 'loading'
               ? `${received}/${envelope.fragmentCount}`
               : state === 'unavailable'
@@ -112,7 +119,14 @@ function ImageMessage({ message, content }: { message: Message; content: string 
           </span>
         </button>
       )}
-      <div className="mt-1 text-[0.6875rem] text-muted-foreground">
+      <div
+        className="mt-1 text-[0.6875rem] text-muted-foreground"
+        title={
+          `${label}, split across ${envelope.fragmentCount} mesh messages. ` +
+          'The time is the estimated airtime for one hop to carry all of them — ' +
+          'each further hop repeats that cost.'
+        }
+      >
         {label} · {envelope.fragmentCount} fragments · ~
         {Math.max(
           1,
@@ -290,7 +304,13 @@ function AeicImageMessage({ message, chunk }: { message: Message; chunk?: AeicCh
           </span>
         </button>
       )}
-      <div className="mt-1 text-[0.6875rem] text-muted-foreground">
+      <div
+        className="mt-1 text-[0.6875rem] text-muted-foreground"
+        title={
+          `${square}×${square} pixels, encoded by the AI image codec into ` +
+          `${approxBytes} bytes and carried as ${parts} mesh message${parts === 1 ? '' : 's'}`
+        }
+      >
         {square}px AI · {approxBytes} B · {parts} msg{parts === 1 ? '' : 's'}
       </div>
       {fullscreen && contentUrl && (
@@ -670,23 +690,52 @@ function renderTextWithMentions(
 interface HopCountBadgeProps {
   paths: MessagePath[];
   onClick: () => void;
-  variant: 'header' | 'inline';
+  /** Our own message, so the paths are echoes coming back rather than an arrival. */
+  outgoing?: boolean;
 }
 
-function HopCountBadge({ paths, onClick, variant }: HopCountBadgeProps) {
+/** One entry of the hop badge in words: "direct", "1 hop", "3 hops". */
+function describeHopCount(part: string): string {
+  if (part === 'd') return 'direct';
+  return part === '1' ? '1 hop' : `${part} hops`;
+}
+
+/**
+ * Spell out what the hop badge's digits mean.
+ *
+ * "(d/2/3)" is compact enough to be unreadable if you do not already know the
+ * convention, so the tooltip names every number instead of only advertising the
+ * click. One entry per receive path, ascending.
+ */
+function hopCountTitle(display: string, widthLabel: string | null, outgoing: boolean): string {
+  const parts = display.split('/');
+  const readable = parts.map(describeHopCount);
+  const width = widthLabel ? `, ${widthLabel} per hop` : '';
+
+  let summary: string;
+  if (parts.length > 1) {
+    const verb = outgoing ? 'Echoed back' : 'Heard';
+    summary = `${verb} ${parts.length} times: ${readable.join(', ')}`;
+  } else {
+    const verb = outgoing ? 'Echoed back' : 'Arrived';
+    summary =
+      readable[0] === 'direct'
+        ? `${verb} direct, with no repeaters in between`
+        : `${verb} over ${readable[0]}`;
+  }
+  return `${summary}${width} — click to see the route`;
+}
+
+function HopCountBadge({ paths, onClick, outgoing = false }: HopCountBadgeProps) {
   const { showPathHopWidth } = usePathHopWidth();
   const hopInfo = formatHopCounts(paths);
   const widthLabel = showPathHopWidth ? formatPathHopWidths(paths) : null;
   const label = widthLabel ? `(${hopInfo.display} · ${widthLabel})` : `(${hopInfo.display})`;
-
-  const className =
-    variant === 'header'
-      ? 'font-normal text-muted-foreground ml-1 text-[0.6875rem] cursor-pointer hover:text-primary hover:underline'
-      : 'text-[0.625rem] text-muted-foreground ml-1 cursor-pointer hover:text-primary hover:underline';
+  const title = hopCountTitle(hopInfo.display, widthLabel, outgoing);
 
   return (
     <span
-      className={className}
+      className="text-[0.625rem] text-muted-foreground cursor-pointer hover:text-primary hover:underline"
       role="button"
       tabIndex={0}
       onKeyDown={handleKeyboardActivate}
@@ -694,8 +743,8 @@ function HopCountBadge({ paths, onClick, variant }: HopCountBadgeProps) {
         e.stopPropagation();
         onClick();
       }}
-      title={widthLabel ? `View message path (${widthLabel} per hop)` : 'View message path'}
-      aria-label={`${hopInfo.display}${widthLabel ? `, ${widthLabel} per hop` : ''}, view path`}
+      title={title}
+      aria-label={title}
     >
       {label}
     </span>
@@ -706,8 +755,8 @@ function HopCountBadge({ paths, onClick, variant }: HopCountBadgeProps) {
 function RegionBadge({ region }: { region: string }) {
   return (
     <span
-      className="ml-1.5 align-middle text-[0.625rem] uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
-      title={`Regional scope: ${region}`}
+      className="align-middle text-[0.625rem] uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
+      title={`Region-scoped flood: only repeaters configured for "${region}" relay this`}
     >
       {region}
     </span>
@@ -783,8 +832,48 @@ const SEND_STATUS_TITLES: Record<DisplaySendStatus, string> = {
   sending: 'Sending — still retrying',
   failed: 'Out of attempts without an acknowledgement',
   canceled: 'Sending cancelled',
-  unknown: 'No repeats heard yet',
+  // Refined by conversation type in sendStatusTitle; this is the neutral fallback.
+  unknown: 'No confirmation heard yet',
 };
+
+/**
+ * What the status glyph means, including the number stuck to it.
+ *
+ * A bare "✓✓3" says nothing about what was counted, and the answer differs by
+ * conversation: on a channel each count is a repeater that echoed us back, on a
+ * direct message it is an acknowledgement from the recipient.
+ */
+function sendStatusTitle(message: Message, status: DisplaySendStatus): string {
+  const base = SEND_STATUS_TITLES[status];
+  if (status === 'unknown') {
+    // A channel message is confirmed by repeater echoes, a direct one by an ACK
+    // from the recipient -- saying "repeats" on a DM would name the wrong thing.
+    return message.type === 'CHAN'
+      ? 'No repeater echoes heard yet'
+      : 'No acknowledgement heard yet';
+  }
+  if (status !== 'delivered') return base;
+  if (message.type === 'CHAN') {
+    const count = Math.max(1, message.acked);
+    return `${base} — ${count} repeater echo${count === 1 ? '' : 'es'} heard`;
+  }
+  return `${base} — acknowledged by the recipient`;
+}
+
+/** The time, said in full and labelled by direction. */
+function timestampTitle(message: Message): string {
+  const stamp = new Date(message.received_at * 1000).toLocaleString();
+  return `${message.outgoing ? 'Sent' : 'Received'} ${stamp}`;
+}
+
+/** Both halves of the "2/3" counter, and where the limit comes from. */
+function attemptsTitle(attempts: number, maxAttempts: number): string {
+  return (
+    `Transmitted ${attempts} time${attempts === 1 ? '' : 's'}, ` +
+    `up to ${maxAttempts} allowed for this message ` +
+    '(Settings › Radio › Direct Message Send Attempts)'
+  );
+}
 
 /**
  * The small line under every message: when it happened, how it travelled, and --
@@ -816,18 +905,18 @@ function MessageMetaLine({
     ? SEND_STATUS_GLYPHS[status] +
       (status === 'delivered' && message.acked > 1 ? message.acked : '')
     : null;
+  const statusTitle = status ? sendStatusTitle(message, status) : null;
 
   return (
     <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[0.625rem] leading-tight text-muted-foreground">
-      <span title={new Date(message.received_at * 1000).toLocaleString()}>
-        {formatTime(message.received_at)}
-      </span>
+      <span title={timestampTitle(message)}>{formatTime(message.received_at)}</span>
       {paths && paths.length > 0 && onShowPaths && (
-        <HopCountBadge paths={paths} variant="inline" onClick={onShowPaths} />
+        <HopCountBadge paths={paths} onClick={onShowPaths} outgoing={message.outgoing} />
       )}
       {message.region && <RegionBadge region={message.region} />}
       {status &&
         glyph &&
+        statusTitle &&
         (onShowPaths ? (
           <span
             className="cursor-pointer hover:text-primary"
@@ -838,18 +927,18 @@ function MessageMetaLine({
               e.stopPropagation();
               onShowPaths();
             }}
-            title={`${SEND_STATUS_TITLES[status]} — view message status`}
-            aria-label={`${SEND_STATUS_TITLES[status]}, view message status`}
+            title={`${statusTitle} — click to see the delivery detail`}
+            aria-label={`${statusTitle}, click to see the delivery detail`}
           >
             {glyph}
           </span>
         ) : (
-          <span title={SEND_STATUS_TITLES[status]} aria-label={SEND_STATUS_TITLES[status]}>
+          <span title={statusTitle} aria-label={statusTitle}>
             {glyph}
           </span>
         ))}
       {showAttempts && (
-        <span title={`Transmitted ${attempts} of up to ${maxAttempts} times`}>
+        <span title={attemptsTitle(attempts, maxAttempts)}>
           {attempts}/{maxAttempts}
         </span>
       )}
@@ -866,7 +955,7 @@ function MessageMetaLine({
             e.stopPropagation();
             onOpenActions();
           }}
-          title="Message actions"
+          title="Message actions — copy, retry, cancel or delete"
           aria-label="Message actions"
         >
           ⋯

@@ -167,7 +167,7 @@ describe('message meta line: send progress', () => {
       />
     );
 
-    expect(screen.getByLabelText('Delivered')).toBeInTheDocument();
+    expect(screen.getByLabelText('Delivered — acknowledged by the recipient')).toBeInTheDocument();
     expect(screen.queryByLabelText('Out of attempts without an acknowledgement')).toBeNull();
   });
 
@@ -183,6 +183,23 @@ describe('message meta line: send progress', () => {
     expect(screen.getByText('✓✓3')).toBeInTheDocument();
   });
 
+  it.each([
+    ['CHAN', 'No repeater echoes heard yet'],
+    ['PRIV', 'No acknowledgement heard yet'],
+  ] as const)('names the right confirmation for an untracked %s message', (type, label) => {
+    // Legacy rows carry no send state; a channel message is confirmed by echoes,
+    // a direct one by an ACK, so "?" must not claim the wrong one.
+    render(
+      <MessageList
+        messages={[createMessage({ type, send_state: null })]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    expect(screen.getByLabelText(label)).toBeInTheDocument();
+  });
+
   it('shows no send status on an incoming message', () => {
     render(
       <MessageList
@@ -193,7 +210,157 @@ describe('message meta line: send progress', () => {
     );
 
     expect(screen.queryByLabelText(/^Sent/)).toBeNull();
-    expect(screen.queryByLabelText('No repeats heard yet')).toBeNull();
+    expect(screen.queryByLabelText(/heard yet$/)).toBeNull();
+  });
+});
+
+describe('message meta line: every glyph explains itself', () => {
+  it('labels the time by direction, spelled out in full', () => {
+    render(
+      <MessageList
+        messages={[createMessage({ outgoing: true, received_at: 1700000001 })]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    const stamp = new Date(1700000001 * 1000).toLocaleString();
+    expect(screen.getByTitle(`Sent ${stamp}`)).toBeInTheDocument();
+  });
+
+  it('says "Received" on an incoming message', () => {
+    render(
+      <MessageList
+        messages={[createMessage({ outgoing: false, received_at: 1700000001 })]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    const stamp = new Date(1700000001 * 1000).toLocaleString();
+    expect(screen.getByTitle(`Received ${stamp}`)).toBeInTheDocument();
+  });
+
+  it('says what the number stuck to a delivered channel message counted', () => {
+    render(
+      <MessageList
+        messages={[createMessage({ type: 'CHAN', acked: 3 })]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    expect(screen.getByText('✓✓3').getAttribute('title')).toContain('3 repeater echoes heard');
+  });
+
+  it('distinguishes a direct acknowledgement from channel echoes', () => {
+    render(
+      <MessageList
+        messages={[createMessage({ type: 'PRIV', acked: 1 })]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    expect(screen.getByText('✓✓').getAttribute('title')).toContain('acknowledged by the recipient');
+  });
+
+  it('explains both halves of the attempt counter and where the limit lives', () => {
+    render(
+      <MessageList
+        messages={[createMessage({ send_attempts: 2, send_max_attempts: 3 })]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    const title = screen.getByText('2/3').getAttribute('title');
+    expect(title).toContain('Transmitted 2 times');
+    expect(title).toContain('up to 3 allowed for this message');
+    expect(title).toContain('Direct Message Send Attempts');
+  });
+
+  it('names every path in a multi-path hop badge', () => {
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            outgoing: false,
+            paths: [
+              { path: '', path_len: 0, received_at: 1700000001 },
+              { path: 'AABB', path_len: 2, received_at: 1700000002 },
+            ],
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    expect(
+      screen.getByTitle('Heard 2 times: direct, 2 hops — click to see the route')
+    ).toBeInTheDocument();
+  });
+
+  it("words our own message's paths as echoes coming back", () => {
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            outgoing: true,
+            paths: [{ path: 'AABB', path_len: 2, received_at: 1700000002 }],
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    expect(
+      screen.getByTitle('Echoed back over 2 hops — click to see the route')
+    ).toBeInTheDocument();
+  });
+
+  it('pluralises a single hop correctly', () => {
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            outgoing: false,
+            paths: [{ path: 'AA', path_len: 1, received_at: 1700000002 }],
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    expect(screen.getByTitle('Arrived over 1 hop — click to see the route')).toBeInTheDocument();
+  });
+
+  it('says what the region badge means, not just its name', () => {
+    render(
+      <MessageList messages={[createMessage({ region: 'nl-gr' })]} contacts={[]} loading={false} />
+    );
+
+    expect(screen.getByText('nl-gr').getAttribute('title')).toContain(
+      'only repeaters configured for "nl-gr" relay this'
+    );
+  });
+
+  it('says what the actions button opens', () => {
+    render(
+      <MessageList
+        messages={[createMessage()]}
+        contacts={[]}
+        loading={false}
+        onDeleteMessage={vi.fn()}
+      />
+    );
+
+    expect(
+      screen.getByTitle('Message actions — copy, retry, cancel or delete')
+    ).toBeInTheDocument();
   });
 });
 
