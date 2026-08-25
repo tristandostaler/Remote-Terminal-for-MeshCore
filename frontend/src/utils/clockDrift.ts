@@ -116,21 +116,42 @@ export function formatDriftRate(secondsPerDay: number | null): string {
  * Why the drift is what it is, in one line. This is the sentence that turns a
  * number into an action: reset the clock once, or fix the node.
  */
+/** Above this a trend is worth acting on; below it the clock is holding position. */
+const NOTABLE_RATE_SECONDS_PER_DAY = 60;
+
 export function driftDiagnosis(
   driftSeconds: number,
   ratePerDay: number | null,
-  clockUnset: boolean
+  clockUnset: boolean,
+  /** Step changes in the window — times the clock was *set* rather than drifting. */
+  stepCount = 0
 ): string {
   if (clockUnset) {
     return 'Clock was never set — the node is reporting time from boot, not a real date.';
   }
+
+  const moving = ratePerDay !== null && Math.abs(ratePerDay) >= NOTABLE_RATE_SECONDS_PER_DAY;
+
+  // Resets lead, even from inside the in-sync band: a clock sitting at zero
+  // because someone set it an hour ago is a different situation from one that
+  // has held there by itself, and only the step count tells them apart.
+  if (stepCount > 0) {
+    const times = stepCount === 1 ? 'once' : `${stepCount} times`;
+    if (moving) {
+      return `The clock has been reset ${times} in this window and is ${
+        ratePerDay! > 0 ? 'gaining' : 'losing'
+      } ${formatDriftMagnitude(ratePerDay!)}/day since the last one — it will drift back. Resyncing is treating the symptom.`;
+    }
+    return `The clock has been reset ${times} in this window, so a resync does not hold here even though it looks settled right now.`;
+  }
+
   if (Math.abs(driftSeconds) <= DRIFT_IN_SYNC_SECONDS) {
     return 'Within a minute of this server. Nothing to do.';
   }
   if (ratePerDay === null) {
     return 'Offset is real, but there is not enough history yet to say whether it is growing.';
   }
-  if (Math.abs(ratePerDay) < 60) {
+  if (!moving) {
     return 'Offset is holding steady — the clock was set wrong once rather than running badly. One resync should fix it.';
   }
   return `Offset is still moving at ${formatDriftMagnitude(ratePerDay)}/day, so a one-off resync will not hold. The node's timekeeping is the problem.`;

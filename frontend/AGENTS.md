@@ -379,6 +379,8 @@ Supported routes:
 - `#search`
 - `#trace`
 - `#statistics`
+- `#node-stats/{publicKey}`
+- `#node-stats/{publicKey}/{label}`
 - `#settings/{section}`
 - `#channel/{channelKey}`
 - `#channel/{channelKey}/{label}`
@@ -467,7 +469,7 @@ Clicking a contact's avatar in `ChatHeader` or `MessageList` opens a `ContactInf
 - Most active rooms (clickable → navigate to channel)
 - Route details from the canonical backend surface (`effective_route`, `effective_route_source`, `direct_route`, `route_override`)
 - Advert observation rate
-- Clock drift (`analytics.clock_drift`, hidden when never measured) — see "Clock drift surfaces" below
+- Clock drift (`analytics.clock_drift`, hidden when never measured) — see "Clock drift surfaces" below; its `History` link and the pane's `View node stats` row both open the node stats page
 - Nearest repeaters (resolved from first-hop path prefixes)
 - Recent advert paths (informational only; not part of DM route selection)
 
@@ -564,7 +566,9 @@ Two surfaces read the same measurement — the timestamp inside each advert, com
 
 **Contact info pane** (`ClockDriftSection` in `ContactInfoPane.tsx`) sits above telemetry on purpose: drift needs no request and no login, so it is already known when the pane opens. It leads with the offset, then one plain-language `driftDiagnosis()` line, because the number alone does not say what to do — a steady offset is one resync, a moving one is the node. `Details` reveals range/spread/mean, sample counts, and the caveat text.
 
-**Statistics** (`RepeaterClockDriftPanel` in `StatisticsView.tsx`) renders `stats.repeater_clock_drift`: summary tiles, a signed distribution histogram, "Furthest off", "Clocks still moving", "Clock never set", and a mesh-wide drift chart. Repeater names are clickable and call `onOpenContactInfo`, threaded from `ConversationPane` — that is the only reason `StatisticsView` takes a prop at all.
+**Statistics** (`RepeaterClockDriftPanel` in `StatisticsView.tsx`) renders `stats.repeater_clock_drift`: summary tiles, a signed distribution histogram, "Furthest off", "Clocks still moving", "Clock never set", and a mesh-wide drift chart. Repeater names are clickable and call `onOpenNodeStats` — you are in a drift ranking, so a click belongs on that node's drift detail, not a general contact drawer.
+
+**Node stats page** (`ClockDriftStats` in `components/nodeStats/`) is the full history: a banded series, step changes, a hop breakdown, and this node's distribution. Reached from the pane's `History` link or its `View node stats` row. See § "Node stats page" below.
 
 Presentation rules that exist for a reason:
 
@@ -572,6 +576,24 @@ Presentation rules that exist for a reason:
 - **A flat series gets a sentence, not a chart.** When the spread is within the in-sync band the ticks collapse onto the same value and the chart reads as broken, so the pane says "Held within Xs across N readings" instead.
 - **A wrong server clock is called out**, not silently spread across every row: when `|median_drift_seconds|` exceeds the in-sync band the panel says to check this server first.
 - **The histogram does not force `interval={0}`.** Nine range labels fit a desktop pane and turn into mush on a phone; the tooltip still names every bin.
+
+## Node stats page
+
+One page, one node, one window selector, reached at `#node-stats/{publicKey}` (`Conversation` type `nodeStats`, `id` = the public key). `NodeStatsView` owns the header, the window, the single `GET /contacts/{key}/stats` fetch, and the loading/error/empty states; everything below the header is a section component.
+
+**Adding a section** — three steps, none of which touch an existing section:
+
+1. Add the field to `NodeStatsResponse` in `app/models.py` and `types.ts`, and populate it in the endpoint.
+2. Write a component under `components/nodeStats/` taking that field plus `windowKey`, wrapped in `StatSection` from `nodeStatsShared.tsx` (which also carries `StatTile`, `StatRow`, `StatSubheading`, `ScrollableTable`, and the tooltip style).
+3. Render it in the section list in `NodeStatsView`, guarded on the field being present.
+
+Rules the page depends on:
+
+- **Sections never fetch their own data.** One request, one window, so nothing on the page can disagree with anything else. A section needing a different period is a sign the window belongs in the selector, not in the section.
+- **A section with nothing to say renders nothing**, rather than an empty box. The shell shows one empty state when *every* section is absent.
+- **Headings read from `stats.window`**, not the pending selection — the previous snapshot stays on screen while a wider window loads, and a heading that changes before its numbers do is a lie. Same rule as `StatisticsView`.
+- **The header prefers the live contact** over the payload's name, so a WebSocket rename shows up immediately; the payload is a snapshot from whenever the request went out.
+- **Deep links resolve without contacts.** `useConversationRouter` sets the conversation from the hash token alone rather than waiting for the contact list, because the page fetches by key and the backend accepts a prefix. Back goes to the node's own conversation rather than browser history, which a cold deep link does not have.
 
 ### Region-scope adoption panel
 

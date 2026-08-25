@@ -10,18 +10,25 @@ from app.clock_drift import (
     bucket_start,
     classify_drift,
     day_start,
-    drift_rate_per_day,
+    drift_trend,
+    histogram_bin,
+    histogram_labels,
     is_unset_clock,
 )
 from app.database import db
 from app.models import (
+    ClockDriftBand,
+    ClockDriftHistogramBin,
+    ClockDriftHopBucket,
     ClockDriftSample,
+    ClockDriftStep,
     Contact,
     ContactAdvertPath,
     ContactAdvertPathSummary,
     ContactClockDrift,
     ContactNameHistory,
     ContactUpsert,
+    NodeClockDriftStats,
 )
 from app.path_utils import first_hop_hex, normalize_contact_route, normalize_route_override
 from app.stats_windows import bucket_seconds_for_span
@@ -30,6 +37,11 @@ from app.stats_windows import bucket_seconds_for_span
 # slow oscillator shows a slope, narrow enough that a clock fixed last month
 # does not keep dominating the min/max of a node that is fine now.
 CONTACT_DRIFT_WINDOW_SECONDS = 30 * 86400
+
+# The node stats page lists step changes largest-first. Past a screenful the
+# tail is not something anyone reads, and a clock that produced hundreds of
+# them has one finding ("this clock is being reset constantly"), not hundreds.
+MAX_CLOCK_STEPS = 20
 
 logger = logging.getLogger(__name__)
 
@@ -1136,7 +1148,11 @@ class ContactClockDriftRepository:
             for row in series_rows
         ]
 
-        rate = drift_rate_per_day([(s.bucket_start, s.drift_seconds) for s in samples])
+        # Step-aware: a fit across a clock that keeps being reset reports a badly
+        # drifting node as steady, and the pane's headline reads off this number.
+        rate, steps, rate_since_step = drift_trend(
+            [(s.bucket_start, s.drift_seconds) for s in samples]
+        )
         latest_drift = latest["drift_seconds"]
         latest_advert_timestamp = latest["advert_timestamp"]
 
@@ -1156,8 +1172,171 @@ class ContactClockDriftRepository:
             max_drift_seconds=agg["max_drift"] or 0,
             mean_drift_seconds=round(agg["mean_drift"] or 0.0, 1),
             drift_rate_seconds_per_day=rate,
+            rate_since_last_step=rate_since_step,
+            step_count=len(steps),
             bucket_seconds=bucket,
             samples=samples,
+        )
+
+    @staticmethod
+    async def get_detail(
+        public_key: str,
+        *,
+        window_seconds: int | None,
+        now: int | None = None,
+    ) -> NodeClockDriftStats | None:
+        """The node stats page's drift section, or ``None`` if never measured.
+
+        Everything the info pane's summary carries, plus what only earns its
+        place on a page of its own: a series with the spread inside each
+        bucket, the discontinuities where the clock was *set* rather than
+        drifting, this node's own distribution, and a breakdown by hop count
+        that makes the propagation bias visible instead of asserted.
+
+        ``window_seconds`` of ``None`` means the whole retained history.
+        """
+        key = public_key.lower()
+        now = int(time.time()) if now is None else now
+        cutoff = None if window_seconds is None else now - window_seconds
+
+        where = "WHERE public_key = ?"
+        params: tuple = (key,)
+        if cutoff is not None:
+            where += " AND bucket_start >= ?"
+            params = (key, cutoff)
+
+        async with db.readonly() as conn:
+            async with conn.execute(
+                f"""
+                SELECT COUNT(*) AS readings,
+                       SUM(sample_count) AS samples,
+                       SUM(CASE WHEN path_len = 0 THEN 1 ELSE 0 END) AS direct_readings,
+                       MIN(drift_seconds) AS min_drift,
+                       MAX(drift_seconds) AS max_drift,
+                       AVG(drift_seconds) AS mean_drift,
+                       MIN(bucket_start) AS oldest
+                FROM contact_clock_drift
+                {where}
+                """,
+                params,
+            ) as cursor:
+                agg = await cursor.fetchone()
+
+            if agg is None or not agg["readings"]:
+                return None
+
+            async with conn.execute(
+                """
+                SELECT drift_seconds, observed_at, advert_timestamp, path_len
+                FROM contact_clock_drift
+                WHERE public_key = ?
+                ORDER BY bucket_start DESC
+                LIMIT 1
+                """,
+                (key,),
+            ) as cursor:
+                latest = await cursor.fetchone()
+
+            # Every stored reading in the window. Bounded by the table's own
+            # shape -- at most one row per node per hour, folded to one per day
+            # past the compaction horizon -- so even ``all`` stays small enough
+            # to fit a trend and walk for steps in Python.
+            async with conn.execute(
+                f"""
+                SELECT bucket_start, drift_seconds, sample_count, path_len
+                FROM contact_clock_drift
+                {where}
+                ORDER BY bucket_start
+                """,
+                params,
+            ) as cursor:
+                readings = await cursor.fetchall()
+
+        if latest is None:
+            return None
+
+        span = (now - agg["oldest"]) if window_seconds is None else window_seconds
+        bucket = bucket_seconds_for_span(
+            max(span, DRIFT_BUCKET_SECONDS), minimum=DRIFT_BUCKET_SECONDS
+        )
+
+        # Bucketed in Python rather than SQL: the same rows also feed the trend,
+        # the steps and the hop breakdown, and fetching them once beats four
+        # passes over the table for four shapes of the same data.
+        bands: dict[int, dict] = {}
+        hops: dict[int, list[int]] = {}
+        for row in readings:
+            slot = (row["bucket_start"] // bucket) * bucket
+            drift = row["drift_seconds"]
+            band = bands.get(slot)
+            if band is None:
+                bands[slot] = {
+                    "bucket_start": slot,
+                    "drift_seconds": drift,
+                    "min_drift_seconds": drift,
+                    "max_drift_seconds": drift,
+                    "sample_count": row["sample_count"] or 0,
+                    "reading_count": 1,
+                    "direct_reading_count": 1 if row["path_len"] == 0 else 0,
+                }
+            else:
+                band["drift_seconds"] = max(band["drift_seconds"], drift)
+                band["min_drift_seconds"] = min(band["min_drift_seconds"], drift)
+                band["max_drift_seconds"] = max(band["max_drift_seconds"], drift)
+                band["sample_count"] += row["sample_count"] or 0
+                band["reading_count"] += 1
+                if row["path_len"] == 0:
+                    band["direct_reading_count"] += 1
+            hops.setdefault(row["path_len"], []).append(drift)
+
+        points = [(row["bucket_start"], row["drift_seconds"]) for row in readings]
+        rate, steps, rate_since_step = drift_trend(points)
+
+        histogram = [0] * len(histogram_labels())
+        for _, drift in points:
+            histogram[histogram_bin(drift)] += 1
+
+        latest_drift = latest["drift_seconds"]
+        latest_advert_timestamp = latest["advert_timestamp"]
+
+        return NodeClockDriftStats(
+            latest_drift_seconds=latest_drift,
+            latest_observed_at=latest["observed_at"],
+            latest_advert_timestamp=latest_advert_timestamp,
+            latest_path_len=latest["path_len"],
+            severity=classify_drift(latest_drift),
+            clock_unset=is_unset_clock(latest_advert_timestamp),
+            window_seconds=span,
+            first_observed_at=agg["oldest"],
+            sample_count=agg["samples"] or 0,
+            bucket_count=agg["readings"] or 0,
+            direct_sample_count=agg["direct_readings"] or 0,
+            min_drift_seconds=agg["min_drift"] or 0,
+            max_drift_seconds=agg["max_drift"] or 0,
+            mean_drift_seconds=round(agg["mean_drift"] or 0.0, 1),
+            drift_rate_seconds_per_day=rate,
+            rate_since_last_step=rate_since_step,
+            step_count=len(steps),
+            bucket_seconds=bucket,
+            series=[
+                ClockDriftBand(**band)
+                for band in sorted(bands.values(), key=lambda b: b["bucket_start"])
+            ],
+            steps=[ClockDriftStep(**step) for step in steps[:MAX_CLOCK_STEPS]],
+            histogram=[
+                ClockDriftHistogramBin(label=label, count=count)
+                for label, count in zip(histogram_labels(), histogram, strict=True)
+            ],
+            hop_breakdown=[
+                ClockDriftHopBucket(
+                    path_len=path_len,
+                    reading_count=len(values),
+                    mean_drift_seconds=round(sum(values) / len(values), 1),
+                    min_drift_seconds=min(values),
+                    max_drift_seconds=max(values),
+                )
+                for path_len, values in sorted(hops.items())
+            ],
         )
 
 

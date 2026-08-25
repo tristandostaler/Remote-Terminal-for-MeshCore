@@ -761,3 +761,88 @@ class TestContactTelemetry:
             response = await client.post(f"/api/contacts/{KEY_A}/telemetry")
 
         assert response.status_code == 404
+
+
+class TestNodeStatsEndpoint:
+    """GET /contacts/{key}/stats -- the node stats page's single request."""
+
+    @pytest.mark.asyncio
+    async def test_returns_the_node_and_an_empty_drift_section(self, test_db, client):
+        """A node with no readings still describes itself, so the page renders."""
+        await _insert_contact(KEY_A, name="Alice", type=2)
+
+        response = await client.get(f"/api/contacts/{KEY_A}/stats")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["public_key"] == KEY_A
+        assert data["name"] == "Alice"
+        assert data["type"] == 2
+        # Default is wider than the mesh-wide snapshot: a trend needs lever arm.
+        assert data["window"] == "1M"
+        assert data["window_seconds"] == 30 * 86400
+        # The section is absent rather than an empty shell.
+        assert data["clock_drift"] is None
+
+    @pytest.mark.asyncio
+    async def test_carries_the_drift_section_when_measured(self, test_db, client):
+        import time
+
+        from app.repository.contacts import ContactClockDriftRepository
+
+        await _insert_contact(KEY_A, name="Alice", type=2)
+        now = int(time.time())
+        for hour in range(12):
+            observed = now - hour * 3600
+            await ContactClockDriftRepository.record(
+                KEY_A, advert_timestamp=observed - 400, observed_at=observed
+            )
+
+        response = await client.get(f"/api/contacts/{KEY_A}/stats?window=1w")
+        assert response.status_code == 200
+        drift = response.json()["clock_drift"]
+        assert drift["latest_drift_seconds"] == -400
+        assert drift["severity"] == "major"
+        assert drift["bucket_count"] == 12
+        assert len(drift["series"]) >= 1
+        assert drift["hop_breakdown"][0]["path_len"] == 0
+        assert sum(bin_["count"] for bin_ in drift["histogram"]) == 12
+
+    @pytest.mark.asyncio
+    async def test_every_section_honours_one_window(self, test_db, client):
+        import time
+
+        from app.repository.contacts import ContactClockDriftRepository
+
+        await _insert_contact(KEY_A, name="Alice", type=2)
+        now = int(time.time())
+        await ContactClockDriftRepository.record(
+            KEY_A, advert_timestamp=now - 60 * 86400 - 10, observed_at=now - 60 * 86400
+        )
+        await ContactClockDriftRepository.record(KEY_A, advert_timestamp=now - 10, observed_at=now)
+
+        narrow = await client.get(f"/api/contacts/{KEY_A}/stats?window=1w")
+        assert narrow.json()["clock_drift"]["bucket_count"] == 1
+
+        wide = await client.get(f"/api/contacts/{KEY_A}/stats?window=all")
+        assert wide.status_code == 200
+        assert wide.json()["window_seconds"] is None
+        assert wide.json()["clock_drift"]["bucket_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_unknown_window_is_a_422(self, test_db, client):
+        await _insert_contact(KEY_A)
+        response = await client.get(f"/api/contacts/{KEY_A}/stats?window=fortnight")
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_unknown_node_is_a_404(self, test_db, client):
+        response = await client.get(f"/api/contacts/{'ff' * 32}/stats")
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_resolves_a_public_key_prefix(self, test_db, client):
+        """Same prefix handling as every other per-contact route."""
+        await _insert_contact(KEY_A, name="Alice", type=2)
+        response = await client.get(f"/api/contacts/{KEY_A[:12]}/stats")
+        assert response.status_code == 200
+        assert response.json()["public_key"] == KEY_A

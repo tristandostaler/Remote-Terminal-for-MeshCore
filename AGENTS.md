@@ -149,7 +149,7 @@ Every advert payload is `pub_key(32) || timestamp(4 LE) || signature(64) || app_
 - It is stored in its own table (`contact_clock_drift`) and **never** feeds `last_seen`/`last_advert`/route selection. Contact freshness must stay on our receive clock so a node with a bad RTC cannot skew routing (`app/packet_processor.py`).
 - History is kept indefinitely; buckets older than 90 days are folded to one per day rather than deleted. Sign conventions, that horizon, severity bands, the trend fit, and the two inherent biases live in `app/clock_drift.py`. Read it before changing any threshold — the statistics panel and the contact pane both derive their wording from those constants.
 
-See `app/AGENTS.md` § "Clock drift measurement" for storage and aggregation, and `frontend/AGENTS.md` § "Clock drift surfaces" for the two UI surfaces.
+Three surfaces read it: a summary in the contact info pane, a mesh-wide section in Statistics, and a per-node **node stats page** (`#node-stats/{publicKey}`) carrying the full history. See `app/AGENTS.md` § "Clock drift measurement" for storage and aggregation, § "Node stats page" for the per-node endpoint, and `frontend/AGENTS.md` § "Clock drift surfaces" plus § "Node stats page" for the UI.
 
 ## Path Hash Modes
 

@@ -246,6 +246,21 @@ Two poisons are handled explicitly, and **both must stay handled** — each one 
 
 `fastest_rates` is filtered to `|rate| >= NOTABLE_RATE_SECONDS_PER_DAY`. A steady offset is a one-resync fix and already appears in the magnitude ranking; padding the trend list with steady clocks buries the ones that need the node looked at.
 
+### Node stats page
+
+`GET /contacts/{public_key}/stats?window=` is the whole page in one request. The response (`NodeStatsResponse`) is deliberately **a bag of independent optional sections**, not a fixed shape: a section with nothing to say is `None` and the page omits it, so adding a stat means adding a field and never touching the sections already there. Every section honours the same `window`, so one selector drives the page and nothing on it can disagree with anything else. It defaults to `1M` (`NODE_STATS_DEFAULT_WINDOW`) rather than the mesh snapshot's `1d` — these sections describe one node over time, and a day of drift says almost nothing.
+
+`ContactClockDriftRepository.get_detail` builds the drift section, fetching the window's stored readings **once** and deriving four shapes from them in Python rather than making four passes over the table. Beyond the pane's summary it adds:
+
+- **A series with the spread inside each bucket** (`ClockDriftBand`), so a jittery clock is distinguishable from a steadily drifting one at a glance.
+- **Step changes** (`ClockDriftStep`) — the moments a clock was *set* rather than drifted. Each carries `gap_seconds`, because the same jump across an hour and across three weeks are not the same finding and only the reader can judge which they have.
+- **A hop breakdown** (`ClockDriftHopBucket`), which makes the propagation bias visible instead of asserted: a mean that falls away as hops rise *is* airtime, and it confirms the zero-hop readings are the trustworthy ones.
+- **This node's own distribution**, reusing the statistics histogram bins.
+
+**Step detection and the trend are resolved together** (`clock_drift.drift_trend`), and this is the subtle part. A least-squares fit across a clock that keeps being reset describes nothing — the sawtooth averages out, and a node losing ten minutes an hour between weekly resets reports as nearly steady. That was not a rounding error; it made the pane say "holding steady" over a visible sawtooth. So steps are found first and the trend is fitted only over the readings **after the last one**, with `rate_since_last_step` telling the UI to say so. Do not replace this with a plain `drift_rate_per_day` over the whole window.
+
+`find_clock_steps` takes its baseline from the **median consecutive change**, not from the fitted trend. On a reset-happy clock the fitted trend is near zero, so using it marked every ordinary reading as a step — the exact opposite of the intent. A median cannot be inflated by the jumps it is judging.
+
 ### Region-scope adoption stats (`region_scope`)
 
 `GET /statistics` reports regional flood-scope uptake as two views with different denominators that intentionally will not agree:
@@ -346,6 +361,7 @@ Web Push is a standalone subsystem in `app/push/`, separate from the fanout modu
 - `GET /contacts/{public_key}/repeater/telemetry-history` — stored telemetry history for a repeater (read-only, no radio access)
 - `POST /contacts/{public_key}/telemetry` — on-demand CayenneLPP telemetry from any contact (persists in `contact_telemetry_history`)
 - `GET /contacts/{public_key}/telemetry-history` — stored LPP telemetry history for a contact (read-only)
+- `GET /contacts/{public_key}/stats` — the node stats page in one request; `?window=` (default `1M`) drives every section, and sections are independent optional fields
 - `POST /contacts/{public_key}/room/login` — one attempt on the effective route, then one flood retry on timeout. Body `{password?, use_stored_credential?}`: `password` is three-state (`null`/absent = guest unless `use_stored_credential`, `""` = guest, else the password); `use_stored_credential=true` logs in with the room's server-side stored credential and never returns it.
 - `POST /contacts/{public_key}/room/status`
 - `POST /contacts/{public_key}/room/lpp-telemetry`

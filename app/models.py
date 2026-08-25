@@ -324,12 +324,14 @@ class ClockDriftSample(BaseModel):
     path_len: int = Field(description="Hops on the arrival this bucket's drift came from")
 
 
-class ContactClockDrift(BaseModel):
-    """Clock drift for one contact, measured from its advert timestamps.
+class ClockDriftSummary(BaseModel):
+    """Scalar clock-drift figures for one node over one window.
 
-    Every field is relative to this server's clock -- see ``app/clock_drift.py``
-    for the sign convention and the two biases (propagation delay, our own
-    clock) baked into the measurement.
+    Shared by the contact info pane (``ContactClockDrift``) and the node stats
+    page (``NodeClockDriftStats``), which differ only in how much series detail
+    they carry. Every field is relative to this server's clock -- see
+    ``app/clock_drift.py`` for the sign convention and the two biases
+    (propagation delay, our own clock) baked into the measurement.
     """
 
     latest_drift_seconds: int = Field(description="Most recent measured offset, in seconds")
@@ -361,10 +363,33 @@ class ContactClockDrift(BaseModel):
         description=(
             "Least-squares trend in seconds of drift per day, or null when too few "
             "samples span too little time to prove one. Separates a clock set wrong once "
-            "(near zero) from an oscillator walking away (large)"
+            "(near zero) from an oscillator walking away (large). Measured over the "
+            "segment since the clock was last set when there is one -- see "
+            "``rate_since_last_step``"
+        ),
+    )
+    rate_since_last_step: bool = Field(
+        default=False,
+        description=(
+            "True when the trend covers only the readings after the most recent step "
+            "change. A fit across a clock that keeps being reset averages the sawtooth "
+            "away and reports a badly drifting node as steady, so it is refitted -- but "
+            "over a shorter span, which is worth saying out loud"
+        ),
+    )
+    step_count: int = Field(
+        default=0,
+        description=(
+            "Discontinuities in the window -- times the clock was set rather than "
+            "drifting. Non-zero means a resync has not been holding"
         ),
     )
     bucket_seconds: int = Field(description="Width of each returned sample bucket")
+
+
+class ContactClockDrift(ClockDriftSummary):
+    """Drift summary plus a compact series, for the contact info pane."""
+
     samples: list[ClockDriftSample] = Field(default_factory=list)
 
 
@@ -1585,6 +1610,92 @@ class StatisticsResponse(BaseModel):
     packets_over_time: PacketsOverTime
     noise_floor: NoiseFloorHistoryStats
     repeater_clock_drift: RepeaterClockDriftStats
+
+
+# ---------------------------------------------------------------------------
+# Node stats page
+#
+# One page, one node, one window selector. The response is a bag of independent
+# optional sections rather than a fixed shape: adding a stat later means adding
+# a field here and a component on the page, and never touching the sections
+# already in it. A section that has nothing to say is ``None``, and the page
+# omits it rather than rendering an empty box.
+# ---------------------------------------------------------------------------
+
+
+class ClockDriftBand(BaseModel):
+    """One bucket of the detailed drift series, with the spread inside it."""
+
+    bucket_start: int = Field(description="Unix timestamp for the start of the bucket")
+    drift_seconds: int = Field(description="Best (largest, least-delayed) reading in the bucket")
+    min_drift_seconds: int = Field(description="Lowest reading folded into the bucket")
+    max_drift_seconds: int = Field(description="Highest reading folded into the bucket")
+    sample_count: int = Field(description="Advert arrivals behind the bucket")
+    reading_count: int = Field(description="Stored readings folded into the bucket")
+    direct_reading_count: int = Field(description="Of those, how many came from a zero-hop arrival")
+
+
+class ClockDriftStep(BaseModel):
+    """A discontinuity between consecutive readings -- a clock being *set*."""
+
+    at: int = Field(description="When the reading on the far side of the jump was taken")
+    from_drift_seconds: int
+    to_drift_seconds: int
+    delta_seconds: int = Field(description="Signed change; positive means the clock moved forward")
+    gap_seconds: int = Field(
+        description=(
+            "Time between the two readings. A large change across a long gap in the data "
+            "is a weaker finding than the same change across an hour"
+        )
+    )
+
+
+class ClockDriftHopBucket(BaseModel):
+    """Readings grouped by the hop count of the arrival they came from.
+
+    Propagation delay only ever biases a reading negative, so a mean that falls
+    away as hops rise is that bias made visible -- and confirms the zero-hop
+    readings are the ones to trust for this node.
+    """
+
+    path_len: int = Field(description="Hop count; 0 is a direct arrival")
+    reading_count: int
+    mean_drift_seconds: float
+    min_drift_seconds: int
+    max_drift_seconds: int
+
+
+class NodeClockDriftStats(ClockDriftSummary):
+    """The detailed clock-drift section of the node stats page."""
+
+    series: list[ClockDriftBand] = Field(
+        default_factory=list, description="Drift over the window, bucketed, with per-bucket spread"
+    )
+    steps: list[ClockDriftStep] = Field(
+        default_factory=list, description="Largest discontinuities first"
+    )
+    histogram: list[ClockDriftHistogramBin] = Field(
+        default_factory=list, description="Distribution of this node's own readings"
+    )
+    hop_breakdown: list[ClockDriftHopBucket] = Field(
+        default_factory=list, description="Readings by hop count, ascending"
+    )
+
+
+class NodeStatsResponse(BaseModel):
+    """Everything the node stats page shows for one node over one window."""
+
+    public_key: str
+    name: str | None = None
+    type: int = Field(description="Contact type (1=Chat, 2=Repeater, 3=Room, 4=Sensor)")
+    window: str = Field(description="Window key the snapshot was built for (see STATS_WINDOWS)")
+    window_seconds: int | None = Field(
+        default=None, description="Seconds the window covers; null for the unbounded 'all'"
+    )
+    generated_at: int = Field(description="Server clock when the snapshot was built")
+    clock_drift: NodeClockDriftStats | None = Field(
+        default=None, description="Null when this node's clock has never been measured"
+    )
 
 
 class TelemetryHistoryEntry(BaseModel):

@@ -44,6 +44,19 @@ function resolveConversationFromHash(
       return { type: 'trace', id: 'trace', name: 'Trace' };
     case 'statistics':
       return { type: 'statistics', id: 'statistics', name: 'Statistics' };
+    case 'nodeStats': {
+      // Resolve through contacts for a readable title when we can, but never
+      // gate on it: the page fetches by key and the backend accepts a prefix,
+      // so a deep link has to work before the contact list has loaded.
+      const contact = resolveContactFromHashToken(hashConv.name, contacts);
+      return contact
+        ? {
+            type: 'nodeStats',
+            id: contact.public_key,
+            name: getContactDisplayName(contact.name, contact.public_key, contact.last_advert),
+          }
+        : { type: 'nodeStats', id: hashConv.name, name: hashConv.name };
+    }
     case 'bots':
       return {
         type: 'bots',
@@ -168,6 +181,18 @@ export function useConversationRouter({
         id: 'bots',
         name: 'Bots',
         ...(hashConv.botId ? { botId: hashConv.botId } : {}),
+      });
+      hasSetDefaultConversation.current = true;
+      return;
+    }
+    if (hashConv?.type === 'nodeStats') {
+      // Set from the token alone rather than waiting for phase 2. The view
+      // resolves the node itself, so gating on contacts would only delay a
+      // page that does not need them.
+      setActiveConversationState({
+        type: 'nodeStats',
+        id: hashConv.name,
+        name: hashConv.label || hashConv.name,
       });
       hasSetDefaultConversation.current = true;
       return;

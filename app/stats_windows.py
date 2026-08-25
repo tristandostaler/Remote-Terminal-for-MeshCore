@@ -18,6 +18,11 @@ SECONDS_1Y = 31536000
 
 DEFAULT_STATS_WINDOW = "1d"
 
+# The node stats page defaults wider than the mesh-wide snapshot on purpose. Its
+# sections describe one node over time — a drift trend needs days of lever arm
+# before it means anything, and a day of it says almost nothing.
+NODE_STATS_DEFAULT_WINDOW = "1M"
+
 # Ordered oldest-narrowest first; the frontend renders the selector in this order.
 STATS_WINDOWS: dict[str, int | None] = {
     "1h": SECONDS_1H,

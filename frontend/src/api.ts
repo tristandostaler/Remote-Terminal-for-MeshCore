@@ -37,6 +37,7 @@ import type {
   RepeaterNodeInfoResponse,
   RepeaterOwnerInfoResponse,
   RepeaterRadioSettingsResponse,
+  NodeStatsResponse,
   RepeaterRegionsResponse,
   RepeaterStatusResponse,
   TelemetryHistoryEntry,
@@ -615,6 +616,12 @@ export const api = {
     }),
 
   // Statistics
+  getNodeStats: (publicKey: string, window?: StatsWindow, signal?: AbortSignal) =>
+    fetchJson<NodeStatsResponse>(
+      `/contacts/${publicKey}/stats${window ? `?window=${encodeURIComponent(window)}` : ''}`,
+      { signal }
+    ),
+
   getStatistics: (window?: StatsWindow) =>
     fetchJson<StatisticsResponse>(
       window ? `/statistics?window=${encodeURIComponent(window)}` : '/statistics'

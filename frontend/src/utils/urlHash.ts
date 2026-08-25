@@ -13,7 +13,8 @@ interface ParsedHashConversation {
     | 'search'
     | 'trace'
     | 'bots'
-    | 'statistics';
+    | 'statistics'
+    | 'nodeStats';
   /** Conversation identity token (channel key or contact public key, or legacy name token) */
   name: string;
   /** Optional human-readable label segment (ignored for identity resolution) */
@@ -68,6 +69,16 @@ export function parseHashConversation(): ParsedHashConversation | null {
   // old settings hash working as a redirect.
   if (hash === 'statistics' || hash === 'settings/statistics') {
     return { type: 'statistics', name: 'statistics' };
+  }
+
+  // Node stats deep link: #node-stats/{publicKey} (optionally /{label})
+  if (hash.startsWith('node-stats/')) {
+    const rest = hash.slice('node-stats/'.length);
+    const slash = rest.indexOf('/');
+    const token = decodeURIComponent(slash === -1 ? rest : rest.slice(0, slash));
+    const label = slash === -1 ? '' : decodeURIComponent(rest.slice(slash + 1));
+    if (!token) return null;
+    return { type: 'nodeStats', name: token, ...(label ? { label } : {}) };
   }
 
   // Bots editor deep link: #bots/{botId}
@@ -185,6 +196,14 @@ export function getConversationHash(conv: Conversation | null): string {
   if (conv.type === 'statistics') return '#statistics';
   if (conv.type === 'bots') {
     return conv.botId ? `#bots/${encodeURIComponent(conv.botId)}` : '#bots';
+  }
+  if (conv.type === 'nodeStats') {
+    // The label is decorative. On a cold deep link the name is the key token
+    // itself, and repeating it in the hash reads as a bug rather than a label.
+    const key = encodeURIComponent(conv.id);
+    return conv.name && conv.name !== conv.id
+      ? `#node-stats/${key}/${encodeURIComponent(conv.name)}`
+      : `#node-stats/${key}`;
   }
 
   // Use immutable IDs for identity, append readable label for UX.
