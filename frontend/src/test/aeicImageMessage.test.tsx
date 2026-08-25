@@ -56,6 +56,25 @@ function aeicMessage(): Message {
   };
 }
 
+/**
+ * A channel image received as binary GRP_DATA.
+ *
+ * No text crossed the air, so the server mints this marker row purely to give the
+ * picture a place in the conversation. It is a server-to-UI convention and never
+ * goes on air -- see `app/imaging/aeic/channel_data_ingest.marker_text`.
+ */
+function aeicBinaryChannelMessage(): Message {
+  return {
+    ...aeicMessage(),
+    id: 78,
+    type: 'CHAN',
+    conversation_key: 'ab'.repeat(16),
+    text: 'aeib:grp:92e4d63e5ee135f3',
+    sender_name: null,
+    sender_key: null,
+  };
+}
+
 function undecoded() {
   return {
     session_key: 'aa'.repeat(6) + ':0371',
@@ -114,6 +133,26 @@ describe('AEIC image bubble polling', () => {
     expect(await screen.findByAltText('AI-reconstructed image message')).toBeVisible();
     // Already decoded, so the poll loop never runs.
     expect(mockApi.getAeicSession).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The channel case, which is the one MCO Advanced actually uses: the image
+   * arrives as binary GRP_DATA, no text crosses the air, and the server leaves an
+   * `aeib:<key>` marker row for the bubble to hang off. Nothing had covered that
+   * row, so "an AEIC image arrived that this server cannot decode" was untested
+   * on the exact path it happens on.
+   */
+  it('surfaces the reason for a channel image that arrived as binary GRP_DATA', async () => {
+    mockApi.getAeicSessionForMessage.mockResolvedValue({
+      ...undecoded(),
+      session_key: 'grp:92e4d63e5ee135f3',
+      decode_error:
+        'The AI image codec is switched off on this server (MESHCORE_ENABLE_AEIC=false).',
+    });
+    render(<MessageList messages={[aeicBinaryChannelMessage()]} contacts={[]} loading={false} />);
+
+    expect(await screen.findByText(/switched off on this server/)).toBeVisible();
+    expect(mockApi.getAeicSessionForMessage).toHaveBeenCalledWith(78);
   });
 
   it('surfaces a stored decode reason immediately instead of polling for a minute', async () => {
