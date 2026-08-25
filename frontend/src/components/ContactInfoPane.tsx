@@ -9,6 +9,7 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip as RechartsTooltip,
+  ReferenceLine,
   ResponsiveContainer,
   Legend,
 } from 'recharts';
@@ -32,6 +33,16 @@ import {
   parsePathHops,
 } from '../utils/pathUtils';
 import { isPublicChannelKey } from '../utils/publicChannel';
+import {
+  DRIFT_IN_SYNC_SECONDS,
+  driftDiagnosis,
+  driftSeverityLabel,
+  driftSeverityTextClass,
+  formatDrift,
+  formatDriftMagnitude,
+  formatDriftRate,
+  formatDriftSigned,
+} from '../utils/clockDrift';
 import { getMapFocusHash } from '../utils/urlHash';
 import { handleKeyboardActivate } from '../utils/a11y';
 import { ContactAvatar } from './ContactAvatar';
@@ -42,11 +53,13 @@ import { useDistanceUnit } from '../contexts/DistanceUnitContext';
 import { useEntranceSettled } from '../hooks/useEntranceSettled';
 import { CONTACT_TYPE_REPEATER } from '../types';
 import type {
+  ClockDriftSample,
   Contact,
   ContactActiveRoom,
   ContactAnalytics,
   ContactAnalyticsHourlyBucket,
   ContactAnalyticsWeeklyBucket,
+  ContactClockDrift,
   LppSensor,
   RadioConfig,
   TelemetryHistoryEntry,
@@ -423,6 +436,13 @@ export function ContactInfoPane({
                   {contact.lat!.toFixed(5)}, {contact.lon!.toFixed(5)}
                 </span>
               </div>
+            )}
+
+            {/* Clock drift, measured passively from advert timestamps. Sits above
+                telemetry because it needs no request and no login — it is already
+                known by the time the pane opens. */}
+            {analytics?.clock_drift && (
+              <ClockDriftSection drift={analytics.clock_drift} ready={chartsReady} />
             )}
 
             {/* Contact Telemetry */}
@@ -922,6 +942,187 @@ function ActivityLineChart<T extends ContactAnalyticsHourlyBucket | ContactAnaly
               activeDot={{ r: 4, strokeWidth: 2, stroke: 'hsl(var(--popover))' }}
             />
           ))}
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function ClockDriftSection({ drift, ready }: { drift: ContactClockDrift; ready: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const severityClass = driftSeverityTextClass(drift.severity);
+  const windowDays = Math.round(drift.window_seconds / 86400);
+  const spread = drift.max_drift_seconds - drift.min_drift_seconds;
+
+  return (
+    <div className="px-5 py-3 border-b border-border">
+      <div className="flex items-start justify-between gap-2">
+        <SectionLabel>Clock Drift</SectionLabel>
+        <button
+          type="button"
+          className="text-[0.625rem] uppercase tracking-wider text-muted-foreground hover:text-primary transition-colors -mt-0.5"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? 'Less' : 'Details'}
+        </button>
+      </div>
+
+      <div className="flex items-baseline gap-2">
+        <span className={`text-lg font-semibold leading-none ${severityClass}`}>
+          {drift.clock_unset ? 'Clock not set' : formatDrift(drift.latest_drift_seconds)}
+        </span>
+        {!drift.clock_unset && (
+          <span className="text-xs text-muted-foreground">
+            {driftSeverityLabel(drift.severity)}
+          </span>
+        )}
+      </div>
+
+      <p className="mt-1 text-xs text-muted-foreground">
+        {driftDiagnosis(
+          drift.latest_drift_seconds,
+          drift.drift_rate_seconds_per_day,
+          drift.clock_unset
+        )}
+      </p>
+
+      <div className="mt-2.5 grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+        <InfoItem label="Trend" value={formatDriftRate(drift.drift_rate_seconds_per_day)} />
+        <InfoItem label="Measured" value={formatTime(drift.latest_observed_at)} />
+      </div>
+
+      {/* A chart of a flat series is a chart of propagation-delay jitter: the
+          ticks collapse onto the same value and it reads as broken. The headline
+          already carries the offset, so say it held and move on. */}
+      {drift.samples.length > 1 && spread > DRIFT_IN_SYNC_SECONDS ? (
+        <div className="mt-3">
+          <DriftChart samples={drift.samples} ready={ready} />
+        </div>
+      ) : (
+        drift.bucket_count > 1 && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Held within {formatDriftMagnitude(Math.max(spread, 1))} across{' '}
+            {drift.bucket_count.toLocaleString()} readings over the last {windowDays} days.
+          </p>
+        )
+      )}
+
+      {expanded && (
+        <div className="mt-3 space-y-2">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+            <InfoItem
+              label="Range"
+              value={`${formatDriftSigned(drift.min_drift_seconds)} → ${formatDriftSigned(
+                drift.max_drift_seconds
+              )}`}
+            />
+            <InfoItem label="Spread" value={formatDriftMagnitude(spread)} />
+            <InfoItem label="Mean" value={formatDriftSigned(drift.mean_drift_seconds)} />
+            <InfoItem
+              label="Readings"
+              value={`${drift.bucket_count.toLocaleString()} over ${windowDays}d`}
+            />
+            <InfoItem label="Adverts measured" value={drift.sample_count.toLocaleString()} />
+            <InfoItem
+              label="Direct readings"
+              value={`${drift.direct_sample_count} of ${drift.bucket_count}`}
+            />
+            <InfoItem label="Watching since" value={formatTime(drift.first_observed_at)} />
+            <InfoItem
+              label="Last hop count"
+              value={drift.latest_path_len === 0 ? 'direct' : `${drift.latest_path_len} hops`}
+            />
+          </div>
+          <p className="text-[0.6875rem] text-muted-foreground">
+            Measured from the signed timestamp inside each advert over the last {windowDays} days,
+            against this server&apos;s clock — so a wrong clock here reads as every node drifting
+            the same way. Mesh airtime only ever makes a node look <em>behind</em>, so each point
+            keeps the least-delayed arrival of its bucket and direct (zero-hop) readings are the
+            trustworthy ones.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const DRIFT_CHART_HEIGHT = 120;
+
+function DriftChart({ samples, ready }: { samples: ClockDriftSample[]; ready: boolean }) {
+  if (!ready) {
+    return (
+      <div role="img" aria-label="Clock drift over time" style={{ height: DRIFT_CHART_HEIGHT }} />
+    );
+  }
+
+  const data = samples.map((sample, index) => ({
+    idx: index,
+    drift: sample.drift_seconds,
+    tick: new Date(sample.bucket_start * 1000).toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric',
+    }),
+    hops: sample.path_len,
+  }));
+
+  const tickCount = Math.min(4, data.length);
+  const tickIndices: number[] = [];
+  if (data.length > 1) {
+    for (let i = 0; i < tickCount; i++) {
+      tickIndices.push(Math.round((i / (tickCount - 1)) * (data.length - 1)));
+    }
+  }
+
+  return (
+    <div role="img" aria-label="Clock drift over time">
+      <ResponsiveContainer width="100%" height={DRIFT_CHART_HEIGHT}>
+        <LineChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+          {/* Zero is the only meaningful reference on this chart, so it gets a
+              line of its own rather than being wherever the axis lands. */}
+          <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="2 2" />
+          <XAxis
+            dataKey="idx"
+            type="number"
+            domain={[0, Math.max(1, data.length - 1)]}
+            tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+            tickLine={false}
+            axisLine={false}
+            ticks={tickIndices}
+            tickFormatter={(idx) => String(data[idx]?.tick ?? '')}
+          />
+          <YAxis
+            tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+            tickLine={false}
+            axisLine={false}
+            // Wide enough for a signed "-1h 40m" tick without clipping the sign.
+            width={58}
+            allowDecimals={false}
+            tickFormatter={(value) => formatDriftSigned(Number(value))}
+          />
+          <RechartsTooltip
+            {...TOOLTIP_STYLE}
+            cursor={{
+              stroke: 'hsl(var(--muted-foreground))',
+              strokeWidth: 1,
+              strokeDasharray: '3 3',
+            }}
+            labelFormatter={(idx) => String(data[Number(idx)]?.tick ?? '')}
+            formatter={(value, _name, props) => {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const hops = (props as any)?.payload?.hops;
+              const suffix = hops === 0 ? ' (direct)' : hops ? ` (${hops} hops)` : '';
+              return [`${formatDriftSigned(Number(value))}${suffix}`, 'Drift'];
+            }}
+          />
+          <Line
+            type="linear"
+            dataKey="drift"
+            stroke="#8b5cf6"
+            strokeWidth={1.5}
+            dot={false}
+            activeDot={{ r: 4, strokeWidth: 2, stroke: 'hsl(var(--popover))' }}
+          />
         </LineChart>
       </ResponsiveContainer>
     </div>

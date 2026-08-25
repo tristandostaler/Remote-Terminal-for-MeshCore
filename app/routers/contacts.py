@@ -29,6 +29,7 @@ from app.path_utils import parse_explicit_hop_route
 from app.repository import (
     AmbiguousPublicKeyPrefixError,
     ContactAdvertPathRepository,
+    ContactClockDriftRepository,
     ContactNameHistoryRepository,
     ContactRepository,
     MessageRepository,
@@ -130,6 +131,7 @@ async def _build_keyed_contact_analytics(contact: Contact) -> ContactAnalytics:
     chan_count = await MessageRepository.count_channel_messages_by_sender(contact.public_key)
     active_rooms_raw = await MessageRepository.get_most_active_rooms(contact.public_key)
     advert_paths = await ContactAdvertPathRepository.get_recent_for_contact(contact.public_key)
+    clock_drift = await ContactClockDriftRepository.get_for_contact(contact.public_key)
     hourly_activity, weekly_activity = await MessageRepository.get_contact_activity_series(
         contact.public_key
     )
@@ -192,6 +194,7 @@ async def _build_keyed_contact_analytics(contact: Contact) -> ContactAnalytics:
         advert_paths=advert_paths,
         advert_frequency=advert_frequency,
         nearest_repeaters=nearest_repeaters,
+        clock_drift=clock_drift,
         hourly_activity=hourly_activity,
         weekly_activity=weekly_activity,
     )

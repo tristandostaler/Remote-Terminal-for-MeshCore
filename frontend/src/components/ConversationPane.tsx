@@ -313,7 +313,7 @@ export function ConversationPane({
   if (activeConversation.type === 'statistics') {
     return (
       <Suspense fallback={<LoadingPane label="Loading statistics..." />}>
-        <StatisticsView />
+        <StatisticsView onOpenContactInfo={onOpenContactInfo} />
       </Suspense>
     );
   }

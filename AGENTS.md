@@ -141,6 +141,16 @@ To improve repeater disambiguation in the network visualizer, the backend stores
 - Only the N most recent unique paths are retained per contact (currently 10).
 - See `frontend/src/components/visualizer/AGENTS_packet_visualizer.md` § "Advert-Path Identity Hints" for how the visualizer consumes this data.
 
+## Clock Drift From Adverts
+
+Every advert payload is `pub_key(32) || timestamp(4 LE) || signature(64) || app_data`, and the timestamp is the sender's own wall clock. It is inside the Ed25519-signed message, so it cannot be altered in flight without failing the signature check `_process_advertisement` already enforces — which makes it a free, tamper-proof, passive measurement of every node's clock.
+
+- Drift is `advert_timestamp - our_receive_time`: **positive = the node is ahead of this server**.
+- It is stored in its own table (`contact_clock_drift`) and **never** feeds `last_seen`/`last_advert`/route selection. Contact freshness must stay on our receive clock so a node with a bad RTC cannot skew routing (`app/packet_processor.py`).
+- History is kept indefinitely; buckets older than 90 days are folded to one per day rather than deleted. Sign conventions, that horizon, severity bands, the trend fit, and the two inherent biases live in `app/clock_drift.py`. Read it before changing any threshold — the statistics panel and the contact pane both derive their wording from those constants.
+
+See `app/AGENTS.md` § "Clock drift measurement" for storage and aggregation, and `frontend/AGENTS.md` § "Clock drift surfaces" for the two UI surfaces.
+
 ## Path Hash Modes
 
 MeshCore firmware can encode path hops as 1-byte, 2-byte, or 3-byte identifiers.

@@ -3,15 +3,33 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from app.clock_drift import (
+    DAY_SECONDS,
+    DRIFT_BUCKET_SECONDS,
+    DRIFT_FULL_RESOLUTION_SECONDS,
+    bucket_start,
+    classify_drift,
+    day_start,
+    drift_rate_per_day,
+    is_unset_clock,
+)
 from app.database import db
 from app.models import (
+    ClockDriftSample,
     Contact,
     ContactAdvertPath,
     ContactAdvertPathSummary,
+    ContactClockDrift,
     ContactNameHistory,
     ContactUpsert,
 )
 from app.path_utils import first_hop_hex, normalize_contact_route, normalize_route_override
+from app.stats_windows import bucket_seconds_for_span
+
+# How far back the contact info pane's drift section looks. Wide enough that a
+# slow oscillator shows a slope, narrow enough that a clock fixed last month
+# does not keep dominating the min/max of a node that is fine now.
+CONTACT_DRIFT_WINDOW_SECONDS = 30 * 86400
 
 logger = logging.getLogger(__name__)
 
@@ -891,6 +909,256 @@ class ContactAdvertPathRepository:
         return [
             ContactAdvertPathSummary(public_key=key, paths=paths) for key, paths in grouped.items()
         ]
+
+
+class ContactClockDriftRepository:
+    """Per-contact clock drift, measured from the timestamp inside each advert.
+
+    Rows are hourly buckets keyed ``(public_key, bucket_start)``, and a bucket
+    keeps its **largest** drift. Propagation delay only ever biases a reading
+    negative -- the advert was built before it was heard -- so the maximum
+    within an hour is the arrival that suffered least of it. ``sample_count``
+    still counts every arrival, so a flood heard over six paths is visible as
+    six samples in one bucket rather than six rows.
+
+    See ``app/clock_drift.py`` for the sign convention and the biases.
+    """
+
+    @staticmethod
+    async def record(
+        public_key: str,
+        *,
+        advert_timestamp: int,
+        observed_at: int,
+        path_len: int = 0,
+    ) -> None:
+        """Fold one advert arrival into its bucket.
+
+        Must be called after the contact upsert: the table has a foreign key
+        onto ``contacts`` and enforcement is on for application queries.
+        """
+        drift = advert_timestamp - observed_at
+        slot = bucket_start(observed_at)
+
+        async with db.tx() as conn:
+            await conn.execute(
+                """
+                INSERT INTO contact_clock_drift
+                    (public_key, bucket_start, drift_seconds, observed_at,
+                     advert_timestamp, path_len, sample_count)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(public_key, bucket_start) DO UPDATE SET
+                    sample_count = contact_clock_drift.sample_count + 1,
+                    drift_seconds = MAX(contact_clock_drift.drift_seconds, excluded.drift_seconds),
+                    observed_at = CASE
+                        WHEN excluded.drift_seconds > contact_clock_drift.drift_seconds
+                        THEN excluded.observed_at ELSE contact_clock_drift.observed_at END,
+                    advert_timestamp = CASE
+                        WHEN excluded.drift_seconds > contact_clock_drift.drift_seconds
+                        THEN excluded.advert_timestamp
+                        ELSE contact_clock_drift.advert_timestamp END,
+                    path_len = CASE
+                        WHEN excluded.drift_seconds > contact_clock_drift.drift_seconds
+                        THEN excluded.path_len ELSE contact_clock_drift.path_len END
+                """,
+                (public_key.lower(), slot, drift, observed_at, advert_timestamp, path_len),
+            )
+
+    @staticmethod
+    async def compact(
+        full_resolution_seconds: int = DRIFT_FULL_RESOLUTION_SECONDS,
+        *,
+        now: int | None = None,
+    ) -> int:
+        """Fold buckets older than the horizon down to one per day.
+
+        Nothing is deleted, because a clock's history is the interesting part of
+        it. Old hours are merged instead: the day keeps its largest drift (same
+        propagation-delay argument as the hourly rows) and the sum of every
+        arrival counted across them, so totals stay honest.
+
+        Returns the number of rows removed by merging -- zero once a stretch of
+        history has already been folded, which makes this safe to call on a
+        timer forever.
+
+        No schema marker distinguishes a daily row from an hourly one, and none
+        is needed: a day-aligned ``bucket_start`` *is* the marker, and every
+        read path already re-buckets with integer division, so a coarser input
+        needs no special case.
+        """
+        now = int(time.time()) if now is None else now
+        cutoff = day_start(now - full_resolution_seconds)
+
+        async with db.tx() as conn:
+            # ``observed_at``/``advert_timestamp``/``path_len`` are bare columns
+            # beside MAX(), so SQLite takes them from the row that produced the
+            # maximum -- the day keeps a real reading, not a mix of several.
+            async with conn.execute(
+                """
+                SELECT public_key,
+                       (bucket_start / ?) * ? AS day,
+                       MAX(drift_seconds) AS drift_seconds,
+                       observed_at,
+                       advert_timestamp,
+                       path_len,
+                       SUM(sample_count) AS sample_count,
+                       COUNT(*) AS rows_in_day,
+                       MIN(bucket_start) AS earliest
+                FROM contact_clock_drift
+                WHERE bucket_start < ?
+                GROUP BY public_key, day
+                """,
+                (DAY_SECONDS, DAY_SECONDS, cutoff),
+            ) as cursor:
+                groups = await cursor.fetchall()
+
+            # A day already reduced to its single midnight row is done. Skip it
+            # rather than rewriting it, so a steady-state call costs one query.
+            pending = [
+                row for row in groups if row["rows_in_day"] > 1 or row["earliest"] != row["day"]
+            ]
+            if not pending:
+                return 0
+
+            merged_away = sum(row["rows_in_day"] for row in pending) - len(pending)
+
+            for row in pending:
+                await conn.execute(
+                    "DELETE FROM contact_clock_drift WHERE public_key = ? "
+                    "AND bucket_start >= ? AND bucket_start < ?",
+                    (row["public_key"], row["day"], row["day"] + DAY_SECONDS),
+                )
+            await conn.executemany(
+                """
+                INSERT INTO contact_clock_drift
+                    (public_key, bucket_start, drift_seconds, observed_at,
+                     advert_timestamp, path_len, sample_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["public_key"],
+                        row["day"],
+                        row["drift_seconds"],
+                        row["observed_at"],
+                        row["advert_timestamp"],
+                        row["path_len"],
+                        row["sample_count"],
+                    )
+                    for row in pending
+                ],
+            )
+            return merged_away
+
+    @staticmethod
+    async def get_for_contact(
+        public_key: str,
+        *,
+        window_seconds: int = CONTACT_DRIFT_WINDOW_SECONDS,
+        now: int | None = None,
+    ) -> ContactClockDrift | None:
+        """Drift summary plus a chart-sized series, or ``None`` if never measured.
+
+        The series is re-bucketed in SQL to keep it near ``TARGET_CHART_BUCKETS``
+        points, taking the max drift per bucket for the same
+        propagation-delay reason the hourly rows do.
+        """
+        key = public_key.lower()
+        now = int(time.time()) if now is None else now
+        cutoff = now - window_seconds
+        bucket = bucket_seconds_for_span(window_seconds, minimum=DRIFT_BUCKET_SECONDS)
+
+        async with db.readonly() as conn:
+            async with conn.execute(
+                """
+                SELECT COUNT(*) AS buckets,
+                       SUM(sample_count) AS samples,
+                       SUM(CASE WHEN path_len = 0 THEN 1 ELSE 0 END) AS direct_buckets,
+                       MIN(drift_seconds) AS min_drift,
+                       MAX(drift_seconds) AS max_drift,
+                       AVG(drift_seconds) AS mean_drift
+                FROM contact_clock_drift
+                WHERE public_key = ? AND bucket_start >= ?
+                """,
+                (key, cutoff),
+            ) as cursor:
+                agg = await cursor.fetchone()
+
+            if agg is None or not agg["buckets"]:
+                return None
+
+            async with conn.execute(
+                """
+                SELECT drift_seconds, observed_at, advert_timestamp, path_len
+                FROM contact_clock_drift
+                WHERE public_key = ?
+                ORDER BY bucket_start DESC
+                LIMIT 1
+                """,
+                (key,),
+            ) as cursor:
+                latest = await cursor.fetchone()
+
+            async with conn.execute(
+                "SELECT MIN(bucket_start) AS oldest FROM contact_clock_drift WHERE public_key = ?",
+                (key,),
+            ) as cursor:
+                oldest_row = await cursor.fetchone()
+
+            # ``path_len`` is a bare column next to MAX(): SQLite guarantees it
+            # comes from the same input row the maximum did, so each rolled-up
+            # point reports the hop count of the arrival it actually kept.
+            async with conn.execute(
+                """
+                SELECT (bucket_start / ?) * ? AS slot,
+                       MAX(drift_seconds) AS drift_seconds,
+                       path_len,
+                       SUM(sample_count) AS sample_count
+                FROM contact_clock_drift
+                WHERE public_key = ? AND bucket_start >= ?
+                GROUP BY slot
+                ORDER BY slot
+                """,
+                (bucket, bucket, key, cutoff),
+            ) as cursor:
+                series_rows = await cursor.fetchall()
+
+        if latest is None:
+            return None
+
+        samples = [
+            ClockDriftSample(
+                bucket_start=row["slot"],
+                drift_seconds=row["drift_seconds"],
+                sample_count=row["sample_count"] or 0,
+                path_len=row["path_len"] or 0,
+            )
+            for row in series_rows
+        ]
+
+        rate = drift_rate_per_day([(s.bucket_start, s.drift_seconds) for s in samples])
+        latest_drift = latest["drift_seconds"]
+        latest_advert_timestamp = latest["advert_timestamp"]
+
+        return ContactClockDrift(
+            latest_drift_seconds=latest_drift,
+            latest_observed_at=latest["observed_at"],
+            latest_advert_timestamp=latest_advert_timestamp,
+            latest_path_len=latest["path_len"],
+            severity=classify_drift(latest_drift),
+            clock_unset=is_unset_clock(latest_advert_timestamp),
+            window_seconds=window_seconds,
+            first_observed_at=(oldest_row["oldest"] if oldest_row else None) or cutoff,
+            sample_count=agg["samples"] or 0,
+            bucket_count=agg["buckets"] or 0,
+            direct_sample_count=agg["direct_buckets"] or 0,
+            min_drift_seconds=agg["min_drift"] or 0,
+            max_drift_seconds=agg["max_drift"] or 0,
+            mean_drift_seconds=round(agg["mean_drift"] or 0.0, 1),
+            drift_rate_seconds_per_day=rate,
+            bucket_seconds=bucket,
+            samples=samples,
+        )
 
 
 class ContactNameHistoryRepository:

@@ -77,6 +77,7 @@ function createAnalytics(
     name_history: [],
     dm_message_count: 0,
     channel_message_count: 0,
+    clock_drift: null,
     includes_direct_messages: Boolean(contact),
     most_active_rooms: [],
     advert_paths: [],

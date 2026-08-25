@@ -10,6 +10,7 @@ from app.repository.channels import ChannelRepository
 from app.repository.contacts import (
     AmbiguousPublicKeyPrefixError,
     ContactAdvertPathRepository,
+    ContactClockDriftRepository,
     ContactNameHistoryRepository,
     ContactRepository,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "BotScheduleRepository",
     "ChannelRepository",
     "ContactAdvertPathRepository",
+    "ContactClockDriftRepository",
     "ContactNameHistoryRepository",
     "ContactRepository",
     "FanoutConfigRepository",

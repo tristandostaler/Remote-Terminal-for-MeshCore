@@ -42,6 +42,7 @@ from app.repository import (
     AppSettingsRepository,
     ChannelRepository,
     ContactAdvertPathRepository,
+    ContactClockDriftRepository,
     ContactRepository,
     MessageRepository,
     RawPacketRepository,
@@ -608,9 +609,26 @@ async def _process_advertisement(
         first_seen=timestamp,  # COALESCE in upsert preserves existing value
     )
 
-    # Upsert the contact BEFORE recording advert paths so the parent row
-    # exists when foreign key enforcement is enabled.
+    # Upsert the contact BEFORE recording drift or advert paths so the parent
+    # row exists when foreign key enforcement is enabled.
     await ContactRepository.upsert(contact_upsert)
+
+    # Record the sender's own clock against ours. The advert timestamp is signed
+    # (verified above), so this is a tamper-proof passive measurement of every
+    # node's clock -- but it deliberately lives in its own table and never
+    # touches last_seen/last_advert, for the reason given at the upsert above.
+    #
+    # Swallowed on failure: contact ingestion is a primary feature and a missing
+    # drift bucket is the cheapest thing in this function to lose.
+    try:
+        await ContactClockDriftRepository.record(
+            advert.public_key,
+            advert_timestamp=advert.timestamp,
+            observed_at=timestamp,
+            path_len=new_path_len,
+        )
+    except Exception:
+        logger.debug("Failed to record clock drift for %s", advert.public_key[:12], exc_info=True)
 
     # Keep recent unique advert paths for all contacts.
     await ContactAdvertPathRepository.record_observation(

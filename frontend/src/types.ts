@@ -221,6 +221,45 @@ export interface NearestRepeater {
   heard_count: number;
 }
 
+/**
+ * Clock drift is `advert_timestamp - our_receive_time`: positive means the node's
+ * clock runs ahead of the server's. Propagation delay only ever pushes a reading
+ * negative, so a healthy node sits at a small negative and each bucket keeps its
+ * *largest* reading. Everything is relative to the server clock — see
+ * `app/clock_drift.py`.
+ */
+export interface ClockDriftSample {
+  bucket_start: number;
+  drift_seconds: number;
+  sample_count: number;
+  /** Hops on the arrival this bucket kept; 0 = direct, so almost no delay to subtract. */
+  path_len: number;
+}
+
+export type DriftSeverity = 'in_sync' | 'minor' | 'major' | 'severe';
+
+export interface ContactClockDrift {
+  latest_drift_seconds: number;
+  latest_observed_at: number;
+  latest_advert_timestamp: number;
+  latest_path_len: number;
+  severity: DriftSeverity;
+  /** Advert timestamp predates 2001: the clock was never set, not merely wrong. */
+  clock_unset: boolean;
+  window_seconds: number;
+  first_observed_at: number;
+  sample_count: number;
+  bucket_count: number;
+  direct_sample_count: number;
+  min_drift_seconds: number;
+  max_drift_seconds: number;
+  mean_drift_seconds: number;
+  /** Trend in seconds/day, or null when too few samples span too little time. */
+  drift_rate_seconds_per_day: number | null;
+  bucket_seconds: number;
+  samples: ClockDriftSample[];
+}
+
 export interface ContactAnalyticsHourlyBucket {
   bucket_start: number;
   last_24h_count: number;
@@ -246,6 +285,8 @@ export interface ContactAnalytics {
   advert_paths: ContactAdvertPath[];
   advert_frequency: number | null;
   nearest_repeaters: NearestRepeater[];
+  /** Null when this contact's clock has never been measured. */
+  clock_drift: ContactClockDrift | null;
   hourly_activity: ContactAnalyticsHourlyBucket[];
   weekly_activity: ContactAnalyticsWeeklyBucket[];
 }
@@ -825,6 +866,60 @@ export interface RegionScopeStats {
   truncated?: boolean;
 }
 
+export interface RepeaterClockDriftEntry {
+  public_key: string;
+  name: string | null;
+  drift_seconds: number;
+  observed_at: number;
+  sample_count: number;
+  bucket_count: number;
+  drift_rate_seconds_per_day: number | null;
+  severity: DriftSeverity;
+  clock_unset: boolean;
+}
+
+export interface ClockDriftBucket {
+  timestamp: number;
+  mean_abs_drift_seconds: number;
+  max_abs_drift_seconds: number;
+  repeater_count: number;
+}
+
+export interface ClockDriftHistogramBin {
+  label: string;
+  count: number;
+}
+
+/**
+ * Repeater clock drift over the selected window. `median_drift_seconds` is the
+ * signed median across repeaters: one node far off is that node's problem, all of
+ * them off the same way is this server's clock.
+ */
+export interface RepeaterClockDriftStats {
+  repeaters_total: number;
+  repeaters_with_samples: number;
+  repeaters_unset_clock: number;
+  sample_count: number;
+  oldest_sample_at: number | null;
+  newest_sample_at: number | null;
+  in_sync: number;
+  minor: number;
+  major: number;
+  severe: number;
+  mean_abs_drift_seconds: number;
+  median_abs_drift_seconds: number;
+  median_drift_seconds: number;
+  furthest_behind: RepeaterClockDriftEntry | null;
+  furthest_ahead: RepeaterClockDriftEntry | null;
+  worst_offenders: RepeaterClockDriftEntry[];
+  fastest_rates: RepeaterClockDriftEntry[];
+  /** Clocks that were never set. Excluded from the mean and the rankings above. */
+  unset_clocks: RepeaterClockDriftEntry[];
+  histogram: ClockDriftHistogramBin[];
+  over_time: ClockDriftBucket[];
+  bucket_seconds: number;
+}
+
 export interface StatisticsResponse {
   /** Window the snapshot was built for. */
   window: StatsWindow;
@@ -858,6 +953,7 @@ export interface StatisticsResponse {
   multibyte_rollout: MultibyteRolloutStats;
   packets_over_time: PacketsOverTime;
   noise_floor: NoiseFloorHistoryStats;
+  repeater_clock_drift: RepeaterClockDriftStats;
 }
 
 /** Contact-level multibyte path adoption (nodes, not traffic). */
