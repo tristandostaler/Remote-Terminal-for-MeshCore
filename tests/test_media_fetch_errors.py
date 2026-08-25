@@ -279,3 +279,91 @@ async def test_voice_still_refuses_a_session_id_describing_another_recording(mon
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail == "voice session ID describes a different recording"
+
+
+def _complete_session():
+    return {
+        "session_id": "45abcdef",
+        # Bound to the OUTGOING message: this node sent the picture.
+        "message_id": 1,
+        "state": "complete",
+        "format": 1,
+        "width": 32,
+        "height": 24,
+        "size_bytes": 300,
+        "fragment_count": 2,
+        "fragments": [(0, b"a" * 152), (1, b"b" * 148)],
+    }
+
+
+async def test_opening_a_self_sent_image_needs_no_transfer_at_all(monkeypatch):
+    """Send a picture to yourself and it arrives back as a second message row.
+
+    Every fragment is already stored from the send, so opening the received copy
+    must render straight from the cache -- not ask the mesh for what this node is
+    holding, and not refuse because another message got there first.
+    """
+
+    async def get_message(_message_id):
+        return _incoming_image_message()
+
+    async def get_session(_session_id):
+        return _complete_session()
+
+    async def must_not_transmit(_radio_manager, _session):
+        raise AssertionError("asked the mesh for fragments this node already holds")
+
+    monkeypatch.setattr("app.routers.images.ImageRepository.enforce_cache_limit", _async_noop)
+    monkeypatch.setattr("app.routers.images.ImageRepository.create_session", _async_noop)
+    monkeypatch.setattr("app.routers.images.ImageRepository.get", get_session)
+    monkeypatch.setattr("app.routers.images.MessageRepository.get_by_id", get_message)
+    monkeypatch.setattr("app.routers.images.request_image_session", must_not_transmit)
+
+    result = await fetch_image(7)
+
+    assert result["state"] == "complete"
+    assert result["received_count"] == 2
+    assert result["missing_indices"] == []
+
+
+async def test_sending_one_picture_repeatedly_keeps_every_copy_openable(test_db):
+    """The flow that reported this: copy a message, send it again, open both."""
+    import app.repository.image as image_module
+    from app.repository.image import ImageRepository
+
+    original = image_module.db
+    image_module.db = test_db
+    try:
+        async with test_db.tx() as conn:
+            for message_id in (1, 2, 3):
+                await conn.execute(
+                    "INSERT INTO messages (id, type, conversation_key, text, received_at, "
+                    "outgoing) VALUES (?, 'PRIV', ?, ?, 1700000000, 1)",
+                    (message_id, "aa" * 32, ENVELOPE),
+                )
+        shared = {
+            "session_id": "45abcdef",
+            "direction": "outgoing",
+            "conversation_type": "PRIV",
+            "conversation_key": "aa" * 32,
+            "peer_public_key": "aa" * 32,
+            "format_id": 1,
+            "width": 32,
+            "height": 24,
+            "size_bytes": 300,
+            "fragment_count": 2,
+            "state": "complete",
+            "ttl_seconds": 3600,
+        }
+        for message_id in (1, 2, 3):
+            await ImageRepository.create_session(message_id=message_id, **shared)
+        await ImageRepository.add_fragment("45abcdef", 0, b"a" * 152)
+        await ImageRepository.add_fragment("45abcdef", 1, b"b" * 148)
+
+        session = await ImageRepository.get("45abcdef")
+        assert session is not None
+        assert session["state"] == "complete"
+        # One stored copy of the picture, not three.
+        assert len(session["fragments"]) == 2
+    finally:
+        image_module.db = original
