@@ -827,8 +827,13 @@ function compressionTitle(msg: Message): string | undefined {
 }
 
 const SEND_STATUS_TITLES: Record<DisplaySendStatus, string> = {
-  delivered: 'Delivered',
-  sent: 'Sent — no acknowledgement yet',
+  // One tick versus two is the WhatsApp convention, and it is *relative* -- it
+  // only means anything if you know the other mark exists. So each tooltip names
+  // its own tick count instead of leaving the reader to infer the scale from a
+  // mark they may never have seen. Meaning first, glyph second, so the sentence
+  // still reads sensibly to a screen reader that cannot see either.
+  delivered: 'Delivered (two ticks)',
+  sent: 'Sent (one tick) — the radio accepted it, but nothing has confirmed it yet',
   sending: 'Sending — still retrying',
   failed: 'Out of attempts without an acknowledgement',
   canceled: 'Sending cancelled',

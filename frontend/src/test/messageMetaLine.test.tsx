@@ -143,7 +143,7 @@ describe('message meta line: send progress', () => {
 
   it.each([
     ['sending', 'Sending — still retrying'],
-    ['sent', 'Sent — no acknowledgement yet'],
+    ['sent', 'Sent (one tick) — the radio accepted it, but nothing has confirmed it yet'],
     ['failed', 'Out of attempts without an acknowledgement'],
     ['canceled', 'Sending cancelled'],
   ] as const)('labels the %s state', (state, label) => {
@@ -167,7 +167,9 @@ describe('message meta line: send progress', () => {
       />
     );
 
-    expect(screen.getByLabelText('Delivered — acknowledged by the recipient')).toBeInTheDocument();
+    expect(
+      screen.getByLabelText('Delivered (two ticks) — acknowledged by the recipient')
+    ).toBeInTheDocument();
     expect(screen.queryByLabelText('Out of attempts without an acknowledgement')).toBeNull();
   });
 
@@ -263,6 +265,17 @@ describe('message meta line: every glyph explains itself', () => {
     );
 
     expect(screen.getByText('✓✓').getAttribute('title')).toContain('acknowledged by the recipient');
+  });
+
+  it.each([
+    [{ send_state: 'sent' } as const, '(one tick)'],
+    [{ acked: 1 } as const, '(two ticks)'],
+  ])('names its own tick count so the one-versus-two convention reads', (overrides, phrase) => {
+    // A single tick only means "not yet delivered" if you know a double tick
+    // exists; neither tooltip can rely on the reader having seen the other.
+    render(<MessageList messages={[createMessage(overrides)]} contacts={[]} loading={false} />);
+
+    expect(screen.getByLabelText(new RegExp(phrase.replace(/[()]/g, '\\$&')))).toBeInTheDocument();
   });
 
   it('explains both halves of the attempt counter and where the limit lives', () => {
