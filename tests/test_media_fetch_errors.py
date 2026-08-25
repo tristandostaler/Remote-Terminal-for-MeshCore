@@ -18,7 +18,7 @@ from meshcore import EventType
 from app.image_protocol import ImageEnvelope, ImageFormat
 from app.routers.images import fetch_image
 from app.routers.voice import fetch_voice
-from app.services.voice import RawDataUnsupportedError, send_raw_to_contact
+from app.services.raw_media import RawDataUnsupportedError, send_raw_to_contact
 
 ENVELOPE = ImageEnvelope("45abcdef", ImageFormat.JPEG, 2, 32, 24, 300).encode()
 
