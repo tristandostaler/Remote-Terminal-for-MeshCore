@@ -278,8 +278,7 @@ export function RoomServerPanel({ contact, onAuthenticatedChange }: RoomServerPa
       setAuthenticated(true);
       if (!result.authenticated) {
         toast.warning("Couldn't confirm room login", {
-          description:
-            result.message ?? 'The room server did not confirm the saved credential.',
+          description: result.message ?? 'The room server did not confirm the saved credential.',
         });
       }
     } catch (err) {

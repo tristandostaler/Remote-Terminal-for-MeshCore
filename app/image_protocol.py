@@ -52,7 +52,9 @@ class ImageEnvelope:
             raise ValueError("image dimensions must be 1..256 pixels")
         if not 1 <= self.size_bytes <= MAX_ENCODED_IMAGE_BYTES:
             raise ValueError("encoded image size is out of bounds")
-        expected_total = (self.size_bytes + MAX_IMAGE_FRAGMENT_BYTES - 1) // MAX_IMAGE_FRAGMENT_BYTES
+        expected_total = (
+            self.size_bytes + MAX_IMAGE_FRAGMENT_BYTES - 1
+        ) // MAX_IMAGE_FRAGMENT_BYTES
         if self.total != expected_total:
             raise ValueError("image size and fragment count do not agree")
 
@@ -72,12 +74,8 @@ class ImageEnvelope:
         if len(parts) != 6 or not re.fullmatch(r"[0-9a-z]{1,7}", parts[0]):
             return None
         try:
-            sid, format_id, total, width, height, size_bytes = (
-                int(part, 36) for part in parts
-            )
-            envelope = cls(
-                f"{sid:08x}", ImageFormat(format_id), total, width, height, size_bytes
-            )
+            sid, format_id, total, width, height, size_bytes = (int(part, 36) for part in parts)
+            envelope = cls(f"{sid:08x}", ImageFormat(format_id), total, width, height, size_bytes)
             if sid > 0xFFFFFFFF:
                 return None
             envelope.validate()
