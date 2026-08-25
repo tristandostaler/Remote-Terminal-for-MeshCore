@@ -199,6 +199,27 @@ puts AEIC on the air as a bare `0xAE1C`. Worth re-checking on an upstream bump: 
 AEIC ever did move, every inbound AEIC image would be dropped as an unknown type,
 and the symptom would be indistinguishable from the codec mismatch below.
 
+### One picture, one completion
+
+A one-data-chunk image — upstream's *typical* ft32 size, its own capacity note
+puts the mean at 155.8 B — goes out as **two** packets: the data chunk and the
+parity chunk. It used to complete on both. The data chunk finished it and the
+pending entry was dropped; the parity chunk then started a fresh entry in which
+the single missing body was recoverable *from parity alone*, so it finished again
+and the caller minted a second message row and a second session. One picture, two
+identical bubbles, for the commonest image size there is. Multi-chunk images never
+showed it, because parity alone cannot rebuild two missing bodies.
+
+`ChannelDataReassembler._completed` remembers finished images for
+`SESSION_TTL_SECONDS` and ignores later chunks of them. It matches on the chunk
+`total` as well as the key, so a genuinely different image that reused the id
+inside the window is still accepted — the same signal the "restarted with a new
+chunk count" reset path already trusts. The map is capped at
+`MAX_PENDING_IMAGES`, since a peer cycling image ids would otherwise grow it.
+
+Note it completes on the last *data* chunk, not on the parity chunk. Parity is
+redundancy; waiting for it would delay every image by a packet.
+
 ### An undecodable image says so, at INFO
 
 A picture in a codec this build cannot decode used to be dropped at DEBUG, and

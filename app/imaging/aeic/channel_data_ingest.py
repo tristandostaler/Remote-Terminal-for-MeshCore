@@ -85,6 +85,11 @@ class ChannelDataReassembler:
 
     def __init__(self) -> None:
         self._pending: dict[tuple[str, int, int], PendingImage] = {}
+        # Completed images, as key -> (finished_at, total). Kept because an image
+        # can finish while chunks of it are still arriving, and a late chunk of a
+        # forgotten image is indistinguishable from the first chunk of a new one.
+        # See :meth:`_already_finished`.
+        self._completed: dict[tuple[str, int, int], tuple[float, int]] = {}
 
     def _expire(self, now: float) -> None:
         stale = [key for key, e in self._pending.items() if now - e.last_seen > SESSION_TTL_SECONDS]
@@ -98,6 +103,32 @@ class ChannelDataReassembler:
                     entry.total,
                     SESSION_TTL_SECONDS,
                 )
+        for key in [k for k, (at, _t) in self._completed.items() if now - at > SESSION_TTL_SECONDS]:
+            del self._completed[key]
+
+    def _already_finished(self, key: tuple[str, int, int], total: int, now: float) -> bool:
+        """Whether this chunk belongs to an image that is already done.
+
+        A one-data-chunk image -- upstream's *typical* ft32 size, and two packets
+        on the air -- used to complete TWICE. The data chunk completes it, the
+        entry is dropped, and then the parity chunk arrives and starts a fresh
+        entry in which the single missing body is recoverable from parity alone.
+        So it completed again, and the caller minted a second message row and a
+        second session: one picture, two identical bubbles. Multi-chunk images
+        never showed it, because parity alone cannot rebuild two missing bodies.
+
+        Matching on ``total`` as well as the key is what keeps this from
+        swallowing a genuinely different image that reused the id inside the
+        window -- a different chunk count means a different picture, which is the
+        same signal the reset path in :meth:`note_chunk` already trusts.
+        """
+        finished = self._completed.get(key)
+        if finished is None:
+            return False
+        at, completed_total = finished
+        if completed_total != total:
+            return False
+        return now - at <= SESSION_TTL_SECONDS
 
     def _enforce_cap(self, protect: tuple[str, int, int]) -> None:
         """Trim to the ceiling, never evicting the chunk we just took.
@@ -135,6 +166,9 @@ class ChannelDataReassembler:
 
         self._expire(moment)
         key = (conversation_key, chunk.sender_prefix, chunk.img_id)
+        if self._already_finished(key, chunk.total, moment):
+            logger.debug("Ignoring a GRP_DATA chunk for image %s, which is already complete", key)
+            return None
         entry = self._pending.get(key)
         if entry is None:
             entry = PendingImage(total=chunk.total, first_seen=moment, last_seen=moment)
@@ -166,6 +200,9 @@ class ChannelDataReassembler:
         if result is None:
             return None
         self._pending.pop(key, None)
+        self._completed[key] = (moment, entry.total)
+        while len(self._completed) > MAX_PENDING_IMAGES:
+            del self._completed[min(self._completed, key=lambda k: self._completed[k][0])]
         bitstream, metadata_byte = result
         return bitstream, metadata_byte, recovered
 

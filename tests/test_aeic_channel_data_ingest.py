@@ -170,6 +170,87 @@ def _mco_app_body(subtype: int, version: int, *, name: bytes = b"Alice") -> byte
     return bytes([len(name)]) + name + bytes([(subtype << 4) | version]) + bytes(20)
 
 
+class TestCompletingOnlyOnce:
+    """One picture must produce one completion, whatever its size.
+
+    A one-data-chunk image is upstream's *typical* ft32 size (its own capacity
+    note puts the mean at 155.8 B) and goes out as two packets: the data chunk and
+    the parity chunk. It used to complete on both. The data chunk finished it and
+    the entry was dropped; the parity chunk then started a fresh entry in which
+    the single missing body was recoverable from parity alone, so it finished
+    again -- and the caller minted a second message row and a second session for
+    the same picture. Two identical bubbles, for the commonest image there is.
+    """
+
+    @pytest.mark.parametrize(
+        ("size", "expected_blobs"),
+        [(120, 2), (155, 2), (158, 3), (300, 3), (460, 4), (800, 7)],
+    )
+    def test_an_image_completes_exactly_once(self, size, expected_blobs):
+        r = ChannelDataReassembler()
+        blobs = _blobs(bytes(size))
+        assert len(blobs) == expected_blobs, "framing changed; the parity assumption needs review"
+
+        completions = [i for i, blob in enumerate(blobs) if r.note_chunk(CHANNEL, blob) is not None]
+
+        # And it completes on the LAST DATA chunk, not on the parity chunk: parity
+        # is redundancy, so waiting for it would delay every image by a packet.
+        assert completions == [expected_blobs - 2]
+
+    def test_the_bitstream_is_still_right_for_a_single_chunk_image(self):
+        """Suppressing the second completion must not cost the first its content."""
+        r = ChannelDataReassembler()
+        bitstream = bytes(range(120))
+        outcome = r.note_chunk(CHANNEL, _blobs(bitstream)[0])
+        assert outcome is not None
+        assert outcome[0] == bitstream
+        assert outcome[1] == META
+
+    def test_parity_still_rebuilds_a_chunk_that_never_arrived(self):
+        """The point of the parity packet, which this must not disable: drop a data
+        chunk and the image still completes, from parity."""
+        r = ChannelDataReassembler()
+        bitstream = bytes(range(255)) * 2
+        blobs = _blobs(bitstream)
+        assert len(blobs) >= 4, "need at least 3 data chunks for a meaningful loss"
+
+        for blob in blobs[1:]:  # chunk 0 never arrives
+            outcome = r.note_chunk(CHANNEL, blob)
+
+        assert outcome is not None
+        assert outcome[0] == bitstream
+        assert outcome[2] is True, "parity recovery did not report itself"
+
+    def test_a_different_image_reusing_the_id_is_not_swallowed(self):
+        """Suppression is keyed on the chunk count too. A different count means a
+        different picture, which is the same signal the reset path already trusts."""
+        r = ChannelDataReassembler()
+        first = build_image_chunks(bytes(120), META, sender_prefix=0x1234, img_id=9)
+        assert r.note_chunk(CHANNEL, first[0]) is not None
+
+        second = build_image_chunks(bytes(600), META, sender_prefix=0x1234, img_id=9)
+        outcomes = [r.note_chunk(CHANNEL, blob) for blob in second]
+
+        assert any(o is not None for o in outcomes), "a different image was suppressed"
+
+    def test_the_same_image_resent_after_the_window_is_accepted_again(self):
+        r = ChannelDataReassembler()
+        blob = _blobs(bytes(120))[0]
+        assert r.note_chunk(CHANNEL, blob, now=1000.0) is not None
+        assert r.note_chunk(CHANNEL, blob, now=1000.0 + 5) is None
+        assert r.note_chunk(CHANNEL, blob, now=1000.0 + SESSION_TTL_SECONDS + 1) is not None
+
+    def test_the_completed_memory_stays_bounded(self):
+        """It is keyed by sender and image id, so a peer cycling ids must not grow
+        it without limit."""
+        r = ChannelDataReassembler()
+        for img_id in range(MAX_PENDING_IMAGES * 3):
+            blobs = build_image_chunks(bytes(120), META, sender_prefix=0x99, img_id=img_id % 256)
+            r.note_chunk(CHANNEL, blobs[0], now=2000.0 + img_id)
+
+        assert len(r._completed) <= MAX_PENDING_IMAGES
+
+
 class TestMcoAppEnvelope:
     """MCO Advanced's official ``0x0120`` type, which carries a subtype inside.
 
