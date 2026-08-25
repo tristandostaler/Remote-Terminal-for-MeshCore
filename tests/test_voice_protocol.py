@@ -183,15 +183,56 @@ async def test_raw_media_does_not_convert_relayed_advert_to_zero_hop(monkeypatch
 
 @pytest.mark.parametrize(
     "route",
-    [("", -1, -1), ("01020304", 4, 0), ("0102", 1, 0), ("0102", 1, 3)],
+    [
+        # Flood: there is no path to put in the header.
+        ("", -1, -1),
+        # 64 hops overflows the 6-bit path-length field.
+        ("ab" * 64, 64, 0),
+        # 33 two-byte hashes is 66 bytes, past MAX_PATH_SIZE.
+        ("abcd" * 33, 33, 1),
+        # Path bytes disagree with the hop count at this hash width.
+        ("0102", 1, 0),
+        # No such path hash mode.
+        ("0102", 1, 3),
+    ],
 )
-def test_raw_command_rejects_flood_long_and_inconsistent_routes(route):
+def test_raw_command_rejects_flood_oversized_and_inconsistent_routes(route):
     class Contact:
         def effective_route_tuple(self):
             return route
 
     with pytest.raises(ValueError):
-        _raw_frame_for_contact(Contact(), b"voice")
+        _raw_frame_for_contact(Contact(), b"payload")
+
+
+@pytest.mark.parametrize(
+    ("route", "expected_packed"),
+    [
+        (("", 0, 0), 0x00),
+        (("01020304", 4, 0), 0x04),
+        (("0102030405060708", 8, 0), 0x08),
+        (("abcd" * 20, 20, 1), (1 << 6) | 20),
+        (("abcdef" * 21, 21, 2), (2 << 6) | 21),
+        (("ab" * 63, 63, 0), 0x3F),
+    ],
+)
+def test_raw_command_accepts_every_route_the_header_can_express(route, expected_packed):
+    """A 3-hop ceiling was never a protocol rule.
+
+    It made a picture or recording unfetchable from any contact further away
+    than three hops, reported as "raw media transfer is limited to 3 routed
+    hops" as though the mesh forbade it. Ordinary messages already travel those
+    paths; the only real bounds are the 6-bit length field and MAX_PATH_SIZE.
+    """
+
+    class Contact:
+        def effective_route_tuple(self):
+            return route
+
+    frame = _raw_frame_for_contact(Contact(), b"payload")
+
+    assert frame[0] == expected_packed
+    assert frame == bytes([expected_packed]) + bytes.fromhex(route[0]) + b"payload"
 
 
 async def test_channel_voice_fetch_targets_resolved_original_sender(monkeypatch):

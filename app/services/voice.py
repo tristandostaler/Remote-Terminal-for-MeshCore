@@ -25,7 +25,10 @@ from app.voice_protocol import (
 from app.websocket import broadcast_event
 
 logger = logging.getLogger(__name__)
-MAX_RAW_MEDIA_HOPS = 3
+MAX_RAW_MEDIA_PATH_LEN = 0x3F
+"""Ceiling of the 6-bit path-length field: the top two bits carry the hash mode."""
+MAX_RAW_MEDIA_PATH_BYTES = 64
+"""MeshCore's ``MAX_PATH_SIZE``. A wider path hash buys fewer hops inside it."""
 RAW_MEDIA_FRAGMENT_DELAY_SECONDS = 0.350
 UNSUPPORTED_CMD_ERROR_CODE = 1
 """``ERR_CODE_UNSUPPORTED_CMD`` in the companion protocol's error table."""
@@ -54,12 +57,22 @@ def _raw_frame_for_contact(
     path, path_len, hash_mode = route or contact.effective_route_tuple()
     if path_len < 0:
         raise ValueError("raw media transfer requires a direct or learned route")
-    if path_len > MAX_RAW_MEDIA_HOPS:
-        raise ValueError(f"raw media transfer is limited to {MAX_RAW_MEDIA_HOPS} routed hops")
     if hash_mode not in (0, 1, 2):
         raise ValueError("contact route has an unsupported path hash mode")
+    # Bound by what the packet header can express, nothing tighter. This used to
+    # refuse anything past 3 hops, which is not a protocol limit -- it made
+    # pictures and recordings unfetchable from any contact further away than
+    # that, reported as though the mesh forbade it. Ordinary messages already
+    # travel those routes; a fetch request is one small packet on the same path.
+    hop_width = hash_mode + 1
+    max_hops = min(MAX_RAW_MEDIA_PATH_LEN, MAX_RAW_MEDIA_PATH_BYTES // hop_width)
+    if path_len > max_hops:
+        raise ValueError(
+            f"raw media transfer cannot use a {path_len}-hop route: the packet header "
+            f"holds at most {max_hops} hops at this path hash width"
+        )
     path_bytes = bytes.fromhex(path)
-    if len(path_bytes) != path_len * (hash_mode + 1):
+    if len(path_bytes) != path_len * hop_width:
         raise ValueError("contact route is not valid for raw media")
     packed_path_len = (hash_mode << 6) | path_len
     return bytes([packed_path_len]) + path_bytes + payload
