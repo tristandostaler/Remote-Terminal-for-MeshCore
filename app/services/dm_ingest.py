@@ -24,6 +24,8 @@ from app.services.messages import (
     reconcile_duplicate_message,
     truncate_for_log,
 )
+from app.services.raw_media import note_inbound_text_chunk
+from app.services.raw_media_text import is_tunnel_chunk as is_raw_media_text_chunk
 
 if TYPE_CHECKING:
     from app.decoder import DecryptedDirectMessage
@@ -169,6 +171,16 @@ async def _store_direct_message(
     # keeping content dedup consistent (non-MCMP text is returned unchanged) and
     # recording the codec/ratio for the conversation view's meta line.
     text, compression = decode_and_describe(text)
+
+    # An rmt1: body is transport framing, not conversation: image or voice
+    # fragments riding text because the sending node has no CMD_SEND_RAW_DATA.
+    # It is consumed here -- before storage, dedup and broadcast -- so it never
+    # becomes a bubble. Our own echoed chunks are dropped without being fed back
+    # in, or we would answer our own fetch request.
+    if is_raw_media_text_chunk(text):
+        if not outgoing:
+            await note_inbound_text_chunk(text=text, sender_key=sender_key or conversation_key)
+        return None
 
     async def store() -> Message | None:
         if linked_packet_dedup and packet_id is not None:

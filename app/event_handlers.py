@@ -317,9 +317,8 @@ async def on_ack(event: "Event") -> None:
 
 async def on_raw_data(event: "Event") -> None:
     """Handle full PUSH_CODE_RAW_DATA payloads used by interoperable media."""
-    from app.services.image import handle_raw_image_payload
     from app.services.radio_runtime import radio_runtime
-    from app.services.voice import handle_raw_voice_payload
+    from app.services.raw_media import dispatch_raw_media_payload
 
     raw = event.payload.get("payload", b"")
     if isinstance(raw, str):
@@ -328,9 +327,7 @@ async def on_raw_data(event: "Event") -> None:
         except ValueError:
             return
     if isinstance(raw, (bytes, bytearray)):
-        payload = bytes(raw)
-        if not await handle_raw_image_payload(payload, radio_runtime):
-            await handle_raw_voice_payload(payload, radio_runtime)
+        await dispatch_raw_media_payload(bytes(raw), radio_runtime)
 
 
 def install_full_raw_data_adapter(meshcore) -> None:

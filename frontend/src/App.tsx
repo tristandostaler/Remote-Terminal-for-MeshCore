@@ -270,6 +270,27 @@ export function App() {
     [contacts, channels, setContacts, setChannels]
   );
 
+  const handleSetRawMediaTextFallback = useCallback(
+    async (id: string, enabled: boolean) => {
+      const apply = (next: boolean) => {
+        setContacts((prev) =>
+          prev.map((c) => (c.public_key === id ? { ...c, raw_media_text_fallback: next } : c))
+        );
+      };
+      const prior = contacts.find((c) => c.public_key === id);
+      apply(enabled); // optimistic
+      try {
+        await api.setRawMediaTextFallback(id, enabled);
+      } catch (error) {
+        apply(prior?.raw_media_text_fallback ?? true); // revert
+        toast.error('Failed to change the media fallback', {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [contacts, setContacts]
+  );
+
   const handleSetImageCodec = useCallback(
     async (type: 'channel' | 'contact', id: string, codec: ImageCodecId) => {
       const apply = (next: ImageCodecId) => {
@@ -680,6 +701,7 @@ export function App() {
     onToggleMute: handleToggleMute,
     onSetMcmpEnabled: handleSetMcmpEnabled,
     onSetImageCodec: handleSetImageCodec,
+    onSetRawMediaTextFallback: handleSetRawMediaTextFallback,
     onDeleteContact: handleDeleteContact,
     onDeleteChannel: handleDeleteChannel,
     onSetChannelFloodScopeOverride: handleSetChannelFloodScopeOverride,

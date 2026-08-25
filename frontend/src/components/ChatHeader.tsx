@@ -52,6 +52,7 @@ interface ChatHeaderProps {
     version: number
   ) => void;
   onSetImageCodec?: (type: 'channel' | 'contact', id: string, codec: ImageCodecId) => void;
+  onSetRawMediaTextFallback?: (id: string, enabled: boolean) => void;
   onSetChannelFloodScopeOverride?: (key: string, floodScopeOverride: string) => void;
   onSetChannelPathHashModeOverride?: (key: string, pathHashModeOverride: number | null) => void;
   onDeleteChannel: (key: string) => void;
@@ -80,6 +81,7 @@ export function ChatHeader({
   onToggleMute,
   onSetMcmpEnabled,
   onSetImageCodec,
+  onSetRawMediaTextFallback,
   onSetChannelFloodScopeOverride,
   onSetChannelPathHashModeOverride,
   onDeleteChannel,
@@ -171,13 +173,22 @@ export function ChatHeader({
     conversation.type === 'contact'
       ? (activeContact?.image_codec ?? 'ie4')
       : (activeChannel?.image_codec ?? 'ie4');
+  // Contacts only, and defaulting to on: the raw media transport is
+  // contact-directed even for a picture announced on a channel, so a channel has
+  // no such setting of its own.
+  const rawMediaTextFallback = activeContact?.raw_media_text_fallback ?? true;
   const showFeaturesButton =
     !!onSetMcmpEnabled &&
     ((conversation.type === 'contact' && !activeContactIsRoomServer) ||
       conversation.type === 'channel');
   // Any feature enabled -> highlight the button so active features are visible
   // without opening the modal.
-  const anyFeatureEnabled = mcmpEnabled || imageCodec !== 'ie4';
+  // The fallback is on by default, so its being on is not worth highlighting --
+  // only someone having deliberately turned it OFF is a state worth surfacing.
+  const anyFeatureEnabled =
+    mcmpEnabled ||
+    imageCodec !== 'ie4' ||
+    (conversation.type === 'contact' && !rawMediaTextFallback);
   const favoriteTitle =
     conversation.type === 'contact'
       ? isFav
@@ -603,8 +614,10 @@ export function ChatHeader({
           mcmpEnabled={mcmpEnabled}
           mcmpVersion={mcmpVersion}
           imageCodec={imageCodec}
+          rawMediaTextFallback={rawMediaTextFallback}
           onSetMcmpEnabled={onSetMcmpEnabled}
           onSetImageCodec={onSetImageCodec ?? (() => {})}
+          onSetRawMediaTextFallback={onSetRawMediaTextFallback}
         />
       )}
     </header>

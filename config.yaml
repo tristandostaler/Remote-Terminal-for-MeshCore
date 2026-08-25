@@ -1,6 +1,6 @@
 name: "RemoteTerm"
 description: "RemoteTerm-for-MeshCore-With-Bots"
-version: "1.12.1"
+version: "1.13.0"
 slug: "remoteterm"
 init: false
 arch:

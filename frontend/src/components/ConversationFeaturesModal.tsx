@@ -10,9 +10,10 @@ import { toast } from './ui/sonner';
 /**
  * Per-conversation MeshCore Open feature toggles. Opened from the chat header.
  *
- * Two features today: MCMP text compression, and which codec photos use. Each is
- * one bordered block; changes apply immediately. To add a feature, add a prop
- * pair (state + setter) and render another block.
+ * Three features today: MCMP text compression, which codec photos use, and
+ * whether media fragments may fall back to text. Each is one bordered block;
+ * changes apply immediately. To add a feature, add a prop pair (state + setter)
+ * and render another block.
  */
 
 interface FeatureRowProps {
@@ -206,6 +207,7 @@ interface ConversationFeaturesModalProps {
   mcmpEnabled: boolean;
   mcmpVersion: number;
   imageCodec: ImageCodecId;
+  rawMediaTextFallback: boolean;
   onSetMcmpEnabled: (
     type: 'channel' | 'contact',
     id: string,
@@ -213,6 +215,7 @@ interface ConversationFeaturesModalProps {
     version: number
   ) => void;
   onSetImageCodec: (type: 'channel' | 'contact', id: string, codec: ImageCodecId) => void;
+  onSetRawMediaTextFallback?: (id: string, enabled: boolean) => void;
 }
 
 export function ConversationFeaturesModal({
@@ -224,8 +227,10 @@ export function ConversationFeaturesModal({
   mcmpEnabled,
   mcmpVersion,
   imageCodec,
+  rawMediaTextFallback,
   onSetMcmpEnabled,
   onSetImageCodec,
+  onSetRawMediaTextFallback,
 }: ConversationFeaturesModalProps) {
   const { status: aeicStatus, refresh: refreshAeic } = useAeicStatus(open);
   // Only gate on the server's ability to ENCODE: that is what picking the codec
@@ -353,6 +358,31 @@ export function ConversationFeaturesModal({
               </p>
             )}
           </div>
+
+          {/* Contacts only. The raw transport is contact-directed even for a
+              picture announced on a channel, so a channel has nothing to set. */}
+          {conversationType === 'contact' && onSetRawMediaTextFallback && (
+            <div className="rounded-md border border-border p-3">
+              <FeatureRow
+                title="Send media as text if needed"
+                description="Standard photos and voice notes move their fragments as raw packets, which some node firmware cannot send at all. With this on, they travel as ordinary messages instead — about 2.5x the airtime, but the picture opens. Turn it off to get a clear error rather than a slow transfer."
+                checked={rawMediaTextFallback}
+                onCheckedChange={(next) => onSetRawMediaTextFallback(conversationId, next)}
+                ariaLabel={
+                  rawMediaTextFallback
+                    ? 'Disable the media text fallback'
+                    : 'Enable the media text fallback'
+                }
+              />
+
+              {!rawMediaTextFallback && (
+                <p className="mt-2 text-xs leading-snug text-muted-foreground">
+                  Off: if this node&apos;s firmware has no <code>CMD_SEND_RAW_DATA</code>, opening a
+                  standard photo or voice note from this contact will fail instead of falling back.
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>
