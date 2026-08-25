@@ -22,6 +22,7 @@ from app.voice_protocol import (
     MAX_VOICE_DURATION_MS,
     VoiceEnvelope,
     VoiceMode,
+    envelope_duration_seconds,
     fragment_codec2,
 )
 from app.websocket import broadcast_error, broadcast_event
@@ -176,11 +177,17 @@ async def fetch_voice(message_id: int) -> dict:
     # differing recording is: ``upsert_session`` leaves mode, duration and packet
     # count on the existing row, so without this check two recordings sharing an
     # id would play back through each other's metadata.
+    #
+    # Compare through ``envelope_duration_seconds``, not on the raw durations. A
+    # send stores the exact PCM length while the envelope carries whole seconds,
+    # so a 3457 ms recording is stored as 3457 and comes back off its own wire
+    # form as 4000. Comparing those directly rejected every recording that was
+    # not a whole number of seconds long.
     if existing is not None and (
         existing["mode"],
-        existing["duration_ms"],
+        envelope_duration_seconds(existing["duration_ms"]),
         existing["packet_count"],
-    ) != (int(envelope.mode), envelope.duration_ms, envelope.total):
+    ) != (int(envelope.mode), envelope_duration_seconds(envelope.duration_ms), envelope.total):
         raise HTTPException(
             status_code=409, detail="voice session ID describes a different recording"
         )

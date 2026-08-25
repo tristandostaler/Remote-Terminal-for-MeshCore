@@ -224,7 +224,8 @@ def _voice_message():
     return SimpleNamespace(
         id=43,
         type="PRIV",
-        text="VE3:jbxb73:3:c:a",
+        # 4 s on the wire (base36 "4"), because a 3457 ms recording rounds up.
+        text="VE3:jbxb73:3:c:4",
         sender_name=None,
         sender_key="ab" * 32,
         conversation_key="ab" * 32,
@@ -239,7 +240,10 @@ def _voice_session(**overrides):
         "message_id": 99,
         "state": "complete",
         "mode": 3,
-        "duration_ms": 10_000,
+        # What a send stores: the exact PCM length, NOT the whole seconds the
+        # envelope carries. Any comparison against a parsed envelope has to
+        # survive that, so no fixture here may use a round number of seconds.
+        "duration_ms": 3457,
         "packet_count": 12,
         "fragments": [(index, b"data") for index in range(12)],
     }
@@ -367,3 +371,49 @@ async def test_sending_one_picture_repeatedly_keeps_every_copy_openable(test_db)
         assert len(session["fragments"]) == 2
     finally:
         image_module.db = original
+
+
+async def test_a_recording_of_any_length_replays_after_a_round_trip(monkeypatch):
+    """RemoteTerm -> phone -> RemoteTerm: the flow that still failed after #44.
+
+    The envelope carries whole seconds, rounded up, while the send stores the
+    exact PCM length. Comparing those raw rejected every recording that was not
+    a whole number of seconds long -- which is nearly all of them -- as
+    "voice session ID describes a different recording".
+    """
+    for duration_ms, wire_seconds in ((1, "1"), (3457, "4"), (9_999, "a"), (10_000, "a")):
+        message = SimpleNamespace(
+            id=43,
+            type="PRIV",
+            text=f"VE3:jbxb73:3:c:{wire_seconds}",
+            sender_name=None,
+            sender_key="ab" * 32,
+            conversation_key="ab" * 32,
+            outgoing=False,
+        )
+
+        async def get_message(_message_id, message=message):
+            return message
+
+        async def get_session(_session_id, duration_ms=duration_ms):
+            return _voice_session(duration_ms=duration_ms)
+
+        monkeypatch.setattr("app.routers.voice.VoiceRepository.enforce_cache_limit", _async_noop)
+        monkeypatch.setattr("app.routers.voice.VoiceRepository.upsert_session", _async_noop)
+        monkeypatch.setattr("app.routers.voice.VoiceRepository.get", get_session)
+        monkeypatch.setattr("app.routers.voice.MessageRepository.get_by_id", get_message)
+
+        result = await fetch_voice(message.id)
+
+        assert result["state"] == "complete", f"{duration_ms} ms was rejected"
+
+
+async def test_a_recording_a_whole_second_apart_is_still_a_different_one(monkeypatch):
+    """Quantising must not blunt the guard past the envelope's own resolution."""
+    message = _patch_voice_fetch(monkeypatch, _voice_session(duration_ms=9_000))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await fetch_voice(message.id)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "voice session ID describes a different recording"
