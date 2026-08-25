@@ -185,9 +185,41 @@ to a channel; a slot this process never loaded is logged and skipped.
 ### More than one image codec rides GRP_DATA
 
 MCO Advanced ships **AEIC** (`0xAE1C`) *and* **MCOimg** (`0xFFF0`), plus MCMP
-text (`0xFFF1`). Only AEIC is a codec RemoteTerm has. `channel_data_ingest`
-recognises the others by type and reports them as unsupported rather than handing
-them to the AEIC decoder, which would turn them confidently into garbage.
+text (`0xFFF1`), plus its own official application type **`0x0120`** which
+supersedes the two `0xFFF*` developer types and carries MCOimg (subtype 1) or
+MCMP (subtype 2) inside a `nameLen | name | subtypeVersion | body` envelope. Only
+AEIC is a codec RemoteTerm has. `channel_data_ingest` recognises the others by
+type — reading `0x0120`'s subtype nibble to name it — and reports them as
+unsupported rather than handing them to the AEIC decoder, which would turn them
+confidently into garbage.
+
+**AEIC did not move into `0x0120`.** Upstream's `channel_app_data_helper.dart`
+defines subtypes for MCOimg and MCMP only, and `image_chunk_transport.dart` still
+puts AEIC on the air as a bare `0xAE1C`. Worth re-checking on an upstream bump: if
+AEIC ever did move, every inbound AEIC image would be dropped as an unknown type,
+and the symptom would be indistinguishable from the codec mismatch below.
+
+### An undecodable image says so, at INFO
+
+A picture in a codec this build cannot decode used to be dropped at DEBUG, and
+the root logger defaults to INFO — so a frame that was correctly identified and
+correctly refused vanished without a trace anywhere, `/api/debug` included. "I
+sent a picture from MCO Advanced and nothing happened" was the whole diagnostic
+surface, and the cause (its photo codec was MCOimg, not AEIC) was unguessable.
+
+`_note_undecodable` now reports it at INFO and names the way out. Two things keep
+it from becoming noise: only a dropped **image** is raised (`carries_an_image`) —
+text over GRP_DATA is ordinary traffic that also arrives by other means — and it
+is suppressed per `(channel, data type)` for
+`UNDECODABLE_NOTICE_INTERVAL_SECONDS`, because one image is up to sixteen chunks
+and every one of them lands here. The window is deliberately not permanent: trying
+again after changing a setting has to say something, or a second attempt looks
+identical to a dead one.
+
+The matching UI half is in the conversation features modal: on a **channel**, it
+states that AEIC is the only photo codec MCO Advanced also reads, whichever codec
+is currently picked. The default is Standard, so the interoperable choice is the
+one nobody would guess they had to make.
 
 ### A received binary image has no message text
 

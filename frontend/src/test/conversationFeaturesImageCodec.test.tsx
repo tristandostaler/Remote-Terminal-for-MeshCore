@@ -63,12 +63,14 @@ describe('photo codec selector', () => {
     vi.mocked(api.getAeicStatus).mockResolvedValue(status());
   });
 
-  function renderModal(overrides: { imageCodec?: 'ie4' | 'aeic' } = {}) {
+  function renderModal(
+    overrides: { imageCodec?: 'ie4' | 'aeic'; conversationType?: 'contact' | 'channel' } = {}
+  ) {
     return render(
       <ConversationFeaturesModal
         open
         onClose={vi.fn()}
-        conversationType="contact"
+        conversationType={overrides.conversationType ?? 'contact'}
         conversationId={'aa'.repeat(32)}
         conversationName="Alice"
         mcmpEnabled={false}
@@ -80,6 +82,29 @@ describe('photo codec selector', () => {
       />
     );
   }
+
+  /*
+   * Which codec interoperates is not guessable, and the default is the one that
+   * does not: a photo sent to a channel on Standard is invisible to MCO Advanced,
+   * which never fetches image fragments. Channels only -- on a DM neither codec
+   * reaches that app, so the note would be advice that leads nowhere.
+   */
+  it('says which codec MCO Advanced can read, on a channel', async () => {
+    renderModal({ conversationType: 'channel', imageCodec: 'ie4' });
+    expect(await screen.findByText(/cannot read Standard photos/)).toBeVisible();
+    expect(screen.getByText(/Switch this channel to AI reconstruction/)).toBeVisible();
+  });
+
+  it('confirms the interoperable choice once it is made', async () => {
+    renderModal({ conversationType: 'channel', imageCodec: 'aeic' });
+    expect(await screen.findByText(/one photo codec MCO Advanced also reads/)).toBeVisible();
+  });
+
+  it('omits the interop note on a direct message', async () => {
+    renderModal({ conversationType: 'contact', imageCodec: 'ie4' });
+    await screen.findByRole('radio', { name: 'Standard' });
+    expect(screen.queryByText(/MCO Advanced/)).not.toBeInTheDocument();
+  });
 
   it('offers both codecs and marks the current one', async () => {
     renderModal({ imageCodec: 'ie4' });

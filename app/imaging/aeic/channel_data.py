@@ -84,6 +84,25 @@ decoder, which would produce a confident, wrong picture."""
 DATA_TYPE_MCMP = 0xFFF1
 """MCMP compressed text over GRP_DATA. Recognised for the same reason."""
 
+DATA_TYPE_MCO_APP = 0x0120
+"""MCO Advanced's *official* application data type, which supersedes the two
+``0xFFF*`` developer-namespace types above for everything it carries.
+
+Its body is an envelope rather than a payload::
+
+    senderNameLen(varuint) senderName(utf8) subtypeVersion(u8) body
+    subtypeVersion: high nibble = content subtype, low nibble = content version
+
+Recognised, never decoded. AEIC did NOT move here -- upstream's
+``channel_app_data_helper.dart`` defines subtypes for MCOimg (1) and MCMP (2)
+only, and ``image_chunk_transport.dart`` still puts AEIC on the air as a bare
+:data:`DATA_TYPE_AEIC_IMAGE`. The type is listed so a frame from a current MCO
+Advanced build reports what it is instead of "unknown data type 0x0120", which
+reads like a protocol fault rather than a codec this build has no decoder for."""
+
+MCO_APP_SUBTYPE_MCO_IMAGE = 0x01
+MCO_APP_SUBTYPE_MCMP = 0x02
+
 BLOB_BYTES = 163
 HEADER_BYTES = 4
 PARITY_LENGTH_BYTES = 1
@@ -348,6 +367,31 @@ class ParsedChannelData:
     @property
     def hop_count(self) -> int | None:
         return (self.path_len_byte & 0x3F) if self.arrived_by_flood else None
+
+
+def mco_app_subtype(payload: bytes) -> tuple[int, int] | None:
+    """Read ``(subtype, version)`` out of a :data:`DATA_TYPE_MCO_APP` body.
+
+    Enough of the envelope to *name* the content and no more -- there is no
+    decoder for any of it here, so a wrong guess costs a log line rather than a
+    picture. Returns None when the body is too short or the name length is not
+    credible, which keeps a malformed frame from being described confidently.
+
+    The leading name length is a varuint. Only the one-byte form is read: the
+    name is a radio name, the continuation form starts at 128 bytes, and a
+    two-byte length is far likelier to mean this is not the envelope we think
+    than to mean someone has a 200-character name.
+    """
+    if len(payload) < 2:
+        return None
+    name_len = payload[0]
+    if name_len & 0x80:
+        return None
+    subtype_at = 1 + name_len
+    if subtype_at >= len(payload):
+        return None
+    packed = payload[subtype_at]
+    return packed >> 4, packed & 0x0F
 
 
 def parse_channel_data_frame(frame: bytes) -> ParsedChannelData | None:
