@@ -178,6 +178,14 @@ class _Radio:
 
 _DIRECT_CONTACT = SimpleNamespace(effective_route_tuple=lambda: ("", 0, 0))
 
+# The text fallback turned off, so a firmware without CMD_SEND_RAW_DATA still
+# surfaces its error here instead of quietly succeeding over text. The fallback
+# itself is covered in tests/test_raw_media_text_fallback.py.
+_CONTACT_WITHOUT_FALLBACK = SimpleNamespace(
+    effective_route_tuple=lambda: ("", 0, 0),
+    raw_media_text_fallback=False,
+)
+
 
 @pytest.mark.parametrize(
     "payload",
@@ -191,7 +199,7 @@ async def test_raw_send_names_the_firmware_limit_and_its_version(payload):
     radio = _Radio(SimpleNamespace(type=EventType.ERROR, payload=payload), "v1.9.0-abc")
 
     with pytest.raises(RawDataUnsupportedError) as exc_info:
-        await send_raw_to_contact(radio, _DIRECT_CONTACT, b"payload")
+        await send_raw_to_contact(radio, _CONTACT_WITHOUT_FALLBACK, b"payload")
 
     assert "v1.9.0-abc" in str(exc_info.value)
     assert "CMD_SEND_RAW_DATA" in str(exc_info.value)

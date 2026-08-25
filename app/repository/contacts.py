@@ -216,6 +216,11 @@ class ContactRepository:
                 if "image_codec" in available_columns and row["image_codec"]
                 else "ie4"
             ),
+            raw_media_text_fallback=(
+                bool(row["raw_media_text_fallback"])
+                if "raw_media_text_fallback" in available_columns
+                else True
+            ),
             last_contacted=row["last_contacted"],
             last_read_at=row["last_read_at"],
             first_seen=row["first_seen"],
@@ -560,6 +565,17 @@ class ContactRepository:
             async with conn.execute(
                 "UPDATE contacts SET image_codec = ? WHERE public_key = ?",
                 (codec, public_key.lower()),
+            ) as cursor:
+                rowcount = cursor.rowcount
+        return rowcount > 0
+
+    @staticmethod
+    async def set_raw_media_text_fallback(public_key: str, enabled: bool) -> bool:
+        """Allow or forbid the rmt1: text fallback for this contact's media."""
+        async with db.tx() as conn:
+            async with conn.execute(
+                "UPDATE contacts SET raw_media_text_fallback = ? WHERE public_key = ?",
+                (1 if enabled else 0, public_key.lower()),
             ) as cursor:
                 rowcount = cursor.rowcount
         return rowcount > 0

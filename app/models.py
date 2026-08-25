@@ -123,6 +123,11 @@ class Contact(BaseModel):
     # Which codec an outbound photo uses: "ie4" (AVIF/JPEG fragments) or "aeic"
     # (the neural codec, carried as aei1: basE91 text). See app/imaging/aeic/.
     image_codec: str = "ie4"
+    # Whether image/voice fragments may fall back to rmt1: text messages when
+    # this node's firmware has no CMD_SEND_RAW_DATA. On by default: without it
+    # such a node cannot transfer a picture or a recording at all. Costs ~2.5x
+    # the airtime. See app/services/raw_media_text.py.
+    raw_media_text_fallback: bool = True
     last_contacted: int | None = None  # Last time we sent/received a message
     last_read_at: int | None = None  # Server-side read state tracking
     first_seen: int | None = None
@@ -461,6 +466,11 @@ class Channel(BaseModel):
     # Which codec an outbound photo uses: "ie4" (AVIF/JPEG fragments) or "aeic"
     # (the neural codec, carried as aei1: basE91 text). See app/imaging/aeic/.
     image_codec: str = "ie4"
+    # Whether image/voice fragments may fall back to rmt1: text messages when
+    # this node's firmware has no CMD_SEND_RAW_DATA. On by default: without it
+    # such a node cannot transfer a picture or a recording at all. Costs ~2.5x
+    # the airtime. See app/services/raw_media_text.py.
+    raw_media_text_fallback: bool = True
 
 
 class ChannelMessageCounts(BaseModel):
@@ -772,6 +782,22 @@ class ImageCodecSelectionResponse(BaseModel):
     type: Literal["contact", "channel"]
     id: str
     codec: str
+
+
+class RawMediaTextFallbackRequest(BaseModel):
+    """Turn the ``rmt1:`` text fallback on or off for one contact.
+
+    Contacts only: the raw transport is contact-directed even for a picture
+    announced on a channel, so a channel has nothing to set.
+    """
+
+    id: str
+    enabled: bool
+
+
+class RawMediaTextFallbackResponse(BaseModel):
+    id: str
+    enabled: bool
 
 
 class AeicAssetStatus(BaseModel):

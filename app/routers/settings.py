@@ -12,6 +12,8 @@ from app.models import (
     ImageCodecSelectionResponse,
     McmpEnabledRequest,
     McmpEnabledResponse,
+    RawMediaTextFallbackRequest,
+    RawMediaTextFallbackResponse,
 )
 from app.region_scope import normalize_region_scope
 from app.repository import AppSettingsRepository, ChannelRepository, ContactRepository
@@ -447,6 +449,37 @@ async def set_image_codec(request: ImageCodecSelectionRequest) -> ImageCodecSele
 
     logger.info("Set %s image codec to %s: %s", request.type, request.codec, request.id[:12])
     return ImageCodecSelectionResponse(type=request.type, id=request.id, codec=request.codec)
+
+
+@router.post("/raw-media-text-fallback/set", response_model=RawMediaTextFallbackResponse)
+async def set_raw_media_text_fallback(
+    request: RawMediaTextFallbackRequest,
+) -> RawMediaTextFallbackResponse:
+    """Allow or forbid carrying media fragments as text for one contact.
+
+    Image and voice fragments normally move as raw MeshCore packets. On firmware
+    without ``CMD_SEND_RAW_DATA`` that cannot work at all, and with this on the
+    same bytes travel as ``rmt1:`` text messages instead -- about 2.5x the
+    airtime, but a picture that opens rather than one that never does.
+
+    Contacts only: the raw transport is contact-directed even for a picture
+    announced on a channel, so this contact's setting is the one that governs.
+    """
+    from app.websocket import broadcast_event
+
+    found = await ContactRepository.set_raw_media_text_fallback(request.id, request.enabled)
+    if not found:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    refreshed = await ContactRepository.get_by_key(request.id)
+    if refreshed:
+        broadcast_event("contact", refreshed.model_dump())
+
+    logger.info(
+        "Set contact raw media text fallback %s: %s",
+        "on" if request.enabled else "off",
+        request.id[:12],
+    )
+    return RawMediaTextFallbackResponse(id=request.id, enabled=request.enabled)
 
 
 @router.post("/muted-channels/toggle", response_model=MuteChannelToggleResponse)

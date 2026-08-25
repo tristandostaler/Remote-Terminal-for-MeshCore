@@ -13,6 +13,7 @@ from app.keystore import get_public_key
 from app.repository import ContactRepository, VoiceRepository
 from app.services.raw_media import (
     RAW_MEDIA_FRAGMENT_DELAY_SECONDS,
+    peer_speaks_text_tunnel,
     send_raw_to_contact,
 )
 from app.voice_protocol import (
@@ -66,7 +67,12 @@ async def handle_raw_voice_payload(payload: bytes, radio_manager) -> bool:
             },
         )
         peer_key = session.get("peer_public_key")
-        if peer_key:
+        # The ACK exists for SAR clients that retry on its absence; nothing here
+        # consumes one (see the parse at the end of this function). A peer on the
+        # text tunnel is necessarily RemoteTerm -- nothing else speaks rmt1: --
+        # so an ACK there is a whole extra message per fragment bought for a
+        # consumer that does not exist. That doubles the cost of a recording.
+        if peer_key and not peer_speaks_text_tunnel(peer_key):
             contact = await ContactRepository.get_by_key(peer_key)
             if contact is not None:
                 try:

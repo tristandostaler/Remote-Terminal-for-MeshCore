@@ -1033,7 +1033,7 @@ def _log_model_load_failure() -> None:
 # high-entropy bytes) and, for v3, actively harmful: v3 has no "only if smaller"
 # gate, so it would inflate a chunk sized exactly to the radio budget and the
 # radio would TRUNCATE it. A truncated basE91 chunk corrupts the whole image.
-_FRAMED_PREFIXES = ("mcmp2:", "mcmp3:", "aei1", "IE4:")
+_FRAMED_PREFIXES = ("mcmp2:", "mcmp3:", "aei1", "IE4:", "VE3:", "rmt1:")
 
 
 def is_framed_payload(text: str) -> bool:

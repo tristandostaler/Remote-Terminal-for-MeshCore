@@ -178,6 +178,11 @@ class RadioManager:
         self.max_channels: int = 40
         self.path_hash_mode: int = 0
         self.path_hash_mode_supported: bool = False
+        # Set once this node answers ERR_CODE_UNSUPPORTED_CMD to CMD_SEND_RAW_DATA,
+        # so the image and voice transports stop retrying a command this firmware
+        # does not have and go straight to their text fallback. Per connection:
+        # cleared below, because the node on the other end of the cable can change.
+        self.raw_data_unsupported: bool = False
         # Companion repeat ("relay") mode: whether the firmware reports the flag
         # at all, its current value, and the frequencies it will repeat on.
         self.repeat_supported: bool = False
@@ -230,6 +235,7 @@ class RadioManager:
         self.max_channels = 40
         self.path_hash_mode = 0
         self.path_hash_mode_supported = False
+        self.raw_data_unsupported = False
         self.repeat_supported = False
         self.repeat_enabled = False
         self.allowed_repeat_freqs = []

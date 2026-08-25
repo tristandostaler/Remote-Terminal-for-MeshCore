@@ -246,6 +246,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ type, id, codec }),
     }),
+  /** Contacts only: the raw media transport is contact-directed even on a channel. */
+  setRawMediaTextFallback: (id: string, enabled: boolean) =>
+    fetchJson<{ id: string; enabled: boolean }>('/settings/raw-media-text-fallback/set', {
+      method: 'POST',
+      body: JSON.stringify({ id, enabled }),
+    }),
   sendVoice: async (conversationType: 'PRIV' | 'CHAN', conversationKey: string, pcm: Blob) => {
     const response = await fetch(
       `${API_BASE}/voice/send?conversation_type=${conversationType}&conversation_key=${encodeURIComponent(conversationKey)}`,
