@@ -12,8 +12,8 @@ from app.models import (
     ImageCodecSelectionResponse,
     McmpEnabledRequest,
     McmpEnabledResponse,
-    RawMediaTextFallbackRequest,
-    RawMediaTextFallbackResponse,
+    RawMediaTextTransportRequest,
+    RawMediaTextTransportResponse,
 )
 from app.region_scope import normalize_region_scope
 from app.repository import AppSettingsRepository, ChannelRepository, ContactRepository
@@ -451,23 +451,26 @@ async def set_image_codec(request: ImageCodecSelectionRequest) -> ImageCodecSele
     return ImageCodecSelectionResponse(type=request.type, id=request.id, codec=request.codec)
 
 
-@router.post("/raw-media-text-fallback/set", response_model=RawMediaTextFallbackResponse)
-async def set_raw_media_text_fallback(
-    request: RawMediaTextFallbackRequest,
-) -> RawMediaTextFallbackResponse:
-    """Allow or forbid carrying media fragments as text for one contact.
+@router.post("/raw-media-text-transport/set", response_model=RawMediaTextTransportResponse)
+async def set_raw_media_text_transport(
+    request: RawMediaTextTransportRequest,
+) -> RawMediaTextTransportResponse:
+    """Choose the transport for media fragments exchanged with one contact.
 
-    Image and voice fragments normally move as raw MeshCore packets. On firmware
-    without ``CMD_SEND_RAW_DATA`` that cannot work at all, and with this on the
-    same bytes travel as ``rmt1:`` text messages instead -- about 2.5x the
-    airtime, but a picture that opens rather than one that never does.
+    On (the default), a fetch request we start travels as ``rmt1:`` text messages
+    -- about 2.5x the airtime of raw packets, but the only transport that works on
+    firmware without ``CMD_SEND_RAW_DATA``. Off, requests go out raw and such
+    firmware reports a plain error instead of quietly spending the airtime.
+
+    Either way a *reply* mirrors the transport its request arrived on, so turning
+    this on does not cut off a MeshCore SAR client: it asks raw, it gets raw.
 
     Contacts only: the raw transport is contact-directed even for a picture
     announced on a channel, so this contact's setting is the one that governs.
     """
     from app.websocket import broadcast_event
 
-    found = await ContactRepository.set_raw_media_text_fallback(request.id, request.enabled)
+    found = await ContactRepository.set_raw_media_text_transport(request.id, request.enabled)
     if not found:
         raise HTTPException(status_code=404, detail="Contact not found")
     refreshed = await ContactRepository.get_by_key(request.id)
@@ -475,11 +478,11 @@ async def set_raw_media_text_fallback(
         broadcast_event("contact", refreshed.model_dump())
 
     logger.info(
-        "Set contact raw media text fallback %s: %s",
+        "Set contact raw media text transport %s: %s",
         "on" if request.enabled else "off",
         request.id[:12],
     )
-    return RawMediaTextFallbackResponse(id=request.id, enabled=request.enabled)
+    return RawMediaTextTransportResponse(id=request.id, enabled=request.enabled)
 
 
 @router.post("/muted-channels/toggle", response_model=MuteChannelToggleResponse)

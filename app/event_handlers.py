@@ -318,7 +318,7 @@ async def on_ack(event: "Event") -> None:
 async def on_raw_data(event: "Event") -> None:
     """Handle full PUSH_CODE_RAW_DATA payloads used by interoperable media."""
     from app.services.radio_runtime import radio_runtime
-    from app.services.raw_media import dispatch_raw_media_payload
+    from app.services.raw_media import MediaTransport, dispatch_raw_media_payload
 
     raw = event.payload.get("payload", b"")
     if isinstance(raw, str):
@@ -327,7 +327,10 @@ async def on_raw_data(event: "Event") -> None:
         except ValueError:
             return
     if isinstance(raw, (bytes, bytearray)):
-        await dispatch_raw_media_payload(bytes(raw), radio_runtime)
+        # Stated rather than defaulted: the handlers reply on the transport a
+        # request arrived on, so this is the fact that keeps SAR clients answered
+        # in raw even when the contact's text switch is on.
+        await dispatch_raw_media_payload(bytes(raw), radio_runtime, transport=MediaTransport.RAW)
 
 
 def install_full_raw_data_adapter(meshcore) -> None:

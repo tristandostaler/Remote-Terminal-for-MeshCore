@@ -176,14 +176,13 @@ class _Radio:
         return _Ctx()
 
 
-_DIRECT_CONTACT = SimpleNamespace(effective_route_tuple=lambda: ("", 0, 0))
-
-# The text fallback turned off, so a firmware without CMD_SEND_RAW_DATA still
-# surfaces its error here instead of quietly succeeding over text. The fallback
-# itself is covered in tests/test_raw_media_text_fallback.py.
-_CONTACT_WITHOUT_FALLBACK = SimpleNamespace(
+# Every test here reaches the raw send, so every one uses a contact with the text
+# transport turned off: with it on, a send we start goes straight to text and
+# never attempts raw at all. Choosing between the transports is covered in
+# tests/test_raw_media_text_transport.py.
+_CONTACT_ON_RAW_ONLY = SimpleNamespace(
     effective_route_tuple=lambda: ("", 0, 0),
-    raw_media_text_fallback=False,
+    raw_media_text_transport=False,
 )
 
 
@@ -199,7 +198,7 @@ async def test_raw_send_names_the_firmware_limit_and_its_version(payload):
     radio = _Radio(SimpleNamespace(type=EventType.ERROR, payload=payload), "v1.9.0-abc")
 
     with pytest.raises(RawDataUnsupportedError) as exc_info:
-        await send_raw_to_contact(radio, _CONTACT_WITHOUT_FALLBACK, b"payload")
+        await send_raw_to_contact(radio, _CONTACT_ON_RAW_ONLY, b"payload")
 
     assert "v1.9.0-abc" in str(exc_info.value)
     assert "CMD_SEND_RAW_DATA" in str(exc_info.value)
@@ -210,7 +209,7 @@ async def test_raw_send_reports_any_other_rejection_as_a_plain_runtime_error():
     radio = _Radio(SimpleNamespace(type=EventType.ERROR, payload=payload))
 
     with pytest.raises(RuntimeError) as exc_info:
-        await send_raw_to_contact(radio, _DIRECT_CONTACT, b"payload")
+        await send_raw_to_contact(radio, _CONTACT_ON_RAW_ONLY, b"payload")
 
     assert not isinstance(exc_info.value, RawDataUnsupportedError)
     # The image transport shares this sender, so the wording cannot say "voice".
@@ -222,7 +221,7 @@ async def test_raw_send_reports_a_silent_radio_without_claiming_a_firmware_limit
     radio = _Radio(None)
 
     with pytest.raises(RuntimeError) as exc_info:
-        await send_raw_to_contact(radio, _DIRECT_CONTACT, b"payload")
+        await send_raw_to_contact(radio, _CONTACT_ON_RAW_ONLY, b"payload")
 
     assert not isinstance(exc_info.value, RawDataUnsupportedError)
     assert "no radio response" in str(exc_info.value)

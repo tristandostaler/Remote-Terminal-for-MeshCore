@@ -8,7 +8,12 @@ from tests.test_migrations.conftest import LATEST_SCHEMA_VERSION
 
 
 class TestMigration077:
-    """Test migration 077: the per-contact media text fallback switch."""
+    """Test migration 077: the per-contact media text transport switch.
+
+    These run the whole chain from 76, so what they observe is the column under the
+    name migration 078 renamed it to. That is deliberate -- what matters to a user
+    upgrading is the end state, and 078's own test covers the rename in isolation.
+    """
 
     @staticmethod
     async def _contacts_db() -> aiosqlite.Connection:
@@ -48,14 +53,14 @@ class TestMigration077:
 
             cursor = await conn.execute("PRAGMA table_info(contacts)")
             columns = {row["name"]: row for row in await cursor.fetchall()}
-            assert "raw_media_text_fallback" in columns
-            assert columns["raw_media_text_fallback"]["notnull"] == 1
+            assert "raw_media_text_transport" in columns
+            assert columns["raw_media_text_transport"]["notnull"] == 1
 
             cursor = await conn.execute(
-                "SELECT raw_media_text_fallback FROM contacts WHERE public_key = ?", ("ab" * 32,)
+                "SELECT raw_media_text_transport FROM contacts WHERE public_key = ?", ("ab" * 32,)
             )
             row = await cursor.fetchone()
-            assert row is not None and row["raw_media_text_fallback"] == 1
+            assert row is not None and row["raw_media_text_transport"] == 1
         finally:
             await conn.close()
 
@@ -71,10 +76,10 @@ class TestMigration077:
             await conn.commit()
 
             cursor = await conn.execute(
-                "SELECT raw_media_text_fallback FROM contacts WHERE public_key = ?", ("cd" * 32,)
+                "SELECT raw_media_text_transport FROM contacts WHERE public_key = ?", ("cd" * 32,)
             )
             row = await cursor.fetchone()
-            assert row is not None and row["raw_media_text_fallback"] == 1
+            assert row is not None and row["raw_media_text_transport"] == 1
         finally:
             await conn.close()
 
@@ -84,10 +89,10 @@ class TestMigration077:
         conn = await self._contacts_db()
         try:
             await conn.execute(
-                "ALTER TABLE contacts ADD COLUMN raw_media_text_fallback INTEGER NOT NULL DEFAULT 1"
+                "ALTER TABLE contacts ADD COLUMN raw_media_text_transport INTEGER NOT NULL DEFAULT 1"
             )
             await conn.execute(
-                "INSERT INTO contacts (public_key, name, raw_media_text_fallback) VALUES (?, ?, 0)",
+                "INSERT INTO contacts (public_key, name, raw_media_text_transport) VALUES (?, ?, 0)",
                 ("ef" * 32, "Carol"),
             )
             await conn.commit()
@@ -95,10 +100,10 @@ class TestMigration077:
             await run_migrations(conn)
 
             cursor = await conn.execute(
-                "SELECT raw_media_text_fallback FROM contacts WHERE public_key = ?", ("ef" * 32,)
+                "SELECT raw_media_text_transport FROM contacts WHERE public_key = ?", ("ef" * 32,)
             )
             row = await cursor.fetchone()
-            assert row is not None and row["raw_media_text_fallback"] == 0
+            assert row is not None and row["raw_media_text_transport"] == 0
         finally:
             await conn.close()
 
@@ -135,6 +140,6 @@ class TestMigration077:
 
             cursor = await conn.execute("PRAGMA table_info(channels)")
             columns = {row["name"] for row in await cursor.fetchall()}
-            assert "raw_media_text_fallback" not in columns
+            assert "raw_media_text_transport" not in columns
         finally:
             await conn.close()

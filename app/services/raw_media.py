@@ -10,13 +10,24 @@ opening a picture reported itself as a voice error. It has its own home now.
 Nothing here knows which format it is carrying, so nothing here may say "voice"
 or "image": these messages surface verbatim in the UI.
 
-There are two transports, and this module picks between them. The raw one is
-always preferred: it is what MeshCore SAR clients speak, and it is far cheaper.
-When the node's own firmware has no ``CMD_SEND_RAW_DATA``, or a peer has shown
-it is speaking the text tunnel, fragments go over
-:mod:`app.services.raw_media_text` instead. Read that module before changing
-anything here -- the tunnel costs roughly 2.5x the airtime, so the choice is not
-a detail.
+There are two transports, and this module picks between them. Two rules decide,
+and only these two:
+
+**What we initiate** is decided by ``contacts.raw_media_text_transport`` (default
+on). On, our fetch requests go out over :mod:`app.services.raw_media_text` --
+this is a switch, not a fallback, so it does not wait for a raw send to fail
+first. Off, they go out raw and firmware without ``CMD_SEND_RAW_DATA`` raises
+:class:`RawDataUnsupportedError` rather than quietly spending 2.5x the airtime.
+
+**What we send in reply** mirrors the transport the request arrived on, whatever
+the switch says. A raw fetch request answered over text could not be read by the
+client that sent it, and a text request answered raw would leave our radio and
+arrive nowhere -- so mirroring is not a preference here, it is the only reply
+that can work. It is also what keeps MeshCore SAR clients working with the
+switch on: they ask raw, they get raw.
+
+Read :mod:`app.services.raw_media_text` before changing anything here -- the
+tunnel costs roughly 2.5x the airtime, so the choice is not a detail.
 """
 
 from __future__ import annotations
@@ -24,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from enum import Enum
 
 from meshcore import EventType
 
@@ -41,10 +53,21 @@ RAW_MEDIA_TEXT_CHUNK_DELAY_SECONDS = 1.2
 """Gap between text-tunnel chunks. Much wider than the raw gap above, because a
 chunk is a full-sized message rather than a bare fragment: firing 40 of them off
 back to back would hold the band and lose most of them."""
-TEXT_TUNNEL_PEER_TTL_SECONDS = 3600
-"""How long a peer stays remembered as speaking the text tunnel."""
 UNSUPPORTED_CMD_ERROR_CODE = 1
 """``ERR_CODE_UNSUPPORTED_CMD`` in the companion protocol's error table."""
+
+
+class MediaTransport(Enum):
+    """Which of the two transports carried, or will carry, a payload.
+
+    Threaded through :func:`dispatch_raw_media_payload` so a handler answering a
+    request knows how that request reached it. Without it the reply transport
+    would have to be guessed from remembered peer behaviour, which is a second
+    source of truth for something the arriving packet already states.
+    """
+
+    RAW = "raw"
+    TEXT = "text"
 
 
 class RawDataUnsupportedError(RuntimeError):
@@ -55,9 +78,10 @@ class RawDataUnsupportedError(RuntimeError):
     fragment in either direction, so retrying can never succeed and the caller
     should say what has to change instead.
 
-    Only reaches a caller when the text tunnel is unavailable too -- switched off
-    for the contact, or the contact is not one we can send a message to. With the
-    tunnel on, this is caught here and the payload goes over text.
+    Only reaches a caller when the text transport is unavailable too: switched
+    off for the contact, or the contact is not one we can send a message to. With
+    the switch on, a payload that has to go raw (mirroring a raw request) and
+    cannot is caught here and re-sent over text instead.
     """
 
 
@@ -113,69 +137,50 @@ async def _raw_route_for_contact(contact) -> tuple[str, int, int]:
     return route
 
 
-_text_tunnel_peers: dict[str, float] = {}
-"""Peers seen speaking the text tunnel, as ``key prefix -> expiry``."""
-
-
-def note_text_tunnel_peer(public_key: str, *, now: float | None = None) -> None:
-    """Remember that a peer is speaking the text tunnel.
-
-    Replies have to go back the same way. A peer that tunnels a fetch request is
-    telling us its node cannot send raw data -- and firmware without the send
-    command does not push received raw data up either, so answering with raw
-    fragments would succeed on our radio and arrive nowhere.
-    """
-    if not public_key:
-        return
-    moment = time.time() if now is None else now
-    _text_tunnel_peers[public_key[:12].lower()] = moment + TEXT_TUNNEL_PEER_TTL_SECONDS
-
-
-def peer_speaks_text_tunnel(public_key: str | None, *, now: float | None = None) -> bool:
-    """Whether this peer has used the text tunnel recently."""
-    moment = time.time() if now is None else now
-    for key in [key for key, expiry in _text_tunnel_peers.items() if expiry <= moment]:
-        del _text_tunnel_peers[key]
-    return _text_tunnel_peers.get((public_key or "")[:12].lower(), 0.0) > moment
-
-
-def forget_text_tunnel_peers() -> None:
-    """Forget every remembered tunnel peer. For tests and radio teardown."""
-    _text_tunnel_peers.clear()
-
-
-def _text_fallback_allowed(contact) -> bool:
-    """Whether this contact permits the text tunnel. Defaults to yes.
+def uses_text_transport(contact) -> bool:
+    """Whether this contact's media fragments travel as text. Defaults to yes.
 
     ``getattr`` rather than attribute access so a caller holding a contact-shaped
     object without the column (an older row, a test double) still gets the
     default rather than an AttributeError inside a send.
     """
-    return bool(getattr(contact, "raw_media_text_fallback", True))
+    return bool(getattr(contact, "raw_media_text_transport", True))
 
 
-def _starts_on_text_tunnel(radio_manager, contact) -> bool:
-    """Whether to skip the raw attempt entirely and go straight to text.
+def _resolve_transport(radio_manager, contact, requested: MediaTransport | None) -> MediaTransport:
+    """Pick the transport for one send.
 
-    Two reasons to skip. Our own firmware has already answered
-    ``ERR_CODE_UNSUPPORTED_CMD`` on this connection, so every raw attempt is a
-    round trip that cannot succeed -- and a picture is 15-40 of them. Or the peer
-    has spoken the tunnel, meaning raw fragments would not reach it.
+    ``requested`` is the transport a request arrived on, and it wins: a reply has
+    to go back the way it came to be readable at all. It is ``None`` when we are
+    the ones starting the exchange, and then the contact's switch decides.
+
+    The one case where a pinned ``RAW`` is overridden is a node whose firmware has
+    already answered ``ERR_CODE_UNSUPPORTED_CMD`` on this connection. Raw cannot
+    work there, so text is the only remaining way to answer -- and going straight
+    to it saves each of 40 fragments a doomed round trip rediscovering the limit.
     """
-    if not _text_fallback_allowed(contact):
-        return False
-    if getattr(radio_manager, "raw_data_unsupported", False):
-        return True
-    return peer_speaks_text_tunnel(getattr(contact, "public_key", None))
+    if not uses_text_transport(contact):
+        return MediaTransport.RAW
+    if requested is None:
+        return MediaTransport.TEXT
+    if requested is MediaTransport.RAW and getattr(radio_manager, "raw_data_unsupported", False):
+        return MediaTransport.TEXT
+    return requested
 
 
-async def send_raw_to_contact(radio_manager, contact, payload: bytes) -> None:
-    """Send one raw-media payload to a contact, over whichever transport works.
+async def send_raw_to_contact(
+    radio_manager,
+    contact,
+    payload: bytes,
+    *,
+    transport: MediaTransport | None = None,
+) -> None:
+    """Send one raw-media payload to a contact, over whichever transport applies.
 
-    Raw data when the node can (cheap, and what SAR clients speak), the
-    :mod:`app.services.raw_media_text` tunnel when it cannot.
+    ``transport`` is the transport a request arrived on, for a send that answers
+    one; leave it ``None`` when starting an exchange. See :func:`_resolve_transport`.
     """
-    if _starts_on_text_tunnel(radio_manager, contact):
+    if _resolve_transport(radio_manager, contact, transport) is MediaTransport.TEXT:
         await send_text_tunnel_to_contact(radio_manager, contact, payload)
         return
 
@@ -190,9 +195,9 @@ async def send_raw_to_contact(radio_manager, contact, payload: bytes) -> None:
             # contact: remember it so the remaining fragments do not each spend a
             # doomed round trip discovering it again.
             radio_manager.raw_data_unsupported = True
-            if _text_fallback_allowed(contact):
+            if uses_text_transport(contact):
                 logger.info(
-                    "Node cannot send raw data; carrying %d bytes over the text tunnel instead",
+                    "Node cannot send raw data; carrying %d bytes over the text transport instead",
                     len(payload),
                 )
                 await send_text_tunnel_to_contact(radio_manager, contact, payload)
@@ -202,7 +207,7 @@ async def send_raw_to_contact(radio_manager, contact, payload: bytes) -> None:
                 f"This node's firmware{f' ({version})' if version else ''} cannot send "
                 "raw data packets, which the standard image and voice formats use to "
                 "move fragments. Either update the node to a firmware build that "
-                "supports CMD_SEND_RAW_DATA, or turn on the text fallback for this "
+                "supports CMD_SEND_RAW_DATA, or turn on the text transport for this "
                 "contact in Conversation features."
             )
         raise RuntimeError(f"raw data send failed: {detail}")
@@ -252,7 +257,9 @@ async def send_text_tunnel_to_contact(radio_manager, contact, payload: bytes) ->
             raise RuntimeError(f"raw media text send failed: {detail}")
 
 
-async def dispatch_raw_media_payload(payload: bytes, radio_manager) -> None:
+async def dispatch_raw_media_payload(
+    payload: bytes, radio_manager, *, transport: MediaTransport = MediaTransport.RAW
+) -> None:
     """Hand one raw-media payload to whichever format claims it.
 
     The single dispatch point for both transports. A real ``RAW_DATA`` push and a
@@ -262,8 +269,8 @@ async def dispatch_raw_media_payload(payload: bytes, radio_manager) -> None:
     from app.services.image import handle_raw_image_payload
     from app.services.voice import handle_raw_voice_payload
 
-    if not await handle_raw_image_payload(payload, radio_manager):
-        await handle_raw_voice_payload(payload, radio_manager)
+    if not await handle_raw_image_payload(payload, radio_manager, transport=transport):
+        await handle_raw_voice_payload(payload, radio_manager, transport=transport)
 
 
 async def note_inbound_text_chunk(*, text: str, sender_key: str | None, radio_manager=None) -> bool:
@@ -280,7 +287,6 @@ async def note_inbound_text_chunk(*, text: str, sender_key: str | None, radio_ma
     if not sender_key:
         logger.debug("Dropping a raw media text chunk from an unidentified sender")
         return True
-    note_text_tunnel_peer(sender_key)
     payload = raw_media_text.note_chunk(chunk, sender_key=sender_key, now=time.time())
     if payload is None:
         return True
@@ -294,5 +300,5 @@ async def note_inbound_text_chunk(*, text: str, sender_key: str | None, radio_ma
         chunk.total,
         sender_key[:12],
     )
-    await dispatch_raw_media_payload(payload, radio_manager)
+    await dispatch_raw_media_payload(payload, radio_manager, transport=MediaTransport.TEXT)
     return True

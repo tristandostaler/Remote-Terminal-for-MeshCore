@@ -1,12 +1,15 @@
-"""Choosing a transport for media fragments, and falling back when raw data fails.
+"""Choosing a transport for media fragments.
 
 Firmware without ``CMD_SEND_RAW_DATA`` cannot move an image or voice fragment at
 all: not the fetch request out, not the fragments back. Opening a received
 picture on such a node answered 501 and there was nothing the person tapping it
-could do. These tests pin the way out -- the same payload bytes carried as
-``rmt1:`` text -- and the two things that make it usable rather than merely
-possible: not re-discovering the firmware limit once per fragment, and answering
-a peer on the transport it actually spoke.
+could do, so the same payload bytes are carried as ``rmt1:`` text instead.
+
+Two rules decide which transport runs, and these tests pin both. What we
+*initiate* follows ``contacts.raw_media_text_transport`` -- a switch, so it does
+not wait for a raw send to fail first. What we *reply* mirrors the transport its
+request arrived on, which is what keeps a MeshCore SAR client answered in raw
+with the switch on.
 """
 
 from types import SimpleNamespace
@@ -17,11 +20,9 @@ from meshcore import EventType
 from app.image_protocol import ImageFetchRequest, ImagePacket
 from app.services import raw_media
 from app.services.raw_media import (
+    MediaTransport,
     RawDataUnsupportedError,
-    forget_text_tunnel_peers,
     note_inbound_text_chunk,
-    note_text_tunnel_peer,
-    peer_speaks_text_tunnel,
     send_raw_to_contact,
 )
 from app.services.raw_media_text import parse_chunk, reassemble, reset_pending_transfers
@@ -34,10 +35,8 @@ PEER_KEY = "ab" * 32
 def _no_chunk_delay(monkeypatch):
     """The real 1.2 s inter-chunk gap is airtime pacing, not behaviour."""
     monkeypatch.setattr(raw_media, "RAW_MEDIA_TEXT_CHUNK_DELAY_SECONDS", 0)
-    forget_text_tunnel_peers()
     reset_pending_transfers()
     yield
-    forget_text_tunnel_peers()
     reset_pending_transfers()
 
 
@@ -92,12 +91,12 @@ class _Radio:
         return _Ctx()
 
 
-def _contact(*, fallback=True):
+def _contact(*, text=True):
     return SimpleNamespace(
         public_key=PEER_KEY,
         effective_route_tuple=lambda: ("", 0, 0),
         to_radio_dict=lambda: {"public_key": PEER_KEY},
-        raw_media_text_fallback=fallback,
+        raw_media_text_transport=text,
     )
 
 
@@ -112,55 +111,117 @@ def _reassembled(radio: _Radio) -> bytes | None:
     return reassemble(chunks, len(chunks))
 
 
-async def test_a_node_without_raw_data_carries_the_payload_over_text_instead():
-    """The reported failure. This used to be a 501 and a picture you could not open."""
-    radio = _Radio(raw_result=SimpleNamespace(type=EventType.ERROR, payload=UNSUPPORTED))
+async def test_a_request_we_start_goes_over_text_without_trying_raw_first():
+    """The switch, and the thing that makes it a switch rather than a fallback.
+
+    A raw attempt first would be a wasted round trip on the firmware this exists
+    for, and it is the *only* way to find out on that firmware -- so with the
+    switch on there is no attempt to waste.
+    """
+    radio = _Radio(raw_result=SimpleNamespace(type=EventType.OK, payload={}))
     payload = _payload()
 
     await send_raw_to_contact(radio, _contact(), payload)
 
-    assert radio.text_messages, "nothing was sent over the text tunnel"
+    assert not radio.raw_frames, "tried raw data even though the switch chose text"
+    assert _reassembled(radio) == payload
+
+
+async def test_a_request_we_start_goes_over_raw_when_the_switch_is_off():
+    radio = _Radio(raw_result=SimpleNamespace(type=EventType.OK, payload={}))
+
+    await send_raw_to_contact(radio, _contact(text=False), _payload())
+
+    assert len(radio.raw_frames) == 1
+    assert not radio.text_messages
+
+
+async def test_a_raw_request_is_answered_in_raw_even_with_the_switch_on():
+    """What keeps MeshCore SAR clients working. They speak raw data and nothing
+    else, so answering their fetch request over text would be unreadable -- the
+    switch governs what we start, never what we reply."""
+    radio = _Radio(raw_result=SimpleNamespace(type=EventType.OK, payload={}))
+
+    await send_raw_to_contact(radio, _contact(), _payload(), transport=MediaTransport.RAW)
+
+    assert len(radio.raw_frames) == 1
+    assert not radio.text_messages, "answered a raw request over text"
+
+
+async def test_a_text_request_is_answered_over_text():
+    radio = _Radio(raw_result=SimpleNamespace(type=EventType.OK, payload={}))
+    payload = _payload()
+
+    await send_raw_to_contact(radio, _contact(), payload, transport=MediaTransport.TEXT)
+
+    assert not radio.raw_frames
+    assert _reassembled(radio) == payload
+
+
+async def test_the_switch_off_keeps_raw_even_for_a_text_request():
+    """Off means "spend no extra airtime on this contact", which has to hold for a
+    reply too or the setting can be overridden by whoever asks."""
+    radio = _Radio(raw_result=SimpleNamespace(type=EventType.OK, payload={}))
+
+    await send_raw_to_contact(
+        radio, _contact(text=False), _payload(), transport=MediaTransport.TEXT
+    )
+
+    assert len(radio.raw_frames) == 1
+    assert not radio.text_messages
+
+
+async def test_a_reply_that_must_go_raw_still_falls_back_when_raw_cannot_work():
+    """Mirroring asks for raw; this firmware cannot send it. Text is then the only
+    remaining way to answer at all, so the switch being on still rescues it."""
+    radio = _Radio(raw_result=SimpleNamespace(type=EventType.ERROR, payload=UNSUPPORTED))
+    payload = _payload()
+
+    await send_raw_to_contact(radio, _contact(), payload, transport=MediaTransport.RAW)
+
+    assert radio.raw_data_unsupported is True
     assert _reassembled(radio) == payload
 
 
 async def test_the_firmware_limit_is_learned_once_not_once_per_fragment():
     """A picture is 15-40 fragments. Re-discovering the limit on each one costs a
     doomed radio round trip every time, which is the difference between a slow
-    transfer and an unusable one."""
+    transfer and an unusable one. Only reachable while mirroring raw requests --
+    a request we start never attempts raw with the switch on."""
     radio = _Radio(raw_result=SimpleNamespace(type=EventType.ERROR, payload=UNSUPPORTED))
     contact = _contact()
 
-    await send_raw_to_contact(radio, contact, _payload())
+    await send_raw_to_contact(radio, contact, _payload(), transport=MediaTransport.RAW)
     assert radio.raw_data_unsupported is True
     attempts_after_first = len(radio.raw_frames)
 
     for _ in range(5):
-        await send_raw_to_contact(radio, contact, _payload())
+        await send_raw_to_contact(radio, contact, _payload(), transport=MediaTransport.RAW)
 
     assert len(radio.raw_frames) == attempts_after_first == 1
 
 
-async def test_turning_the_fallback_off_restores_the_plain_firmware_error():
+async def test_turning_the_switch_off_restores_the_plain_firmware_error():
     radio = _Radio(
         raw_result=SimpleNamespace(type=EventType.ERROR, payload=UNSUPPORTED),
         firmware_version="v1.9.0-abc",
     )
 
     with pytest.raises(RawDataUnsupportedError) as exc_info:
-        await send_raw_to_contact(radio, _contact(fallback=False), _payload())
+        await send_raw_to_contact(radio, _contact(text=False), _payload())
 
     message = str(exc_info.value)
     assert "v1.9.0-abc" in message
     assert "CMD_SEND_RAW_DATA" in message
     # Both ways out have to be in the message: the person seeing it may not be
     # able to reflash a node, and the switch is not discoverable on its own.
-    assert "text fallback" in message
+    assert "text transport" in message
     assert not radio.text_messages
 
 
-async def test_a_contact_missing_the_column_entirely_still_gets_the_fallback():
+async def test_a_contact_missing_the_column_entirely_still_gets_the_text_transport():
     """An older contact row, or a caller holding a contact-shaped object, must not
-    turn a working fallback into an AttributeError in the middle of a send."""
+    turn a working transport into an AttributeError in the middle of a send."""
     radio = _Radio(raw_result=SimpleNamespace(type=EventType.ERROR, payload=UNSUPPORTED))
     contact = SimpleNamespace(
         public_key=PEER_KEY,
@@ -173,34 +234,6 @@ async def test_a_contact_missing_the_column_entirely_still_gets_the_fallback():
     assert _reassembled(radio) == _payload()
 
 
-async def test_a_peer_that_spoke_the_tunnel_is_answered_on_the_tunnel():
-    """Even though this node's raw data works perfectly.
-
-    A peer that tunnelled its fetch request is telling us its node has no
-    CMD_SEND_RAW_DATA -- and firmware without the send command does not push
-    received raw data up either. Raw fragments would leave our radio happily and
-    arrive nowhere.
-    """
-    radio = _Radio(raw_result=SimpleNamespace(type=EventType.OK, payload={}))
-    note_text_tunnel_peer(PEER_KEY)
-
-    await send_raw_to_contact(radio, _contact(), _payload())
-
-    assert not radio.raw_frames, "answered a text-tunnel peer with raw data"
-    assert _reassembled(radio) == _payload()
-
-
-async def test_a_tunnel_peer_is_forgotten_once_its_window_passes():
-    note_text_tunnel_peer(PEER_KEY, now=1000.0)
-
-    assert peer_speaks_text_tunnel(
-        PEER_KEY, now=1000.0 + raw_media.TEXT_TUNNEL_PEER_TTL_SECONDS - 1
-    )
-    assert not peer_speaks_text_tunnel(
-        PEER_KEY, now=1000.0 + raw_media.TEXT_TUNNEL_PEER_TTL_SECONDS + 1
-    )
-
-
 async def test_an_ordinary_radio_failure_is_not_treated_as_a_missing_command():
     """Only ERR_CODE_UNSUPPORTED_CMD means "this firmware cannot". Everything else
     is transient, and spending 2.5x the airtime on a text transfer because the
@@ -210,7 +243,7 @@ async def test_an_ordinary_radio_failure_is_not_treated_as_a_missing_command():
     )
 
     with pytest.raises(RuntimeError) as exc_info:
-        await send_raw_to_contact(radio, _contact(), _payload())
+        await send_raw_to_contact(radio, _contact(), _payload(), transport=MediaTransport.RAW)
 
     assert "raw data send failed" in str(exc_info.value)
     assert not radio.text_messages
@@ -242,16 +275,16 @@ async def test_the_radio_lock_is_taken_per_chunk_not_held_for_the_whole_transfer
 async def test_an_inbound_transfer_reaches_the_same_dispatch_a_raw_push_would():
     """The whole point: the bytes are indistinguishable once reassembled, so the
     image and voice handlers need no idea which transport carried them."""
-    dispatched: list[bytes] = []
+    dispatched: list[tuple[bytes, MediaTransport]] = []
 
-    async def record(payload, _radio_manager):
-        dispatched.append(payload)
+    async def record(payload, _radio_manager, *, transport=MediaTransport.RAW):
+        dispatched.append((payload, transport))
 
     original = raw_media.dispatch_raw_media_payload
     raw_media.dispatch_raw_media_payload = record
     try:
         request = ImageFetchRequest("45abcdef", "aabbccddeeff", tuple(range(140))).encode()
-        radio = _Radio(raw_result=SimpleNamespace(type=EventType.ERROR, payload=UNSUPPORTED))
+        radio = _Radio(raw_result=SimpleNamespace(type=EventType.OK, payload={}))
         await send_raw_to_contact(radio, _contact(), request)
         assert len(radio.text_messages) == 2
 
@@ -261,23 +294,33 @@ async def test_an_inbound_transfer_reaches_the_same_dispatch_a_raw_push_would():
             )
             assert handled is True
             # Nothing dispatched until the last chunk lands.
-            assert dispatched == ([] if index == 0 else [request])
+            assert dispatched == ([] if index == 0 else [(request, MediaTransport.TEXT)])
     finally:
         raw_media.dispatch_raw_media_payload = original
 
-    assert dispatched == [request]
+    # Dispatched as TEXT, so whatever this payload turns out to be is answered the
+    # same way. That is the whole mirroring rule, at the one point it is decided.
+    assert dispatched == [(request, MediaTransport.TEXT)]
 
 
-async def test_receiving_a_chunk_marks_the_sender_as_a_tunnel_peer(monkeypatch):
-    """So the fragments we send back go the same way. Without this the reply
-    leaves over raw data, which the peer's firmware cannot receive."""
-    monkeypatch.setattr(raw_media, "dispatch_raw_media_payload", _ignore_payload)
-    chunk = (await _one_tunnel_chunk())[0]
-    forget_text_tunnel_peers()
+async def test_an_inbound_chunk_is_dispatched_as_text_so_the_reply_mirrors_it():
+    """The replacement for remembering tunnel peers by key and TTL. The arriving
+    chunk already states its transport, so nothing has to be recalled -- and a
+    reply cannot disagree with the request it is answering."""
+    seen: list[MediaTransport] = []
 
-    await note_inbound_text_chunk(text=chunk, sender_key=PEER_KEY, radio_manager=None)
+    async def record(_payload, _radio_manager, *, transport=MediaTransport.RAW):
+        seen.append(transport)
 
-    assert peer_speaks_text_tunnel(PEER_KEY)
+    original = raw_media.dispatch_raw_media_payload
+    raw_media.dispatch_raw_media_payload = record
+    try:
+        chunk = (await _one_tunnel_chunk())[0]
+        await note_inbound_text_chunk(text=chunk, sender_key=PEER_KEY, radio_manager=None)
+    finally:
+        raw_media.dispatch_raw_media_payload = original
+
+    assert seen == [MediaTransport.TEXT]
 
 
 async def _ignore_payload(_payload, _radio_manager):
@@ -286,7 +329,7 @@ async def _ignore_payload(_payload, _radio_manager):
 
 async def _one_tunnel_chunk() -> list[str]:
     """One fetch request, framed for the tunnel: 13 bytes, so exactly one chunk."""
-    radio = _Radio(raw_result=SimpleNamespace(type=EventType.ERROR, payload=UNSUPPORTED))
+    radio = _Radio(raw_result=SimpleNamespace(type=EventType.OK, payload={}))
     await send_raw_to_contact(
         radio, _contact(), ImageFetchRequest("45abcdef", "aabbccddeeff").encode()
     )
@@ -306,16 +349,16 @@ async def test_a_chunk_from_an_unidentified_sender_is_swallowed_not_stored():
     assert await note_inbound_text_chunk(text=chunk, sender_key=None) is True
 
 
-async def test_a_voice_fragment_from_a_tunnel_peer_is_not_acked(monkeypatch):
-    """The ACK has no consumer on this side and no consumer on a tunnel peer's
-    side either -- it would be one extra message per fragment, doubling the cost
-    of a recording carried over text."""
+async def test_a_voice_fragment_that_arrived_as_text_is_not_acked(monkeypatch):
+    """The ACK has no consumer on this side, and a fragment that arrived over text
+    came from RemoteTerm, which has none either -- it would be one extra message
+    per fragment, doubling the cost of a recording carried over text."""
     from app.services import voice as voice_service
     from app.voice_protocol import VoicePacket
 
     sent: list[bytes] = []
 
-    async def record_send(_radio_manager, _contact, payload):
+    async def record_send(_radio_manager, _contact, payload, **_kwargs):
         sent.append(payload)
 
     async def session(_session_id):
@@ -334,13 +377,17 @@ async def test_a_voice_fragment_from_a_tunnel_peer_is_not_acked(monkeypatch):
 
     fragment = VoicePacket("45abcdef", 0, b"\x5a" * 8).encode()
 
-    note_text_tunnel_peer(PEER_KEY)
-    assert await voice_service.handle_raw_voice_payload(fragment, None) is True
-    assert sent == [], "acked a text-tunnel peer"
+    assert (
+        await voice_service.handle_raw_voice_payload(fragment, None, transport=MediaTransport.TEXT)
+        is True
+    )
+    assert sent == [], "acked a fragment that arrived over text"
 
-    # A peer on raw data still gets its ACK: a SAR client retries without one.
-    forget_text_tunnel_peers()
-    assert await voice_service.handle_raw_voice_payload(fragment, None) is True
+    # A fragment that arrived raw still gets its ACK: a SAR client retries without one.
+    assert (
+        await voice_service.handle_raw_voice_payload(fragment, None, transport=MediaTransport.RAW)
+        is True
+    )
     assert len(sent) == 1
 
 
@@ -430,7 +477,7 @@ async def test_opening_a_received_picture_now_works_on_a_node_without_raw_data(m
     assert _reassembled(radio) == ImageFetchRequest("45abcdef", bytes(range(6)).hex()).encode()
 
 
-async def test_the_same_picture_still_reports_501_when_the_fallback_is_off(monkeypatch):
+async def test_the_same_picture_still_reports_501_when_the_switch_is_off(monkeypatch):
     """The other half of the switch, at the level the person tapping it sees.
 
     Off means the old behaviour on purpose: a clear error rather than minutes of
@@ -442,7 +489,7 @@ async def test_the_same_picture_still_reports_501_when_the_fallback_is_off(monke
         raw_result=SimpleNamespace(type=EventType.ERROR, payload=UNSUPPORTED),
         firmware_version="v1.9.0-abc",
     )
-    images_router = _patch_image_router(monkeypatch, radio, _contact(fallback=False))
+    images_router = _patch_image_router(monkeypatch, radio, _contact(text=False))
 
     with pytest.raises(HTTPException) as exc_info:
         await images_router.fetch_image(7)

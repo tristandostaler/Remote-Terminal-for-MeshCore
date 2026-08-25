@@ -13,7 +13,8 @@ from app.keystore import get_public_key
 from app.repository import ContactRepository, VoiceRepository
 from app.services.raw_media import (
     RAW_MEDIA_FRAGMENT_DELAY_SECONDS,
-    peer_speaks_text_tunnel,
+    RAW_MEDIA_TEXT_CHUNK_DELAY_SECONDS,
+    MediaTransport,
     send_raw_to_contact,
 )
 from app.voice_protocol import (
@@ -48,7 +49,9 @@ async def request_voice_session(radio_manager, session: dict) -> None:
     await send_raw_to_contact(radio_manager, contact, request.encode())
 
 
-async def handle_raw_voice_payload(payload: bytes, radio_manager) -> bool:
+async def handle_raw_voice_payload(
+    payload: bytes, radio_manager, *, transport: MediaTransport = MediaTransport.RAW
+) -> bool:
     packet = VoicePacket.parse(payload)
     if packet is not None:
         session = await VoiceRepository.get(packet.session_id)
@@ -68,16 +71,19 @@ async def handle_raw_voice_payload(payload: bytes, radio_manager) -> bool:
         )
         peer_key = session.get("peer_public_key")
         # The ACK exists for SAR clients that retry on its absence; nothing here
-        # consumes one (see the parse at the end of this function). A peer on the
-        # text tunnel is necessarily RemoteTerm -- nothing else speaks rmt1: --
-        # so an ACK there is a whole extra message per fragment bought for a
-        # consumer that does not exist. That doubles the cost of a recording.
-        if peer_key and not peer_speaks_text_tunnel(peer_key):
+        # consumes one (see the parse at the end of this function). A fragment that
+        # arrived over text came from RemoteTerm -- nothing else speaks rmt1: -- so
+        # an ACK there is a whole extra message per fragment bought for a consumer
+        # that does not exist. That doubles the cost of a recording.
+        if peer_key and transport is not MediaTransport.TEXT:
             contact = await ContactRepository.get_by_key(peer_key)
             if contact is not None:
                 try:
                     await send_raw_to_contact(
-                        radio_manager, contact, encode_fragment_ack(packet.session_id, packet.index)
+                        radio_manager,
+                        contact,
+                        encode_fragment_ack(packet.session_id, packet.index),
+                        transport=transport,
                     )
                 except Exception as exc:
                     logger.debug("Voice fragment ACK failed: %s", exc)
@@ -94,14 +100,24 @@ async def handle_raw_voice_payload(payload: bytes, radio_manager) -> bool:
             return True
         wanted = set(request.missing_indices) if request.missing_indices else None
         fragments = session["fragments"][:MAX_VOICE_PACKETS]
+        # A re-ask carries only the gaps, so this loop is both the first delivery
+        # and every retry of it.
+        gap = (
+            RAW_MEDIA_TEXT_CHUNK_DELAY_SECONDS
+            if transport is MediaTransport.TEXT
+            else RAW_MEDIA_FRAGMENT_DELAY_SECONDS
+        )
         sent_count = 0
         for index, data in fragments:
             if wanted is not None and index not in wanted:
                 continue
             if sent_count:
-                await asyncio.sleep(RAW_MEDIA_FRAGMENT_DELAY_SECONDS)
+                await asyncio.sleep(gap)
             await send_raw_to_contact(
-                radio_manager, contact, VoicePacket(request.session_id, index, data).encode()
+                radio_manager,
+                contact,
+                VoicePacket(request.session_id, index, data).encode(),
+                transport=transport,
             )
             sent_count += 1
         return True

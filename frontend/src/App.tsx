@@ -270,20 +270,20 @@ export function App() {
     [contacts, channels, setContacts, setChannels]
   );
 
-  const handleSetRawMediaTextFallback = useCallback(
+  const handleSetRawMediaTextTransport = useCallback(
     async (id: string, enabled: boolean) => {
       const apply = (next: boolean) => {
         setContacts((prev) =>
-          prev.map((c) => (c.public_key === id ? { ...c, raw_media_text_fallback: next } : c))
+          prev.map((c) => (c.public_key === id ? { ...c, raw_media_text_transport: next } : c))
         );
       };
       const prior = contacts.find((c) => c.public_key === id);
       apply(enabled); // optimistic
       try {
-        await api.setRawMediaTextFallback(id, enabled);
+        await api.setRawMediaTextTransport(id, enabled);
       } catch (error) {
-        apply(prior?.raw_media_text_fallback ?? true); // revert
-        toast.error('Failed to change the media fallback', {
+        apply(prior?.raw_media_text_transport ?? true); // revert
+        toast.error('Failed to change the media transport', {
           description: error instanceof Error ? error.message : String(error),
         });
       }
@@ -701,7 +701,7 @@ export function App() {
     onToggleMute: handleToggleMute,
     onSetMcmpEnabled: handleSetMcmpEnabled,
     onSetImageCodec: handleSetImageCodec,
-    onSetRawMediaTextFallback: handleSetRawMediaTextFallback,
+    onSetRawMediaTextTransport: handleSetRawMediaTextTransport,
     onDeleteContact: handleDeleteContact,
     onDeleteChannel: handleDeleteChannel,
     onSetChannelFloodScopeOverride: handleSetChannelFloodScopeOverride,

@@ -426,6 +426,30 @@ back to the well-known bot-channel name, then a truncated key, and
 `isUnjoinedChannel` drives the "not joined" hint in the bot editor. `DEFAULT_BOT_CHANNELS`
 mirrors `BOT_CHANNEL_KEYS` in `app/channel_constants.py` — a test pins the two together.
 
+### `utils/mediaTransfer.ts`
+
+Waiting for an `IE4:`/`VE3:` transfer that arrives fragment by fragment.
+
+Both fetches used to poll a fixed number of times — 40 for a picture, 20 for a
+voice note — putting the ceiling at 30 and 15 seconds. Over the `rmt1:` text
+transport one image fragment is *two* messages about a second apart, so a
+20-fragment picture needs minutes: the poll gave up while fragments were still
+arriving and reported a working transfer as unavailable.
+
+`awaitMediaTransfer` waits on **progress** rather than a deadline. Fragments
+arriving reset the clock; only silence ends it, after
+`MEDIA_STALL_TIMEOUT_MS[transport]` (raw 8 s, text 25 s — a quiet stretch that is
+normal over text is a dead transfer over raw). Only a *rising* count counts as
+activity: treating any poll as activity is how a stall detector fails open. A
+stall resolves rather than throwing, because a half-arrived transfer is something
+to show and offer to retry, not an error. `now`/`sleep` are injectable so the loop
+is tested without timers.
+
+`ImageMessage`/`VoiceMessage` render the result as a distinct **`partial`** state —
+"5 of 14 parts missing — tap to retry", not "Unavailable". Retrying re-`POST`s the
+fetch, and the server asks the sender only for `missing_indices`, so what already
+arrived is kept and the retry costs two messages per missing fragment.
+
 ## Types and Contracts (`types.ts`)
 
 `AppSettings` currently includes:

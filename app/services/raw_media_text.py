@@ -6,12 +6,13 @@ implement that command answers ``ERR_CODE_UNSUPPORTED_CMD``, and on such a node
 neither format can move a single byte in either direction: not the fetch request
 out, not the fragments back. See :mod:`app.services.raw_media`.
 
-This module is the way out. It carries the *same payload bytes* the raw transport
-would have carried, basE91-encoded inside ordinary direct messages, so the
-receiving end can hand them to the very same
-:func:`app.services.raw_media.dispatch_raw_media_payload` a real raw-data push
-goes to. Nothing above or below this tunnel knows it is there -- no protocol
-module changes, no session or fragment logic changes.
+This module is the way out, and on the strength of that it is the *default* for
+requests we start (``contacts.raw_media_text_transport``, on unless someone turns
+it off). It carries the *same payload bytes* the raw transport would have carried,
+basE91-encoded inside ordinary direct messages, so the receiving end can hand them
+to the very same :func:`app.services.raw_media.dispatch_raw_media_payload` a real
+raw-data push goes to. Nothing above or below this tunnel knows it is there -- no
+protocol module changes, no session or fragment logic changes.
 
 It is the same trick :mod:`app.imaging.aeic.text_transport` plays for AEIC, and
 for the same reason: a text message is the one transport every route in this app
@@ -26,11 +27,17 @@ so one 158-byte image fragment does not fit in a 156-byte message -- it becomes
     158 B fragment -> 195 chars -> 2 messages
     a 20-fragment picture -> 40 messages -> minutes, not seconds
 
-The raw transport would have moved that picture in 20 packets. So the tunnel is
-strictly a fallback, never a preference: it is what you use when the alternative
-is a picture that cannot be opened at all. It is also why the per-contact switch
-exists (``Contact.raw_media_text_fallback``) -- someone metering a shared band
-may prefer the plain failure.
+The raw transport would have moved that picture in 20 packets. The tunnel is the
+default anyway, because a node that *can* send raw data loses only airtime by
+tunnelling, while a node that cannot gets a picture it could not otherwise open --
+and there is no way to know which kind a peer is before asking. That asymmetry is
+the whole argument, and the per-contact switch
+(``Contact.raw_media_text_transport``) is there for the person who does not accept
+it: someone metering a shared band may prefer the plain failure.
+
+Note what the switch does *not* govern. A reply mirrors the transport its request
+arrived on, so a MeshCore SAR client that asks in raw is answered in raw whatever
+the switch says -- see :mod:`app.services.raw_media`.
 
 ## Direct messages only, and never stored
 
@@ -65,10 +72,23 @@ produces (a 158-byte fragment; a 153-byte fetch request).
 
 No parity, no checksum, no retransmission inside the tunnel. A lost chunk loses
 its whole payload, because basE91 is stateful across the stream and a partial
-transfer cannot be decoded. That is survivable precisely because it looks like
-exactly what the layer above already handles: a lost *fragment*. The requester
-asks again with ``missing_indices`` and only the gaps are re-sent. A lost fetch
-request is retried by the person tapping the picture again.
+transfer cannot be decoded. This layer is deliberately only framing: it carries
+bytes and reassembles them, and it recovers nothing.
+
+That is survivable precisely because a lost payload looks like exactly what the
+layer above already handles: a lost *fragment*. Recovery lives there and only
+there. The requester asks again with ``missing_indices``, over this same tunnel,
+and only the gaps are re-sent -- so the retry costs two messages per missing
+fragment rather than a whole picture. Adding chunk-level repair here would put a
+second retry loop underneath a working one, at half the granularity that matters.
+
+The price of keeping it out is that a lost chunk wastes its sibling: both chunks
+of a two-chunk fragment are re-sent to replace either one. Two messages, on a
+transfer that is already forty.
+
+A lost fetch *request* is the one gap this leaves, since no fragment ever arrives
+to be counted missing. Nothing detects it: the person tapping the picture sees a
+transfer that never starts and asks again.
 
 A transfer whose chunks never all arrive is dropped after
 :data:`TRANSFER_TTL_SECONDS`, so a half-delivered payload cannot pin memory or
