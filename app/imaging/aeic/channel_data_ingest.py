@@ -41,10 +41,14 @@ import time
 from app.imaging.aeic.channel_data import (
     DATA_TYPE_AEIC_IMAGE,
     DATA_TYPE_MCMP,
+    DATA_TYPE_MCO_APP,
     DATA_TYPE_MCO_IMAGE,
+    MCO_APP_SUBTYPE_MCMP,
+    MCO_APP_SUBTYPE_MCO_IMAGE,
     ParsedChannelData,
     PendingImage,
     assemble,
+    mco_app_subtype,
     parse_chunk_blob,
     recover_missing_body,
 )
@@ -171,14 +175,100 @@ reassembler = ChannelDataReassembler()
 _decode_tasks: set[asyncio.Task] = set()
 
 
-def describe_data_type(data_type: int) -> str:
+UNDECODABLE_NOTICE_INTERVAL_SECONDS = 300
+"""How often to repeat the "cannot decode this" notice per channel and type.
+
+One picture is up to sixteen chunks, and every one of them lands here, so a plain
+per-frame notice would print a paragraph for a single image. Long enough to
+collapse an image (and a burst of them) into one line, short enough that trying
+again after changing a setting says something rather than looking dead."""
+
+
+def describe_data_type(data_type: int, payload: bytes = b"") -> str:
+    """Name what a GRP_DATA frame carries, for a human reading a log.
+
+    ``payload`` is only consulted for :data:`DATA_TYPE_MCO_APP`, whose content is
+    an envelope: the type alone says nothing about which codec is inside.
+    """
     if data_type == DATA_TYPE_AEIC_IMAGE:
         return "AEIC image"
     if data_type == DATA_TYPE_MCO_IMAGE:
         return "MCOimg image (codec not supported here)"
     if data_type == DATA_TYPE_MCMP:
         return "MCMP text over GRP_DATA"
+    if data_type == DATA_TYPE_MCO_APP:
+        subtype = mco_app_subtype(payload)
+        if subtype is None:
+            return "MCO Advanced app data (envelope unreadable)"
+        kind, version = subtype
+        if kind == MCO_APP_SUBTYPE_MCO_IMAGE:
+            return f"MCOimg v{version} image (codec not supported here)"
+        if kind == MCO_APP_SUBTYPE_MCMP:
+            return f"MCMP v{version} text over GRP_DATA"
+        return f"MCO Advanced app data, subtype {kind} v{version}"
     return f"unknown data type 0x{data_type:04X}"
+
+
+def carries_an_image(data_type: int, payload: bytes = b"") -> bool:
+    """Whether a frame we cannot decode was nonetheless somebody's picture.
+
+    This is the difference between a notice worth raising to a person and one
+    worth keeping at debug. Text over GRP_DATA is ordinary traffic that arrives
+    by other means anyway; an image is a thing someone deliberately sent that
+    will never appear, so silence about it is the bug being fixed here.
+    """
+    if data_type == DATA_TYPE_MCO_IMAGE:
+        return True
+    if data_type != DATA_TYPE_MCO_APP:
+        return False
+    subtype = mco_app_subtype(payload)
+    return subtype is not None and subtype[0] == MCO_APP_SUBTYPE_MCO_IMAGE
+
+
+_undecodable_notices: dict[tuple[str, int], float] = {}
+"""Last time each ``(channel, data type)`` pair was reported, for suppression."""
+
+
+def reset_undecodable_notices() -> None:
+    """Forget the suppression window. For tests; nothing in the app calls it."""
+    _undecodable_notices.clear()
+
+
+def _note_undecodable(parsed: ParsedChannelData, *, now: float | None = None) -> None:
+    """Say that a frame arrived which this build cannot turn into a picture.
+
+    At INFO for an image, because the alternative is what sent us here: a picture
+    someone sent, dropped for a good reason, with nothing anywhere to say so. The
+    frame is well formed and correctly identified -- there is simply no decoder
+    for that codec -- so the only failure was that it happened in silence.
+
+    Text stays at debug. It is ordinary channel traffic that also arrives decoded
+    by other means, so a notice would be noise rather than news.
+    """
+    description = describe_data_type(parsed.data_type, parsed.payload)
+    if not carries_an_image(parsed.data_type, parsed.payload):
+        logger.debug(
+            "Ignoring a GRP_DATA frame on channel %d: %s", parsed.channel_index, description
+        )
+        return
+
+    moment = time.time() if now is None else now
+    key = (str(parsed.channel_index), parsed.data_type)
+    last = _undecodable_notices.get(key)
+    if last is not None and moment - last < UNDECODABLE_NOTICE_INTERVAL_SECONDS:
+        logger.debug(
+            "Ignoring another GRP_DATA frame on channel %d: %s",
+            parsed.channel_index,
+            description,
+        )
+        return
+    _undecodable_notices[key] = moment
+    logger.info(
+        "Cannot show an image received on channel %d: %s. RemoteTerm decodes only "
+        "AEIC images on a channel -- ask the sender to send it as AEIC.",
+        parsed.channel_index,
+        description,
+    )
 
 
 async def handle_channel_data(
@@ -193,11 +283,7 @@ async def handle_channel_data(
     a peer must not take the link down.
     """
     if parsed.data_type != DATA_TYPE_AEIC_IMAGE:
-        logger.debug(
-            "Ignoring a GRP_DATA frame on channel %d: %s",
-            parsed.channel_index,
-            describe_data_type(parsed.data_type),
-        )
+        _note_undecodable(parsed)
         return False
 
     try:

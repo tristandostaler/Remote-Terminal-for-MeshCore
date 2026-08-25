@@ -350,6 +350,28 @@ export function ConversationFeaturesModal({
 
             {aeicStatus && <AeicModelPanel status={aeicStatus} onRefresh={refreshAeic} />}
 
+            {/* Channels only, and stated whichever codec is picked: on a channel AI
+                reconstruction is the one format MCO Advanced also speaks, and the
+                default is Standard -- so the interoperable choice is the one nobody
+                would guess they had to make. */}
+            {conversationType === 'channel' && (
+              <p className="mt-2 text-xs leading-snug text-muted-foreground">
+                {imageCodec === 'aeic' ? (
+                  <>
+                    On a channel this is the one photo codec MCO Advanced also reads — it travels as
+                    the same binary format that app sends. Its own photos only appear here if it
+                    sends them this way too; anything else arrives as a codec this server has no
+                    decoder for, and says so in the log.
+                  </>
+                ) : (
+                  <>
+                    MCO Advanced cannot read Standard photos — it never fetches image fragments.
+                    Switch this channel to AI reconstruction to exchange photos with it.
+                  </>
+                )}
+              </p>
+            )}
+
             {imageCodec === 'aeic' && (
               <p className="mt-2 text-xs leading-snug text-muted-foreground">
                 AI reconstruction is lossy in an unusual way: the receiver gets a recognisably

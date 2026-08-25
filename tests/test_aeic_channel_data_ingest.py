@@ -7,17 +7,24 @@ import pytest
 from app.imaging.aeic.channel_data import (
     DATA_TYPE_AEIC_IMAGE,
     DATA_TYPE_MCMP,
+    DATA_TYPE_MCO_APP,
     DATA_TYPE_MCO_IMAGE,
+    MCO_APP_SUBTYPE_MCMP,
+    MCO_APP_SUBTYPE_MCO_IMAGE,
     ParsedChannelData,
     build_image_chunks,
+    mco_app_subtype,
 )
 from app.imaging.aeic.channel_data_ingest import (
     MAX_PENDING_IMAGES,
     SESSION_TTL_SECONDS,
+    UNDECODABLE_NOTICE_INTERVAL_SECONDS,
     ChannelDataReassembler,
+    carries_an_image,
     describe_data_type,
     handle_channel_data,
     marker_text,
+    reset_undecodable_notices,
 )
 from app.imaging.aeic.text_transport import AeicStreamMetadata
 from app.imaging.aeic.transport import (
@@ -156,6 +163,165 @@ class TestDataTypeRouting:
         assert "AEIC" in describe_data_type(DATA_TYPE_AEIC_IMAGE)
         assert "MCOimg" in describe_data_type(DATA_TYPE_MCO_IMAGE)
         assert "not supported" in describe_data_type(DATA_TYPE_MCO_IMAGE)
+
+
+def _mco_app_body(subtype: int, version: int, *, name: bytes = b"Alice") -> bytes:
+    """One ``0x0120`` envelope: ``nameLen | name | subtypeVersion | body``."""
+    return bytes([len(name)]) + name + bytes([(subtype << 4) | version]) + bytes(20)
+
+
+class TestMcoAppEnvelope:
+    """MCO Advanced's official ``0x0120`` type, which carries a subtype inside.
+
+    Recognition only. Naming it matters because a current MCO Advanced build sends
+    images under this type, and "unknown data type 0x0120" reads like a protocol
+    fault rather than a codec this build cannot decode.
+    """
+
+    def test_the_subtype_byte_is_read_past_the_sender_name(self):
+        assert mco_app_subtype(_mco_app_body(MCO_APP_SUBTYPE_MCO_IMAGE, 3)) == (1, 3)
+        assert mco_app_subtype(_mco_app_body(MCO_APP_SUBTYPE_MCMP, 0, name=b"Bo")) == (2, 0)
+
+    def test_an_image_subtype_is_named_and_flagged_as_an_image(self):
+        body = _mco_app_body(MCO_APP_SUBTYPE_MCO_IMAGE, 3)
+        assert "MCOimg v3" in describe_data_type(DATA_TYPE_MCO_APP, body)
+        assert "not supported" in describe_data_type(DATA_TYPE_MCO_APP, body)
+        assert carries_an_image(DATA_TYPE_MCO_APP, body) is True
+
+    def test_text_in_the_envelope_is_not_treated_as_an_image(self):
+        """Only a dropped *picture* is worth telling someone about; text over
+        GRP_DATA is ordinary traffic that also arrives decoded by other means."""
+        body = _mco_app_body(MCO_APP_SUBTYPE_MCMP, 0)
+        assert "MCMP v0" in describe_data_type(DATA_TYPE_MCO_APP, body)
+        assert carries_an_image(DATA_TYPE_MCO_APP, body) is False
+        assert carries_an_image(DATA_TYPE_MCMP) is False
+
+    @pytest.mark.parametrize("body", [b"", b"\x05", b"\x05Ali", b"\x80\x01\x02"])
+    def test_an_unreadable_envelope_is_described_without_guessing(self, body):
+        """A short body, or a name length in the varuint continuation form, means
+        this is probably not the envelope we think. Say so rather than reading a
+        subtype out of whatever byte happens to be there."""
+        assert mco_app_subtype(body) is None
+        assert "unreadable" in describe_data_type(DATA_TYPE_MCO_APP, body)
+        assert carries_an_image(DATA_TYPE_MCO_APP, body) is False
+
+    def test_an_unrecognised_subtype_still_reports_its_numbers(self):
+        body = _mco_app_body(0x07, 2)
+        assert "subtype 7 v2" in describe_data_type(DATA_TYPE_MCO_APP, body)
+
+
+class TestUndecodableImageNotice:
+    """A picture that cannot be decoded has to SAY so.
+
+    This is the bug these tests exist for: an image sent from MCO Advanced in a
+    codec RemoteTerm has no decoder for was dropped at DEBUG, and the root logger
+    defaults to INFO -- so the frame was correctly identified, correctly refused,
+    and vanished without a trace anywhere, including ``/api/debug``. "I sent a
+    picture and nothing happened" was the entire diagnostic surface.
+    """
+
+    def _frame(self, data_type: int, payload: bytes, *, channel: int = 1) -> ParsedChannelData:
+        return ParsedChannelData(
+            snr_raw=0,
+            channel_index=channel,
+            path_len_byte=0xFF,
+            data_type=data_type,
+            payload=payload,
+        )
+
+    @pytest.fixture(autouse=True)
+    def _clean_notices(self):
+        reset_undecodable_notices()
+        yield
+        reset_undecodable_notices()
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_image_is_reported_at_info(self, caplog):
+        with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
+            await handle_channel_data(
+                self._frame(DATA_TYPE_MCO_IMAGE, bytes(50)), conversation_key=CHANNEL
+            )
+
+        assert [record for record in caplog.records if record.levelname == "INFO"], (
+            "a picture was dropped with nothing at INFO to say so"
+        )
+        assert "MCOimg" in caplog.text
+        # Names the way out, not just the refusal: the sender's codec choice is
+        # the only thing that can fix this, and it is not guessable.
+        assert "AEIC" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_dropped_text_stays_at_debug(self, caplog):
+        with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
+            await handle_channel_data(
+                self._frame(DATA_TYPE_MCMP, bytes(50)), conversation_key=CHANNEL
+            )
+
+        assert not [record for record in caplog.records if record.levelname == "INFO"]
+
+    @pytest.mark.asyncio
+    async def test_one_image_reports_once_not_once_per_chunk(self, caplog):
+        """An image is up to sixteen chunks and every one lands here. A notice per
+        frame would print a paragraph for a single picture."""
+        with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
+            for _ in range(16):
+                await handle_channel_data(
+                    self._frame(DATA_TYPE_MCO_IMAGE, bytes(50)), conversation_key=CHANNEL
+                )
+
+        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_suppression_is_per_channel_and_per_codec(self, caplog):
+        """Two channels, or two codecs, are two separate things to report -- and
+        collapsing them would hide the second."""
+        with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
+            await handle_channel_data(
+                self._frame(DATA_TYPE_MCO_IMAGE, bytes(50), channel=1), conversation_key=CHANNEL
+            )
+            await handle_channel_data(
+                self._frame(DATA_TYPE_MCO_IMAGE, bytes(50), channel=2), conversation_key=CHANNEL
+            )
+            await handle_channel_data(
+                self._frame(
+                    DATA_TYPE_MCO_APP, _mco_app_body(MCO_APP_SUBTYPE_MCO_IMAGE, 3), channel=1
+                ),
+                conversation_key=CHANNEL,
+            )
+
+        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_it_speaks_again_once_the_window_passes(self, caplog):
+        """Trying again after changing a setting has to say something. Permanent
+        suppression would make a second attempt look identical to a dead one."""
+        from app.imaging.aeic import channel_data_ingest
+
+        frame = self._frame(DATA_TYPE_MCO_IMAGE, bytes(50))
+        with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
+            channel_data_ingest._note_undecodable(frame, now=1000.0)
+            channel_data_ingest._note_undecodable(
+                frame, now=1000.0 + UNDECODABLE_NOTICE_INTERVAL_SECONDS - 1
+            )
+            channel_data_ingest._note_undecodable(
+                frame, now=1000.0 + UNDECODABLE_NOTICE_INTERVAL_SECONDS + 1
+            )
+
+        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_an_aeic_image_reports_nothing(self, caplog):
+        """The whole point is that this codec DOES work. A notice here would be
+        telling someone about a picture that is about to appear."""
+        with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
+            await handle_channel_data(
+                self._frame(DATA_TYPE_AEIC_IMAGE, _blobs(bytes(300))[0]),
+                conversation_key=CHANNEL,
+            )
+
+        assert not [
+            r for r in caplog.records if r.levelname == "INFO" and "Cannot show" in r.message
+        ]
 
 
 class TestTransportSelection:
