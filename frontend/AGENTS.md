@@ -336,6 +336,16 @@ Every message carries one small row under its text — time, hop badge, region, 
   - The wording is conversation-aware where the same glyph means different things: a channel message is confirmed by **repeater echoes**, a direct one by an **acknowledgement from the recipient**, so `✓✓3` and `?` must not name the wrong mechanism. Likewise the hop badge reads "Arrived over 2 hops" on an incoming message and "Echoed back over 2 hops" on our own.
   - The tick pair (`✓` sent / `✓✓` delivered, the WhatsApp convention, matching MCO Advanced's `done` vs `done_all` icons) is **relative** — one tick only means "not delivered yet" if you know a double tick exists. So both tooltips name their own tick count ("Sent (one tick) …", "Delivered (two ticks) …") rather than assuming the reader has seen the other mark. Note this reassigned the meaning of a single `✓`, which before this feature meant *delivered*; the tooltips are what keep that from being a silent trap.
 
+### Composer options tray (`MessageInput`)
+
+Emoji, photo and voice sit behind one `+` so the resting composer is a single button and the text field gets the width. Three things about it are load-bearing:
+
+- **The file input stays mounted while the tray is collapsed.** The tray closes the moment a file is picked, so an input that unmounted with it would drop the `change` event the OS dialog is about to deliver.
+- **The tray is skipped entirely when `voiceConversation` is absent**, leaving the emoji button in the row on its own. Hiding a lone button behind a second tap buys nothing.
+- **The voice button was left exactly where it was inside the tray, handlers untouched.** `startVoice` takes an explicit `setPointerCapture`, the drag-to-cancel threshold is measured against the button's own `getBoundingClientRect`, and the idle mic deliberately unmounts mid-gesture while a second, destructive-styled mic mounts in slot 0 — with a 10 s timeout as the backstop. That interaction is delicate and cannot be exercised in jsdom (no pointer capture) or in the preview (no microphone), so it must not be moved into a floating menu, which would unmount it when the recording UI replaces the composer row.
+
+The tray collapses after an emoji is inserted, after a photo is chosen, after a send, and when the conversation changes — a tray left open in one conversation should not greet you in the next.
+
 ### Radio settings behavior
 
 - `SettingsRadioSection.tsx` surfaces `path_hash_mode` only when `config.path_hash_mode_supported` is true.
