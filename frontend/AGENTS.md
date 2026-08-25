@@ -467,6 +467,7 @@ Clicking a contact's avatar in `ChatHeader` or `MessageList` opens a `ContactInf
 - Most active rooms (clickable → navigate to channel)
 - Route details from the canonical backend surface (`effective_route`, `effective_route_source`, `direct_route`, `route_override`)
 - Advert observation rate
+- Clock drift (`analytics.clock_drift`, hidden when never measured) — see "Clock drift surfaces" below
 - Nearest repeaters (resolved from first-hop path prefixes)
 - Recent advert paths (informational only; not part of DM route selection)
 
@@ -556,6 +557,21 @@ One `WindowSelector` at the top of `StatisticsView.tsx` drives every bounded pan
 - Chart x-axis labels follow `bucket_seconds` (`bucketLabeller`): clock time under an hour, date + time under a day, bare date above it.
 - The activity table's extra column only appears for windows wider than `1w` — narrower ones are already among the fixed 1h/24h/7d columns.
 - When the backend sets `truncated`, say so next to the number. The figure is the most recent slice of the window, not the whole of it.
+
+### Clock drift surfaces
+
+Two surfaces read the same measurement — the timestamp inside each advert, compared against the server clock. All formatting, colour, and wording rules live in `utils/clockDrift.ts`; the thresholds mirror `app/clock_drift.py`, so change them there first.
+
+**Contact info pane** (`ClockDriftSection` in `ContactInfoPane.tsx`) sits above telemetry on purpose: drift needs no request and no login, so it is already known when the pane opens. It leads with the offset, then one plain-language `driftDiagnosis()` line, because the number alone does not say what to do — a steady offset is one resync, a moving one is the node. `Details` reveals range/spread/mean, sample counts, and the caveat text.
+
+**Statistics** (`RepeaterClockDriftPanel` in `StatisticsView.tsx`) renders `stats.repeater_clock_drift`: summary tiles, a signed distribution histogram, "Furthest off", "Clocks still moving", "Clock never set", and a mesh-wide drift chart. Repeater names are clickable and call `onOpenContactInfo`, threaded from `ConversationPane` — that is the only reason `StatisticsView` takes a prop at all.
+
+Presentation rules that exist for a reason:
+
+- **Inside the ±1m band, direction is noise**, so `formatDrift` prints `in sync (-3s)` rather than "3s behind". Mesh airtime makes every healthy node read slightly negative; dressing that up as a finding trains the reader to ignore the panel.
+- **A flat series gets a sentence, not a chart.** When the spread is within the in-sync band the ticks collapse onto the same value and the chart reads as broken, so the pane says "Held within Xs across N readings" instead.
+- **A wrong server clock is called out**, not silently spread across every row: when `|median_drift_seconds|` exceeds the in-sync band the panel says to check this server first.
+- **The histogram does not force `interval={0}`.** Nine range labels fit a desktop pane and turn into mush on a phone; the tooltip still names every bin.
 
 ### Region-scope adoption panel
 

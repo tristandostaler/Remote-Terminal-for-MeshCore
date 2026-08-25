@@ -309,6 +309,65 @@ class NearestRepeater(BaseModel):
     heard_count: int
 
 
+class ClockDriftSample(BaseModel):
+    """One bucket of a contact's clock-drift series."""
+
+    bucket_start: int = Field(description="Unix timestamp for the start of the bucket")
+    drift_seconds: int = Field(
+        description=(
+            "Sender clock minus our receive clock, in seconds. Positive means the node "
+            "is ahead of this server. The largest (least propagation-delayed) reading in "
+            "the bucket."
+        )
+    )
+    sample_count: int = Field(description="Advert arrivals folded into this bucket")
+    path_len: int = Field(description="Hops on the arrival this bucket's drift came from")
+
+
+class ContactClockDrift(BaseModel):
+    """Clock drift for one contact, measured from its advert timestamps.
+
+    Every field is relative to this server's clock -- see ``app/clock_drift.py``
+    for the sign convention and the two biases (propagation delay, our own
+    clock) baked into the measurement.
+    """
+
+    latest_drift_seconds: int = Field(description="Most recent measured offset, in seconds")
+    latest_observed_at: int = Field(description="When that reading was taken (our clock)")
+    latest_advert_timestamp: int = Field(description="Sender clock from that reading")
+    latest_path_len: int = Field(description="Hops on the arrival that produced it")
+    severity: str = Field(description="Band for the latest reading: in_sync/minor/major/severe")
+    clock_unset: bool = Field(
+        description=(
+            "True when the latest advert timestamp predates 2001 -- the node's clock was "
+            "never set rather than merely wrong, so the drift figure is not a drift"
+        )
+    )
+    window_seconds: int = Field(description="Span the statistics below were computed over")
+    first_observed_at: int = Field(description="Oldest reading retained for this contact")
+    sample_count: int = Field(description="Advert arrivals measured in the window")
+    bucket_count: int = Field(description="Buckets in the window (the series length)")
+    direct_sample_count: int = Field(
+        description=(
+            "Buckets whose reading came from a zero-hop arrival. These carry almost no "
+            "propagation delay, so they are the trustworthy ones"
+        )
+    )
+    min_drift_seconds: int
+    max_drift_seconds: int
+    mean_drift_seconds: float
+    drift_rate_seconds_per_day: float | None = Field(
+        default=None,
+        description=(
+            "Least-squares trend in seconds of drift per day, or null when too few "
+            "samples span too little time to prove one. Separates a clock set wrong once "
+            "(near zero) from an oscillator walking away (large)"
+        ),
+    )
+    bucket_seconds: int = Field(description="Width of each returned sample bucket")
+    samples: list[ClockDriftSample] = Field(default_factory=list)
+
+
 class ContactAnalyticsHourlyBucket(BaseModel):
     """A single hourly activity bucket for contact analytics."""
 
@@ -343,6 +402,10 @@ class ContactAnalytics(BaseModel):
         description="Advert observations per hour (includes multi-path arrivals of same advert)",
     )
     nearest_repeaters: list[NearestRepeater] = Field(default_factory=list)
+    clock_drift: ContactClockDrift | None = Field(
+        default=None,
+        description="Clock drift measured from advert timestamps; null when never measured",
+    )
     hourly_activity: list[ContactAnalyticsHourlyBucket] = Field(default_factory=list)
     weekly_activity: list[ContactAnalyticsWeeklyBucket] = Field(default_factory=list)
 
@@ -1401,6 +1464,97 @@ class MultibyteRolloutStats(BaseModel):
     repeaters_multibyte: int
 
 
+class RepeaterClockDriftEntry(BaseModel):
+    """One repeater in a clock-drift ranking."""
+
+    public_key: str
+    name: str | None = None
+    drift_seconds: int = Field(description="Most recent measured offset in the window")
+    observed_at: int = Field(description="When that reading was taken")
+    sample_count: int = Field(description="Advert arrivals measured in the window")
+    bucket_count: int = Field(description="Readings in the window")
+    drift_rate_seconds_per_day: float | None = Field(
+        default=None, description="Trend, or null when unprovable from the samples held"
+    )
+    severity: str = Field(description="in_sync/minor/major/severe")
+    clock_unset: bool = Field(default=False, description="Clock was never set, not merely wrong")
+
+
+class ClockDriftBucket(BaseModel):
+    """Mesh-wide drift in one time bucket."""
+
+    timestamp: int = Field(description="Unix timestamp for the start of the bucket")
+    mean_abs_drift_seconds: float = Field(description="Mean |drift| across repeaters measured")
+    max_abs_drift_seconds: int = Field(description="Worst |drift| in the bucket")
+    repeater_count: int = Field(description="Distinct repeaters contributing to the bucket")
+
+
+class ClockDriftHistogramBin(BaseModel):
+    """One bar of the signed drift distribution."""
+
+    label: str = Field(description="Range this bin covers, e.g. '-5m…-1m'")
+    count: int = Field(description="Repeaters whose latest reading fell in the bin")
+
+
+class RepeaterClockDriftStats(BaseModel):
+    """Repeater clock drift over the selected statistics window.
+
+    Measured passively from the timestamp inside every advert (see
+    ``app/clock_drift.py``). Every figure is relative to this server's clock:
+    one repeater far off is that repeater's problem, but a large
+    ``median_drift_seconds`` across many of them points at this server instead.
+    """
+
+    repeaters_total: int = Field(description="Repeaters heard in the window")
+    repeaters_with_samples: int = Field(description="Of those, how many had a drift reading")
+    repeaters_unset_clock: int = Field(
+        description="Repeaters whose clock was never set (advert timestamp predates 2001)"
+    )
+    sample_count: int = Field(description="Advert arrivals measured across all repeaters")
+    oldest_sample_at: int | None = Field(
+        default=None, description="Oldest reading in the window; null when there are none"
+    )
+    newest_sample_at: int | None = Field(default=None, description="Most recent reading")
+    in_sync: int = Field(description="Repeaters within 1 minute")
+    minor: int = Field(description="Repeaters 1 minute to 5 minutes off")
+    major: int = Field(description="Repeaters 5 minutes to 1 hour off")
+    severe: int = Field(description="Repeaters more than 1 hour off")
+    mean_abs_drift_seconds: float = Field(
+        description="Mean |drift| across repeaters whose clock is set (see unset_clocks)"
+    )
+    median_abs_drift_seconds: float
+    median_drift_seconds: float = Field(
+        description=(
+            "Signed median across repeaters. Large in either direction is evidence this "
+            "server's own clock is the outlier, not the mesh's"
+        )
+    )
+    furthest_behind: RepeaterClockDriftEntry | None = Field(
+        default=None, description="Repeater whose clock trails ours by the most"
+    )
+    furthest_ahead: RepeaterClockDriftEntry | None = Field(
+        default=None, description="Repeater whose clock leads ours by the most"
+    )
+    worst_offenders: list[RepeaterClockDriftEntry] = Field(
+        default_factory=list, description="Largest |drift| first"
+    )
+    fastest_rates: list[RepeaterClockDriftEntry] = Field(
+        default_factory=list,
+        description="Largest |trend| first -- clocks actively running away, not merely set wrong",
+    )
+    unset_clocks: list[RepeaterClockDriftEntry] = Field(
+        default_factory=list,
+        description=(
+            "Repeaters whose clock was never set. Kept out of the mean and the rankings "
+            "-- decades of apparent drift would monopolise both -- but still counted in "
+            "the severity bands and the histogram"
+        ),
+    )
+    histogram: list[ClockDriftHistogramBin] = Field(default_factory=list)
+    over_time: list[ClockDriftBucket] = Field(default_factory=list)
+    bucket_seconds: int = Field(default=3600, description="Width of each over_time bucket")
+
+
 class StatisticsResponse(BaseModel):
     """Mesh statistics over one selectable time window.
 
@@ -1430,6 +1584,7 @@ class StatisticsResponse(BaseModel):
     multibyte_rollout: MultibyteRolloutStats
     packets_over_time: PacketsOverTime
     noise_floor: NoiseFloorHistoryStats
+    repeater_clock_drift: RepeaterClockDriftStats
 
 
 class TelemetryHistoryEntry(BaseModel):

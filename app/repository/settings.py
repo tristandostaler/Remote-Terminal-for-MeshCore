@@ -5,6 +5,8 @@ from typing import Any
 
 import aiosqlite
 
+from app import clock_drift
+from app.clock_drift import DRIFT_BUCKET_SECONDS
 from app.database import db
 from app.models import AppSettings
 from app.path_utils import bucket_path_hash_widths, bucket_region_scope, parse_packet_envelope
@@ -756,6 +758,246 @@ class StatisticsRepository:
         }
 
     @staticmethod
+    async def _repeater_clock_drift(cutoff: int | None, now: int) -> dict:
+        """Aggregate repeater clock drift over the window.
+
+        Two shapes come out of one pass over ``contact_clock_drift``:
+
+        - **Per repeater** -- its latest reading in the window, plus the buckets
+          needed to fit a trend. This is what the rankings and the histogram are
+          built from, one row per repeater so a chatty node cannot dominate.
+        - **Over time** -- mean and worst |drift| per bucket across all
+          repeaters, so a mesh-wide degradation is visible as a rising line
+          rather than something you have to infer from a table.
+
+        The median is reported signed as well as absolute on purpose. One
+        repeater far off is that repeater's problem; all of them off by the same
+        amount is this server's clock, and only the signed median distinguishes
+        those two.
+        """
+        window = (now - cutoff) if cutoff is not None else None
+        bucket = bucket_seconds_for_span(
+            window if window is not None else SECONDS_7D, minimum=DRIFT_BUCKET_SECONDS
+        )
+        where = "" if cutoff is None else "AND d.bucket_start >= ?"
+        window_params: tuple = () if cutoff is None else (cutoff,)
+
+        async with db.readonly() as conn:
+            # Denominator: repeaters heard in the window at all, so "12 of 30
+            # measured" reads honestly instead of hiding the ones we have no
+            # advert timestamps for.
+            heard_where = "" if cutoff is None else "AND last_seen >= ?"
+            async with conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM contacts "
+                f"WHERE type = 2 AND last_seen IS NOT NULL {heard_where}",
+                window_params,
+            ) as cursor:
+                row = await cursor.fetchone()
+            repeaters_total = (row["cnt"] if row else 0) or 0
+
+            # One row per repeater: its newest bucket in the window. The bare
+            # columns beside MAX(bucket_start) come from that same input row,
+            # which is the SQLite guarantee this relies on.
+            async with conn.execute(
+                f"""
+                SELECT d.public_key,
+                       c.name AS name,
+                       MAX(d.bucket_start) AS latest_bucket,
+                       d.drift_seconds AS drift_seconds,
+                       d.observed_at AS observed_at,
+                       d.advert_timestamp AS advert_timestamp,
+                       SUM(d.sample_count) AS sample_count,
+                       COUNT(*) AS bucket_count
+                FROM contact_clock_drift d
+                JOIN contacts c ON c.public_key = d.public_key
+                WHERE c.type = 2 {where}
+                GROUP BY d.public_key
+                """,
+                window_params,
+            ) as cursor:
+                latest_rows = await cursor.fetchall()
+
+            # Series per repeater, only for the ones a trend could apply to.
+            # Fitting a slope needs the points, so this is the one place a
+            # per-bucket fetch is unavoidable -- it is bounded by
+            # (repeaters x buckets in window) on a table that holds at most one
+            # row per node per hour.
+            async with conn.execute(
+                f"""
+                SELECT d.public_key, d.bucket_start, d.drift_seconds
+                FROM contact_clock_drift d
+                JOIN contacts c ON c.public_key = d.public_key
+                WHERE c.type = 2 {where}
+                ORDER BY d.public_key, d.bucket_start
+                """,
+                window_params,
+            ) as cursor:
+                series_rows = await cursor.fetchall()
+
+            # Readings from a clock that was never set are decades out, which on a
+            # shared axis flattens every real repeater into the baseline. They are
+            # counted in the bands and the histogram instead, where a magnitude
+            # bucket absorbs them without distorting anything.
+            async with conn.execute(
+                f"""
+                SELECT (d.bucket_start / ?) * ? AS slot,
+                       AVG(ABS(d.drift_seconds)) AS mean_abs,
+                       MAX(ABS(d.drift_seconds)) AS max_abs,
+                       COUNT(DISTINCT d.public_key) AS repeaters
+                FROM contact_clock_drift d
+                JOIN contacts c ON c.public_key = d.public_key
+                WHERE c.type = 2 AND d.advert_timestamp >= ? {where}
+                GROUP BY slot
+                ORDER BY slot
+                """,
+                (bucket, bucket, clock_drift.UNSET_CLOCK_BEFORE, *window_params),
+            ) as cursor:
+                over_time_rows = await cursor.fetchall()
+
+        if not latest_rows:
+            return {
+                "repeaters_total": repeaters_total,
+                "repeaters_with_samples": 0,
+                "repeaters_unset_clock": 0,
+                "sample_count": 0,
+                "oldest_sample_at": None,
+                "newest_sample_at": None,
+                "in_sync": 0,
+                "minor": 0,
+                "major": 0,
+                "severe": 0,
+                "mean_abs_drift_seconds": 0.0,
+                "median_abs_drift_seconds": 0.0,
+                "median_drift_seconds": 0.0,
+                "furthest_behind": None,
+                "furthest_ahead": None,
+                "worst_offenders": [],
+                "fastest_rates": [],
+                "unset_clocks": [],
+                "histogram": [
+                    {"label": label, "count": 0} for label in clock_drift.histogram_labels()
+                ],
+                "over_time": [],
+                "bucket_seconds": bucket,
+            }
+
+        rates: dict[str, float | None] = {}
+        grouped: dict[str, list[tuple[int, int]]] = {}
+        for row in series_rows:
+            grouped.setdefault(row["public_key"], []).append(
+                (row["bucket_start"], row["drift_seconds"])
+            )
+        for key, points in grouped.items():
+            rates[key] = clock_drift.drift_rate_per_day(points)
+
+        entries: list[dict] = []
+        severity_counts = {"in_sync": 0, "minor": 0, "major": 0, "severe": 0}
+        histogram = [0] * len(clock_drift.histogram_labels())
+        unset_clocks = 0
+        total_samples = 0
+
+        for row in latest_rows:
+            drift = row["drift_seconds"]
+            severity = clock_drift.classify_drift(drift)
+            severity_counts[severity] += 1
+            histogram[clock_drift.histogram_bin(drift)] += 1
+            unset = clock_drift.is_unset_clock(row["advert_timestamp"])
+            if unset:
+                unset_clocks += 1
+            total_samples += row["sample_count"] or 0
+            entries.append(
+                {
+                    "public_key": row["public_key"],
+                    "name": row["name"],
+                    "drift_seconds": drift,
+                    "observed_at": row["observed_at"],
+                    "sample_count": row["sample_count"] or 0,
+                    "bucket_count": row["bucket_count"] or 0,
+                    "drift_rate_seconds_per_day": rates.get(row["public_key"]),
+                    "severity": severity,
+                    "clock_unset": unset,
+                }
+            )
+
+        # A clock that was never set reads as decades behind. Left in, one of
+        # them turns the mean into a meaningless number and monopolises every
+        # ranking, so the summary statistics and the rankings run over clocks
+        # that are merely *wrong*, and the unset ones get their own list. They
+        # still count toward the severity bands and the histogram: being decades
+        # off is genuinely severe, it is just a different repair.
+        set_entries = [entry for entry in entries if not entry["clock_unset"]]
+        unset_entries = [entry for entry in entries if entry["clock_unset"]]
+
+        drifts = [entry["drift_seconds"] for entry in set_entries]
+        abs_drifts = [abs(value) for value in drifts]
+
+        by_magnitude = sorted(set_entries, key=lambda e: abs(e["drift_seconds"]), reverse=True)
+        # Only clocks actually going somewhere. A steady offset is a one-resync
+        # fix and already appears in the ranking above; padding this list with
+        # them would bury the ones that need the node looked at.
+        by_rate = sorted(
+            (
+                e
+                for e in set_entries
+                if e["drift_rate_seconds_per_day"] is not None
+                and abs(e["drift_rate_seconds_per_day"]) >= clock_drift.NOTABLE_RATE_SECONDS_PER_DAY
+            ),
+            key=lambda e: abs(e["drift_rate_seconds_per_day"]),
+            reverse=True,
+        )
+        by_signed = sorted(set_entries, key=lambda e: e["drift_seconds"])
+
+        observed_times = [row["observed_at"] for row in latest_rows]
+        # Both queries share one WHERE, so a non-empty latest_rows guarantees a
+        # non-empty series; the fallback only exists so this cannot raise.
+        oldest_bucket = (
+            min(row["bucket_start"] for row in series_rows)
+            if series_rows
+            else min(row["latest_bucket"] for row in latest_rows)
+        )
+
+        return {
+            # A repeater cannot have a reading in the window without also having
+            # been heard in it, so the max() never fires -- but "12 of 11" would
+            # be a worse thing to render than a slightly redundant clamp.
+            "repeaters_total": max(repeaters_total, len(entries)),
+            "repeaters_with_samples": len(entries),
+            "repeaters_unset_clock": unset_clocks,
+            "sample_count": total_samples,
+            "oldest_sample_at": oldest_bucket,
+            "newest_sample_at": max(observed_times),
+            **severity_counts,
+            "mean_abs_drift_seconds": (
+                round(sum(abs_drifts) / len(abs_drifts), 1) if abs_drifts else 0.0
+            ),
+            "median_abs_drift_seconds": round(clock_drift.median(abs_drifts), 1),
+            "median_drift_seconds": round(clock_drift.median(drifts), 1),
+            "furthest_behind": (
+                by_signed[0] if by_signed and by_signed[0]["drift_seconds"] < 0 else None
+            ),
+            "furthest_ahead": (
+                by_signed[-1] if by_signed and by_signed[-1]["drift_seconds"] > 0 else None
+            ),
+            "worst_offenders": by_magnitude[:10],
+            "fastest_rates": by_rate[:10],
+            "unset_clocks": unset_entries[:10],
+            "histogram": [
+                {"label": label, "count": count}
+                for label, count in zip(clock_drift.histogram_labels(), histogram, strict=True)
+            ],
+            "over_time": [
+                {
+                    "timestamp": row["slot"],
+                    "mean_abs_drift_seconds": round(row["mean_abs"] or 0.0, 1),
+                    "max_abs_drift_seconds": int(row["max_abs"] or 0),
+                    "repeater_count": row["repeaters"] or 0,
+                }
+                for row in over_time_rows
+            ],
+            "bucket_seconds": bucket,
+        }
+
+    @staticmethod
     async def get_all(window: str = DEFAULT_STATS_WINDOW) -> dict:
         """Aggregate all statistics from existing tables over ``window``.
 
@@ -847,6 +1089,7 @@ class StatisticsRepository:
         region_scope.update(await StatisticsRepository._region_scope_senders(cutoff))
         multibyte_rollout = await StatisticsRepository._multibyte_rollout()
         packets_over_time = await StatisticsRepository._packets_over_time(cutoff, now)
+        repeater_clock_drift = await StatisticsRepository._repeater_clock_drift(cutoff, now)
 
         return {
             "window": window,
@@ -868,4 +1111,5 @@ class StatisticsRepository:
             "region_scope": region_scope,
             "multibyte_rollout": multibyte_rollout,
             "packets_over_time": packets_over_time,
+            "repeater_clock_drift": repeater_clock_drift,
         }

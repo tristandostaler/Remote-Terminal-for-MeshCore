@@ -25,6 +25,7 @@ from typing import Any
 from meshcore import EventType
 
 from app.radio import RadioDisconnectedError, RadioOperationBusyError
+from app.repository.contacts import ContactClockDriftRepository
 from app.repository.noise_floor import NoiseFloorRepository
 from app.services.radio_runtime import radio_runtime as radio_manager
 
@@ -36,9 +37,17 @@ STATS_SAMPLE_INTERVAL_SECONDS = 60
 # retention horizon is a year, so being an hour late costs nothing.
 NOISE_FLOOR_PRUNE_INTERVAL_SECONDS = 6 * 3600
 
+# Clock drift compaction rides the same slow cadence. This loop is the only
+# periodic maintenance tick the backend has, and it only runs while the radio is
+# connected -- which is also the only time adverts are arriving to grow the
+# table, so there is nothing to fold while it is idle. Nothing is ever deleted;
+# old hours are merged into days (see ContactClockDriftRepository.compact).
+CLOCK_DRIFT_COMPACT_INTERVAL_SECONDS = 6 * 3600
+
 _stats_task: asyncio.Task | None = None
 _latest_stats: dict[str, Any] = {}
 _last_noise_floor_prune: int = 0
+_last_clock_drift_compact: int = 0
 
 
 async def _record_noise_floor(now: int, noise_floor: int) -> None:
@@ -65,6 +74,25 @@ async def _record_noise_floor(now: int, noise_floor: int) -> None:
             logger.info("Pruned %d noise floor samples past the retention horizon", deleted)
     except Exception:
         logger.debug("Failed to prune noise floor samples", exc_info=True)
+
+
+async def _compact_clock_drift(now: int) -> None:
+    """Fold old clock-drift hours into days, occasionally.
+
+    Same fire-and-forget contract as the noise-floor prune: a failure here must
+    not take down the loop that also drives the health broadcast.
+    """
+    global _last_clock_drift_compact
+
+    if now - _last_clock_drift_compact < CLOCK_DRIFT_COMPACT_INTERVAL_SECONDS:
+        return
+    _last_clock_drift_compact = now
+    try:
+        merged = await ContactClockDriftRepository.compact()
+        if merged:
+            logger.info("Folded %d old clock drift buckets into daily rows", merged)
+    except Exception:
+        logger.debug("Failed to compact clock drift buckets", exc_info=True)
 
 
 async def _sample_all_stats() -> dict[str, Any]:
@@ -101,6 +129,8 @@ async def _sample_all_stats() -> dict[str, Any]:
 
     if getattr(packet_event, "type", None) == EventType.STATS_PACKETS:
         snapshot["packets"] = packet_event.payload
+
+    await _compact_clock_drift(now)
 
     has_any_data = len(snapshot) > 1
     return snapshot if has_any_data else {}

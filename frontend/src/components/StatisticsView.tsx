@@ -14,10 +14,22 @@ import {
 import { Separator } from './ui/separator';
 import { api } from '../api';
 import { DEFAULT_STATS_WINDOW, STATS_WINDOWS } from '../types';
+import {
+  DRIFT_IN_SYNC_SECONDS,
+  driftSeverityTextClass,
+  formatDriftMagnitude,
+  formatDriftRate,
+  formatDriftSigned,
+} from '../utils/clockDrift';
+import { handleKeyboardActivate } from '../utils/a11y';
 import type {
+  ClockDriftBucket,
+  ClockDriftHistogramBin,
   NoiseFloorHistoryStats,
   PacketsOverTime,
   RegionScopeStats,
+  RepeaterClockDriftEntry,
+  RepeaterClockDriftStats,
   StatisticsResponse,
   StatsWindow,
 } from '../types';
@@ -380,7 +392,368 @@ function NoiseFloorChart({ history }: { history: NoiseFloorHistoryStats }) {
   );
 }
 
-export function StatisticsView() {
+/**
+ * Repeater clock drift. Measured passively from the signed timestamp inside every
+ * advert, so it covers every repeater we hear rather than only the ones we can log
+ * in to.
+ */
+function RepeaterClockDriftPanel({
+  stats,
+  windowKey,
+  onOpenContactInfo,
+}: {
+  stats: RepeaterClockDriftStats;
+  windowKey: StatsWindow;
+  onOpenContactInfo?: (publicKey: string) => void;
+}) {
+  const measured = stats.repeaters_with_samples;
+
+  if (measured === 0) {
+    return (
+      <div>
+        <h3 className="text-base font-semibold tracking-tight mb-2">
+          Repeater Clock Drift ({windowLabel(windowKey)})
+        </h3>
+        <p className="text-sm text-muted-foreground">
+          No advert timestamps measured in {windowPhrase(windowKey)}
+          {stats.repeaters_total > 0
+            ? ` from the ${stats.repeaters_total} repeater${stats.repeaters_total === 1 ? '' : 's'} heard.`
+            : '.'}{' '}
+          Drift is read from adverts, so a repeater has to advertise within the window to appear
+          here.
+        </p>
+      </div>
+    );
+  }
+
+  // A large signed median is the tell that the outlier is this server, not the
+  // mesh: independent nodes do not agree on being wrong in the same direction.
+  const ourClockSuspect = Math.abs(stats.median_drift_seconds) > DRIFT_IN_SYNC_SECONDS;
+  const offCount = measured - stats.in_sync;
+
+  return (
+    <div>
+      <h3 className="text-base font-semibold tracking-tight mb-2">
+        Repeater Clock Drift ({windowLabel(windowKey)})
+      </h3>
+      <p className="text-[0.8125rem] text-muted-foreground mb-3">
+        Read from the signed timestamp inside each advert — no login, no request, every repeater
+        that advertises. Positive is ahead of this server, negative behind. Mesh airtime only ever
+        makes a node look behind, so each reading keeps the least-delayed arrival of its hour.
+      </p>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="text-center p-3 bg-muted/50 rounded-md">
+          <div className="text-2xl font-bold">
+            {measured}
+            <span className="text-sm font-normal text-muted-foreground">
+              /{stats.repeaters_total}
+            </span>
+          </div>
+          <div className="text-xs text-muted-foreground">Measured</div>
+        </div>
+        <div className="text-center p-3 bg-muted/50 rounded-md">
+          <div className="text-2xl font-bold text-success">{stats.in_sync}</div>
+          <div className="text-xs text-muted-foreground">Within 1m</div>
+        </div>
+        <div className="text-center p-3 bg-muted/50 rounded-md">
+          <div className={`text-2xl font-bold ${offCount > 0 ? 'text-warning' : ''}`}>
+            {offCount}
+          </div>
+          <div className="text-xs text-muted-foreground">Off by more</div>
+        </div>
+        <div className="text-center p-3 bg-muted/50 rounded-md">
+          <div className="text-2xl font-bold">
+            {formatDriftMagnitude(stats.median_abs_drift_seconds)}
+          </div>
+          <div className="text-xs text-muted-foreground">Median offset</div>
+        </div>
+      </div>
+
+      <div className="mt-3 space-y-1.5 text-sm">
+        <div className="flex justify-between items-center gap-4">
+          <span className="text-muted-foreground">By severity</span>
+          <span className="text-right">
+            <span className="text-success">{stats.in_sync} in sync</span>
+            <span className="text-muted-foreground"> · </span>
+            <span>{stats.minor} slightly off</span>
+            <span className="text-muted-foreground"> · </span>
+            <span className="text-warning">{stats.major} badly off</span>
+            <span className="text-muted-foreground"> · </span>
+            <span className="text-destructive">{stats.severe} way off</span>
+          </span>
+        </div>
+        <div className="flex justify-between items-center gap-4">
+          <span className="text-muted-foreground">
+            Mean offset (magnitude)
+            {stats.repeaters_unset_clock > 0 && (
+              <span className="text-xs"> — clocks that are set</span>
+            )}
+          </span>
+          <span className="font-medium">{formatDriftMagnitude(stats.mean_abs_drift_seconds)}</span>
+        </div>
+        {stats.repeaters_unset_clock > 0 && (
+          <div className="flex justify-between items-center gap-4">
+            <span className="text-muted-foreground">Clock never set</span>
+            <span className="font-medium text-destructive">
+              {stats.repeaters_unset_clock} repeater
+              {stats.repeaters_unset_clock === 1 ? '' : 's'}
+            </span>
+          </div>
+        )}
+        {stats.oldest_sample_at !== null && (
+          <div className="flex justify-between items-center gap-4">
+            <span className="text-muted-foreground">Oldest reading held</span>
+            <span className="font-medium">{formatDateTime(stats.oldest_sample_at)}</span>
+          </div>
+        )}
+        <div className="flex justify-between items-center gap-4">
+          <span className="text-muted-foreground">Adverts measured</span>
+          <span className="font-medium">{stats.sample_count.toLocaleString()}</span>
+        </div>
+      </div>
+
+      {ourClockSuspect && (
+        <div className="mt-3 px-3 py-2 rounded-md bg-warning/10 border border-warning/20">
+          <p className="text-xs text-warning">
+            The median repeater reads {formatDriftSigned(stats.median_drift_seconds)} — half the
+            mesh is off in the same direction by about that much. Independent nodes do not drift
+            together, so check <strong>this server&apos;s</strong> clock before chasing theirs.
+          </p>
+        </div>
+      )}
+
+      <DriftDistributionChart bins={stats.histogram} />
+
+      <DriftRankingTable
+        title="Furthest off"
+        caption="Largest offset first. Click a repeater for its drift history."
+        entries={stats.worst_offenders}
+        onOpenContactInfo={onOpenContactInfo}
+      />
+
+      {stats.fastest_rates.length > 0 && (
+        <DriftRankingTable
+          title="Clocks still moving"
+          caption="Ranked by trend, not offset. These will be worse tomorrow — a one-off resync will not hold."
+          entries={stats.fastest_rates}
+          showRate
+          onOpenContactInfo={onOpenContactInfo}
+        />
+      )}
+
+      {(stats.unset_clocks?.length ?? 0) > 0 && (
+        <DriftRankingTable
+          title="Clock never set"
+          caption="These report time from boot rather than a date, so they are decades out. Kept out of the figures above, which would otherwise be meaningless."
+          entries={stats.unset_clocks}
+          onOpenContactInfo={onOpenContactInfo}
+        />
+      )}
+
+      {stats.over_time.length > 1 && (
+        <div className="mt-4">
+          <h4 className="text-sm font-medium mb-1">Mesh-wide drift over time</h4>
+          <p className="text-xs text-muted-foreground mb-2">
+            Mean and worst offset across every repeater measured, one point per{' '}
+            {formatDuration(stats.bucket_seconds)}. A rising line is the mesh losing time together;
+            a single spike is usually one node rebooting.
+          </p>
+          <DriftOverTimeChart buckets={stats.over_time} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DriftDistributionChart({ bins }: { bins: ClockDriftHistogramBin[] }) {
+  const populated = bins.filter((bin) => bin.count > 0);
+  if (populated.length < 2) {
+    return null;
+  }
+
+  return (
+    <div className="mt-4">
+      <h4 className="text-sm font-medium mb-2">Distribution</h4>
+      <ResponsiveContainer width="100%" height={120}>
+        <BarChart data={bins} margin={{ top: 4, right: 4, bottom: 0, left: -24 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+          {/* No interval={0}: nine range labels fit on a desktop pane and turn
+              into mush on a phone, so let Recharts thin them. The tooltip still
+              names every bin. */}
+          <XAxis
+            dataKey="label"
+            tick={{ fontSize: 9, fill: 'hsl(var(--muted-foreground))' }}
+            tickLine={false}
+            axisLine={false}
+            minTickGap={6}
+          />
+          <YAxis
+            tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+            tickLine={false}
+            axisLine={false}
+            allowDecimals={false}
+          />
+          <RechartsTooltip
+            {...TOOLTIP_STYLE}
+            cursor={{ fill: 'hsl(var(--muted))', opacity: 0.5 }}
+            formatter={(value) => [
+              `${Number(value)} repeater${Number(value) === 1 ? '' : 's'}`,
+              null,
+            ]}
+          />
+          <Bar dataKey="count" radius={[3, 3, 0, 0]} maxBarSize={34}>
+            {bins.map((bin) => (
+              // The centre bin is the healthy one; everything either side is not.
+              <Cell key={bin.label} fill={bin.label === '±1m' ? '#10b981' : '#f59e0b'} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function DriftOverTimeChart({ buckets }: { buckets: ClockDriftBucket[] }) {
+  const labelFor = bucketLabeller(
+    buckets.length > 1 ? buckets[1].timestamp - buckets[0].timestamp : 3600
+  );
+  const data = buckets.map((bucket) => ({
+    ...bucket,
+    tick: labelFor(bucket.timestamp),
+  }));
+
+  return (
+    <ResponsiveContainer width="100%" height={160}>
+      <AreaChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -8 }}>
+        <defs>
+          <linearGradient id="driftMaxFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#f43f5e" stopOpacity={0.18} />
+            <stop offset="100%" stopColor="#f43f5e" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+        <XAxis
+          dataKey="tick"
+          tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+          tickLine={false}
+          axisLine={false}
+          minTickGap={28}
+        />
+        <YAxis
+          tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+          tickLine={false}
+          axisLine={false}
+          width={52}
+          tickFormatter={(value) => formatDriftMagnitude(Number(value))}
+        />
+        <RechartsTooltip
+          {...TOOLTIP_STYLE}
+          cursor={{
+            stroke: 'hsl(var(--muted-foreground))',
+            strokeWidth: 1,
+            strokeDasharray: '3 3',
+          }}
+          formatter={(value, name) => [
+            formatDriftMagnitude(Number(value)),
+            name === 'max_abs_drift_seconds' ? 'Worst' : 'Mean',
+          ]}
+        />
+        <Area
+          type="monotone"
+          dataKey="max_abs_drift_seconds"
+          stroke="#f43f5e"
+          strokeWidth={1}
+          fill="url(#driftMaxFill)"
+        />
+        <Area
+          type="monotone"
+          dataKey="mean_abs_drift_seconds"
+          stroke="#8b5cf6"
+          strokeWidth={1.5}
+          fill="none"
+        />
+      </AreaChart>
+    </ResponsiveContainer>
+  );
+}
+
+function DriftRankingTable({
+  title,
+  caption,
+  entries,
+  showRate = false,
+  onOpenContactInfo,
+}: {
+  title: string;
+  caption: string;
+  entries: RepeaterClockDriftEntry[];
+  showRate?: boolean;
+  onOpenContactInfo?: (publicKey: string) => void;
+}) {
+  if (entries.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-4">
+      <h4 className="text-sm font-medium mb-1">{title}</h4>
+      <p className="text-xs text-muted-foreground mb-2">{caption}</p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-muted-foreground">
+              <th className="text-left font-normal pb-1">Repeater</th>
+              <th className="text-right font-normal pb-1">Offset</th>
+              <th className="text-right font-normal pb-1">
+                {showRate ? 'Trend' : 'Last measured'}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map((entry) => (
+              <tr key={entry.public_key} className="border-t border-border/50">
+                <td className="py-1 pr-2 max-w-[14rem]">
+                  <span
+                    className={
+                      onOpenContactInfo
+                        ? 'cursor-pointer hover:text-primary hover:underline transition-colors truncate inline-block max-w-full align-bottom'
+                        : 'truncate inline-block max-w-full align-bottom'
+                    }
+                    role={onOpenContactInfo ? 'button' : undefined}
+                    tabIndex={onOpenContactInfo ? 0 : undefined}
+                    onKeyDown={onOpenContactInfo ? handleKeyboardActivate : undefined}
+                    onClick={() => onOpenContactInfo?.(entry.public_key)}
+                    title={onOpenContactInfo ? 'Open drift history' : undefined}
+                  >
+                    {entry.name || entry.public_key.slice(0, 12)}
+                  </span>
+                </td>
+                <td
+                  className={`text-right py-1 font-medium whitespace-nowrap ${driftSeverityTextClass(entry.severity)}`}
+                >
+                  {entry.clock_unset ? 'not set' : formatDriftSigned(entry.drift_seconds)}
+                </td>
+                <td className="text-right py-1 text-xs text-muted-foreground whitespace-nowrap">
+                  {showRate
+                    ? formatDriftRate(entry.drift_rate_seconds_per_day)
+                    : formatDateTime(entry.observed_at)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+export function StatisticsView({
+  onOpenContactInfo,
+}: {
+  /** Passed through so a repeater name in the drift tables opens its info pane. */
+  onOpenContactInfo?: (publicKey: string) => void;
+} = {}) {
   const [stats, setStats] = useState<StatisticsResponse | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState(false);
@@ -797,6 +1170,19 @@ export function StatisticsView() {
                       </p>
                     )}
                   </div>
+                </>
+              )}
+
+              {/* Guarded like noise_floor above: a snapshot from a backend that
+                  predates this section must render the rest of the page, not blank it. */}
+              {stats.repeater_clock_drift && (
+                <>
+                  <Separator />
+                  <RepeaterClockDriftPanel
+                    stats={stats.repeater_clock_drift}
+                    windowKey={shownWindow}
+                    onOpenContactInfo={onOpenContactInfo}
+                  />
                 </>
               )}
             </div>

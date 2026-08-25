@@ -221,6 +221,25 @@ Untouched by the window: entity counts, message totals, the packet decrypted/und
 - **Scan caps.** `_packet_shape` and `_region_scope_senders` parse every row in Python, which a wide window makes unbounded. Both fetch at most `MAX_SCAN_ROWS` (250k) most-recent rows and set `truncated` when they hit it. **Never drop the flag** — a partial total presented as a whole one is worse than no number, and the UI leans on it to say the figures are a sample.
 - **Noise floor.** Samples live in `noise_floor_samples` (migration 073), written once a minute by the radio-stats loop and pruned to a year. `timestamp` is the INTEGER PRIMARY KEY, so a re-sample in the same second updates in place and window scans stay index-ordered. Buckets carry `min_dbm`/`max_dbm` next to the mean because averaging a wide window flattens a noisy hour and a quiet one into the same line.
 
+### Clock drift measurement
+
+Advert timestamps are recorded in `contact_clock_drift` (migration 076) by `ContactClockDriftRepository.record`, called from `_process_advertisement` **after** the contact upsert — the table has a foreign key onto `contacts` and enforcement is on for application queries. The math, thresholds, and sign convention all live in `app/clock_drift.py`; do not duplicate a threshold anywhere else.
+
+- **Hourly buckets, keyed `(public_key, bucket_start)`**, and a bucket keeps its **largest** drift. Propagation delay only ever pushes a reading negative, so the maximum within an hour is the arrival that suffered least of it. `sample_count` still counts every arrival, so one flood heard over six paths is six samples in one row rather than six rows. A `WITHOUT ROWID` table on that composite key means per-contact window scans are covered by the primary key alone.
+- **Nothing is ever deleted.** `ContactClockDriftRepository.compact` folds buckets older than `DRIFT_FULL_RESOLUTION_SECONDS` (90 days) down to one row per day, keeping the day's largest drift and the sum of every arrival counted across the hours it replaced. Hourly resolution is what shows a clock *jumping*, which only matters while it is recent; a years-old trend reads the same from daily points at a twenty-fourth of the rows (~60 kB per node per year instead of 1.4 MB). That is what makes "keep everything" affordable, so **do not reintroduce a retention cut** — the long view is the most valuable thing this table holds.
+  - No schema marker separates daily rows from hourly ones, and none is needed: a day-aligned `bucket_start` *is* the marker, and every read path already re-buckets with integer division. A group that is already a single day-aligned row is skipped, so the steady-state call costs one query and the job is safe on a timer forever. A lone reading off midnight is still moved onto its day, or one straggler per day would never fold.
+  - Runs on the 6-hourly tick in `app/services/radio_stats.py` — the only periodic maintenance loop the backend has. It runs only while the radio is connected, which is also the only time adverts arrive to grow the table.
+- **Backfill.** Migration 076 replays stored advert packets so the feature starts with whatever history the database already holds — no lower time bound, since history is kept forever. Adverts are prefiltered in SQL by header byte (`header & 0x3C == 0x10`, enumerated), the public key is checked against known contacts *before* the Ed25519 verify (the expensive step, and the key filter already removes the corrupt captures that would fail it), and buckets are folded in memory before a single `executemany`. Capped at 500k packets, newest first, so hitting the cap costs the oldest history rather than the recent detail. The migration then applies the same daily fold inline, rather than leaving years of hourly rows in place until the first maintenance tick.
+- **`ContactClockDriftRepository.get_for_contact`** returns a 30-day summary plus a chart-sized series re-bucketed in SQL, taking `MAX(drift)` per bucket with `path_len` as a bare column beside it (SQLite guarantees a bare column comes from the row that produced the `MAX`).
+- **`StatisticsRepository._repeater_clock_drift`** builds the repeater aggregate: one row per repeater (its newest reading), a per-repeater series for the trend fit, and a mesh-wide series.
+
+Two poisons are handled explicitly, and **both must stay handled** — each one was observed wrecking a surface before it was fixed:
+
+- **Clocks that were never set** report time from boot, so they read as decades behind. They are excluded from the mean, from every ranking, and from the mesh-wide series (which shares one axis, and where one of them flattens every real repeater into the baseline). They are still counted in the severity bands and the histogram — a magnitude bin absorbs them harmlessly — and listed separately as `unset_clocks`.
+- **Our own clock.** Every figure is relative to this server. `median_drift_seconds` is reported *signed* precisely so a mesh-wide offset is distinguishable from a mesh-wide problem: independent nodes do not drift together, so a large signed median indicts this server.
+
+`fastest_rates` is filtered to `|rate| >= NOTABLE_RATE_SECONDS_PER_DAY`. A steady offset is a one-resync fix and already appears in the magnitude ranking; padding the trend list with steady clocks buries the ones that need the node looked at.
+
 ### Region-scope adoption stats (`region_scope`)
 
 `GET /statistics` reports regional flood-scope uptake as two views with different denominators that intentionally will not agree:
@@ -298,7 +317,7 @@ Web Push is a standalone subsystem in `app/push/`, separate from the fanout modu
 
 ### Contacts
 - `GET /contacts`
-- `GET /contacts/analytics` — unified keyed-or-name analytics payload
+- `GET /contacts/analytics` — unified keyed-or-name analytics payload, including `clock_drift` (30-day advert-timestamp drift summary + series; null when never measured)
 - `GET /contacts/repeaters/advert-paths` — recent advert paths for all contacts
 - `POST /contacts`
 - `POST /contacts/bulk-delete`

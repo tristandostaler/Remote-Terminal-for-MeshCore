@@ -92,6 +92,18 @@ CREATE TABLE IF NOT EXISTS contact_advert_paths (
     FOREIGN KEY (public_key) REFERENCES contacts(public_key) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS contact_clock_drift (
+    public_key TEXT NOT NULL,
+    bucket_start INTEGER NOT NULL,
+    drift_seconds INTEGER NOT NULL,
+    observed_at INTEGER NOT NULL,
+    advert_timestamp INTEGER NOT NULL,
+    path_len INTEGER NOT NULL DEFAULT 0,
+    sample_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (public_key, bucket_start),
+    FOREIGN KEY (public_key) REFERENCES contacts(public_key) ON DELETE CASCADE
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS contact_name_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     public_key TEXT NOT NULL,
@@ -277,6 +289,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_type_received_conversation
     ON messages(type, received_at, conversation_key);
 CREATE INDEX IF NOT EXISTS idx_contact_advert_paths_recent
     ON contact_advert_paths(public_key, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_contact_clock_drift_bucket
+    ON contact_clock_drift(bucket_start);
 CREATE INDEX IF NOT EXISTS idx_contact_name_history_key
     ON contact_name_history(public_key, last_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_repeater_telemetry_pk_ts
