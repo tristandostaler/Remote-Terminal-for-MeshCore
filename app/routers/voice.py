@@ -16,7 +16,8 @@ from app.services.message_send import (
     send_direct_message_to_contact,
 )
 from app.services.radio_runtime import radio_runtime as radio_manager
-from app.services.voice import RawDataUnsupportedError, request_voice_session
+from app.services.raw_media import RawDataUnsupportedError
+from app.services.voice import request_voice_session
 from app.voice_codec import Codec2, Codec2Unavailable, codec2_available
 from app.voice_protocol import (
     MAX_VOICE_DURATION_MS,

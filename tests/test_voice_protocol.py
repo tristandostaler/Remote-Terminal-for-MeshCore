@@ -5,7 +5,8 @@ import pytest
 from fastapi import HTTPException
 
 from app.routers.voice import _voice_envelope_body, fetch_voice
-from app.services.voice import _raw_frame_for_contact, _raw_route_for_contact, request_voice_session
+from app.services.raw_media import _raw_frame_for_contact, _raw_route_for_contact
+from app.services.voice import request_voice_session
 from app.voice_codec import Codec2, VoiceMode, codec2_available
 from app.voice_protocol import (
     VoiceEnvelope,
@@ -157,7 +158,7 @@ async def test_raw_media_uses_latest_direct_advert_as_zero_hop_fallback(monkeypa
         return [direct_advert]
 
     monkeypatch.setattr(
-        "app.services.voice.ContactAdvertPathRepository.get_recent_for_contact", get_recent
+        "app.services.raw_media.ContactAdvertPathRepository.get_recent_for_contact", get_recent
     )
 
     assert await _raw_route_for_contact(contact) == ("", 0, 0)
@@ -175,7 +176,7 @@ async def test_raw_media_does_not_convert_relayed_advert_to_zero_hop(monkeypatch
         return [relayed_advert]
 
     monkeypatch.setattr(
-        "app.services.voice.ContactAdvertPathRepository.get_recent_for_contact", get_recent
+        "app.services.raw_media.ContactAdvertPathRepository.get_recent_for_contact", get_recent
     )
 
     assert await _raw_route_for_contact(contact) == ("", -1, -1)

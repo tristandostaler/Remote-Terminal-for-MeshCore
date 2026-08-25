@@ -19,7 +19,7 @@ from app.services.message_send import (
     send_direct_message_to_contact,
 )
 from app.services.radio_runtime import radio_runtime as radio_manager
-from app.services.voice import RawDataUnsupportedError
+from app.services.raw_media import RawDataUnsupportedError
 from app.websocket import broadcast_error, broadcast_event
 
 router = APIRouter(prefix="/images", tags=["images"])
