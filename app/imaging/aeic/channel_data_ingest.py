@@ -7,22 +7,26 @@ upstream's chunk framing (:mod:`app.imaging.aeic.channel_data`) including its XO
 parity, and lands the result in the same ``aeic_image_sessions`` storage so the
 UI renders it identically.
 
-## Why the companion frame and not raw RF
+## Two delivery paths feed this module
 
-RemoteTerm normally sniffs raw RF and decrypts channel traffic itself
-(``decoder.decrypt_group_text``). We deliberately do NOT do that for GRP_DATA.
-The firmware has already decrypted these frames and hands them over pre-split
-into ``(data_type, payload)``, so taking frame 27 needs no crypto and no
-assumption about the on-air plaintext layout -- a layout MCO Advanced never sees
-either, and which is therefore not documented in any source we can check. Adding
-a raw-RF GRP_DATA decoder would mean guessing where the blob starts inside the
-plaintext, and a wrong guess in THIS codec does not throw: it reconstructs a
-sharp, plausible, wrong picture.
+Raw RF is the primary one now (``packet_processor._process_group_data`` /
+``decoder.decrypt_group_data``), exactly as for channel text: it works on any
+firmware whose radio can hear the packet and needs no radio slot. It was
+originally rejected because the GRP_DATA plaintext layout was undocumented and a
+wrong guess in THIS codec does not throw -- it reconstructs a sharp, plausible,
+wrong picture. Both halves of that reasoning have since collapsed: the layout is
+now read from the firmware source itself (``BaseChatMesh.cpp``: data_type LE,
+one length byte, blob), and the 2-byte HMAC per packet means a wrong key or a
+wrong layout yields None, never a wrong picture. What settled it was a real
+radio that heard every packet and delivered none of them: its firmware never
+queues GRP_DATA for companions, so under the frame-27-only design pictures sent
+to a channel simply never appeared.
 
-The cost of that choice is honest and worth stating: this path only sees frames
-the *local* radio decrypted, which means the channel must be loaded in one of
-the radio's slots. That is the same constraint the firmware already puts on
-channel text.
+Frame 27 is kept as the fallback for setups where the RF log is unavailable.
+Both paths call :func:`handle_channel_data` on the same reassembler; a chunk
+delivered twice -- once per path, or again via a repeater's re-flood -- is
+absorbed idempotently (``bodies.setdefault`` before completion,
+``_already_finished`` after).
 
 ## There is more than one image codec on GRP_DATA
 

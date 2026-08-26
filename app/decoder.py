@@ -52,6 +52,15 @@ class DecryptedGroupText:
 
 
 @dataclass
+class DecryptedGroupData:
+    """Result of decrypting a GroupData (binary channel) payload."""
+
+    channel_hash: str
+    data_type: int
+    data: bytes
+
+
+@dataclass
 class DecryptedDirectMessage:
     """Result of decrypting a TEXT_MESSAGE (direct message)."""
 
@@ -260,6 +269,80 @@ def try_decrypt_packet_with_channel_key(
         return None
 
     return decrypt_group_text(packet_info.payload, channel_key)
+
+
+def decrypt_group_data(payload: bytes, channel_key: bytes) -> DecryptedGroupData | None:
+    """
+    Decrypt a GroupData payload using the channel key.
+
+    Same envelope as GroupText -- channel_hash(1), cipher_mac(2), AES-128-ECB
+    ciphertext -- but the plaintext differs (firmware ``BaseChatMesh.cpp``,
+    ``sendGroupData`` / ``onGroupDataRecv``):
+
+    - data_type (2 bytes, little-endian; e.g. 0xAE1C for an AEIC image chunk)
+    - data_len (1 byte)
+    - data (data_len bytes), then zero padding to the AES block
+
+    The explicit length byte exists because, unlike GroupText's null-terminated
+    string, binary data cannot be told apart from the zero padding.
+
+    There is no timestamp: GRP_DATA carries none on the wire.
+    """
+    if len(payload) < 3:
+        return None
+
+    channel_hash = format(payload[0], "02x")
+    cipher_mac = payload[1:3]
+    ciphertext = payload[3:]
+
+    if len(ciphertext) == 0 or len(ciphertext) % 16 != 0:
+        return None
+
+    channel_secret = channel_key + bytes(16)
+    calculated_mac = hmac.new(channel_secret, ciphertext, hashlib.sha256).digest()
+    if calculated_mac[:2] != cipher_mac:
+        return None
+
+    try:
+        cipher = AES.new(channel_key, AES.MODE_ECB)
+        decrypted = cipher.decrypt(ciphertext)
+    except Exception as e:
+        logger.debug("AES decryption failed: %s", e)
+        return None
+
+    if len(decrypted) < 3:
+        return None
+    data_type = decrypted[0] | (decrypted[1] << 8)
+    data_len = decrypted[2]
+    if 3 + data_len > len(decrypted):
+        return None
+    return DecryptedGroupData(
+        channel_hash=channel_hash,
+        data_type=data_type,
+        data=bytes(decrypted[3 : 3 + data_len]),
+    )
+
+
+def try_decrypt_group_data_packet(
+    raw_packet: bytes, channel_key: bytes
+) -> DecryptedGroupData | None:
+    """Try to decrypt a raw GRP_DATA packet with one channel key.
+
+    The channel-hash byte is checked before any crypto, exactly like
+    :func:`try_decrypt_packet_with_channel_key`, so scanning every known channel
+    costs one comparison per non-matching key. The 2-byte HMAC then rejects a
+    wrong key outright -- which is what makes decoding binary data off raw RF
+    safe: a wrong key cannot produce a plausible-but-wrong blob, it produces
+    None.
+    """
+    packet_info = parse_packet(raw_packet)
+    if packet_info is None or packet_info.payload_type != PayloadType.GROUP_DATA:
+        return None
+    if len(packet_info.payload) < 1:
+        return None
+    if packet_info.payload[0] != hashlib.sha256(channel_key).digest()[0]:
+        return None
+    return decrypt_group_data(packet_info.payload, channel_key)
 
 
 def get_packet_payload_type(raw_packet: bytes) -> PayloadType | None:
