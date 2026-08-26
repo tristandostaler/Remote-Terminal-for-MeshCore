@@ -97,6 +97,11 @@ export interface AeicStatus {
   download_total_bytes: number;
   installed_bytes: number;
   bundle_total_bytes: number;
+  /** Bytes of the bundle that sending needs; the rest only reconstructs. */
+  send_half_total_bytes: number;
+  download_scope: 'send' | 'full' | null;
+  download_target_bytes: number;
+  download_done_bytes: number;
   model_dir: string;
   rate_point: string;
   last_error: string | null;
@@ -246,7 +251,10 @@ export const api = {
     return response.json() as Promise<AeicSendResult>;
   },
   getAeicStatus: () => fetchJson<AeicStatus>('/aeic/status'),
-  startAeicModelDownload: () => fetchJson<AeicStatus>('/aeic/model/download', { method: 'POST' }),
+  startAeicModelDownload: (scope?: 'send' | 'full') =>
+    fetchJson<AeicStatus>(`/aeic/model/download${scope ? `?scope=${scope}` : ''}`, {
+      method: 'POST',
+    }),
   cancelAeicModelDownload: () =>
     fetchJson<AeicStatus>('/aeic/model/download/cancel', { method: 'POST' }),
   getAeicSessionForMessage: (messageId: number) =>

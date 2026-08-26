@@ -42,6 +42,9 @@ from app.imaging.aeic.bundle import (
     AEIC_SE_FT32_ASSETS,
     BUNDLE_TOTAL_BYTES,
     RATE_POINT,
+    SEND_HALF_ASSETS,
+    SEND_HALF_TOTAL_BYTES,
+    AeicAsset,
     AeicBundle,
     AeicDownloadCancelled,
     download_bundle,
@@ -131,6 +134,7 @@ class AeicService:
         self._download_file: str | None = None
         self._downloaded_bytes = 0
         self._download_total = 0
+        self._download_assets: tuple[AeicAsset, ...] = AEIC_SE_FT32_ASSETS
         self._last_error: str | None = None
 
     # ---- status -------------------------------------------------------------
@@ -165,6 +169,13 @@ class AeicService:
             "download_total_bytes": self._download_total,
             "installed_bytes": bundle.installed_bytes(),
             "bundle_total_bytes": BUNDLE_TOTAL_BYTES,
+            "send_half_total_bytes": SEND_HALF_TOTAL_BYTES,
+            # Progress against the half actually being fetched. Measuring a
+            # 65 MiB download against the 958 MiB bundle would crawl to 7% and
+            # then declare itself finished.
+            "download_scope": self._download_scope if self.is_downloading else None,
+            "download_target_bytes": self._download_target_bytes if self.is_downloading else 0,
+            "download_done_bytes": self._download_done_bytes(bundle) if self.is_downloading else 0,
             "model_dir": str(self._model_dir),
             "rate_point": RATE_POINT,
             "last_error": self._last_error,
@@ -178,6 +189,23 @@ class AeicService:
                 for asset in AEIC_SE_FT32_ASSETS
             ],
         }
+
+    @property
+    def _download_scope(self) -> str:
+        return "send" if self._download_assets is SEND_HALF_ASSETS else "full"
+
+    @property
+    def _download_target_bytes(self) -> int:
+        return sum(asset.size_bytes for asset in self._download_assets)
+
+    def _download_done_bytes(self, bundle: AeicBundle) -> int:
+        """Installed bytes within the current scope, plus the file in flight.
+
+        The in-flight file is not yet installed (it is a ``.part``), so it has to
+        be added separately rather than counted twice.
+        """
+        in_flight = self._downloaded_bytes if self._download_file else 0
+        return bundle.installed_bytes(self._download_assets) + in_flight
 
     def unavailable_reason(self, *, for_decode: bool) -> str | None:
         """A sentence to show the user, or None when the codec is usable.
@@ -200,8 +228,22 @@ class AeicService:
                 "which is not installed on this server."
             )
         bundle = self.bundle()
-        ready = bundle.supports_decode if for_decode else bundle.supports_encode
-        if not ready:
+        if not for_decode and not bundle.supports_encode:
+            # Sending needs 65 MiB of the 958, and it is fetched automatically
+            # (see ensure_send_half_installed), so this reads as "not yet"
+            # rather than as a decision the reader has to make.
+            if self.is_downloading:
+                return (
+                    "The AI image codec is still fetching the piece it needs to send "
+                    f"({SEND_HALF_TOTAL_BYTES / 1024 / 1024:.0f} MiB). Try again in a moment."
+                )
+            return (
+                "The AI image codec cannot send yet: the "
+                f"{SEND_HALF_TOTAL_BYTES / 1024 / 1024:.0f} MiB it needs is not installed. "
+                "It downloads on its own, so this usually clears by itself; the "
+                "image codec settings can start it now."
+            )
+        if for_decode and not bundle.supports_decode:
             missing = len(bundle.missing_assets())
             return (
                 f"The AI image codec model is not installed ({missing} of "
@@ -218,8 +260,13 @@ class AeicService:
 
     def _require_ready(self, *, for_decode: bool) -> None:
         reason = self.unavailable_reason(for_decode=for_decode)
-        if reason is not None:
-            raise AeicUnavailable(reason)
+        if reason is None:
+            return
+        if not for_decode:
+            # A send that failed for want of the send half starts fetching it, so
+            # the next attempt works even on a server that was offline at boot.
+            self.ensure_send_half_installed()
+        raise AeicUnavailable(reason)
 
     # ---- lazy resources ----------------------------------------------------
 
@@ -581,16 +628,50 @@ class AeicService:
 
     # ---- model download ----------------------------------------------------
 
-    def start_download(self) -> bool:
-        """Kick off the bundle download. False if one is already running."""
+    def start_download(self, *, send_half_only: bool = False) -> bool:
+        """Kick off a bundle download. False if one is already running.
+
+        ``send_half_only`` fetches the 65 MiB that makes sending work and stops
+        there. The halves compose: whatever a send-only fetch installed is not
+        downloaded again by a later full one.
+        """
         if self.is_downloading:
             return False
         self._download_cancelled = False
         self._last_error = None
         self._downloaded_bytes = 0
         self._download_total = 0
+        self._download_assets = SEND_HALF_ASSETS if send_half_only else AEIC_SE_FT32_ASSETS
         self._download_task = asyncio.create_task(self._run_download())
         return True
+
+    def ensure_send_half_installed(self) -> bool:
+        """Make sending possible, fetching the 65 MiB send half if it is missing.
+
+        Called at startup and again whenever something tries to send without it,
+        so "this server can send AI pictures" does not depend on anyone having
+        chosen to download 958 MiB. Receiving stays an explicit choice: it is
+        another 893 MiB on disk and ~1.4 GiB of memory per picture, neither of
+        which a small gateway should be volunteered for.
+
+        Returns whether a download was started; every reason not to is normal.
+        """
+        if settings.enable_aeic is False or not onnxruntime_available():
+            return False
+        if self.bundle().supports_encode or self.is_downloading:
+            return False
+        try:
+            started = self.start_download(send_half_only=True)
+        except RuntimeError:
+            # No running loop (a synchronous caller off the event loop). Sending
+            # stays unavailable until the next start, which is what it was.
+            return False
+        if started:
+            logger.info(
+                "Fetching the %.0f MiB AEIC send half so this server can send pictures",
+                SEND_HALF_TOTAL_BYTES / 1024 / 1024,
+            )
+        return started
 
     def cancel_download(self) -> bool:
         """Ask the download to stop. Partial files are kept for resume."""
@@ -618,11 +699,16 @@ class AeicService:
         try:
             await download_bundle(
                 self._model_dir,
+                assets=self._download_assets,
                 on_progress=on_progress,
                 should_cancel=lambda: self._download_cancelled,
             )
             self.reset()
-            logger.info("AEIC model bundle installed in %s", self._model_dir)
+            logger.info(
+                "AEIC %s installed in %s",
+                "send half" if self._download_scope == "send" else "model bundle",
+                self._model_dir,
+            )
         except AeicDownloadCancelled:
             self._last_error = "Download cancelled. Partial files were kept for resume."
             logger.info("AEIC model download cancelled")

@@ -127,6 +127,26 @@ ft16 was dropped upstream: it needs 2-3 chunks and left too little headroom.
 """
 
 BUNDLE_TOTAL_BYTES = sum(asset.size_bytes for asset in AEIC_SE_FT32_ASSETS)
+
+SEND_HALF_ROLES = (AeicAssetRole.ENTROPY_GRAPH, AeicAssetRole.CDF_TABLES)
+"""Exactly what :attr:`AeicBundle.supports_encode` asks for, and nothing else.
+
+Sending is 65 MiB of the 958 and 0.35 GiB of the ~1.4: the send-side entropy
+graph and the CDF tables. The 832 MiB of synthesis weights only ever run on
+*receipt*, so a host that cannot reconstruct a picture -- for want of disk, or of
+the 1.4 GiB -- can still send them all day. Keeping that true is the point of
+splitting the download at all.
+
+The two halves are NOT independently versioned: every asset here is
+per-checkpoint, and a send half from one checkpoint with a receive half from
+another desynchronises rANS silently. They are separable, never mixable.
+"""
+
+SEND_HALF_ASSETS: tuple[AeicAsset, ...] = tuple(
+    asset for asset in AEIC_SE_FT32_ASSETS if asset.role in SEND_HALF_ROLES
+)
+
+SEND_HALF_TOTAL_BYTES = sum(asset.size_bytes for asset in SEND_HALF_ASSETS)
 """958.0 MiB. Named so callers and tests share one number.
 
 NOTE: there is deliberately no pre-flight free-space check yet. On a small SD
@@ -225,10 +245,11 @@ class AeicBundle:
     def missing_assets(self) -> tuple[AeicAsset, ...]:
         return tuple(asset for asset in AEIC_SE_FT32_ASSETS if not self.path_for(asset).is_file())
 
-    def installed_bytes(self) -> int:
+    def installed_bytes(self, assets: tuple[AeicAsset, ...] | None = None) -> int:
+        """Bytes on disk, over the whole bundle or over one half of it."""
         return sum(
             self.path_for(asset).stat().st_size
-            for asset in AEIC_SE_FT32_ASSETS
+            for asset in (assets if assets is not None else AEIC_SE_FT32_ASSETS)
             if self.path_for(asset).is_file()
         )
 
@@ -273,10 +294,16 @@ ProgressCallback = Callable[[str, int, int], None]
 async def download_bundle(
     root: Path,
     *,
+    assets: tuple[AeicAsset, ...] = AEIC_SE_FT32_ASSETS,
     on_progress: ProgressCallback | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> AeicBundle:
-    """Fetch every missing asset into ``root``, resuming and verifying each.
+    """Fetch every missing asset in ``assets`` into ``root``, verifying each.
+
+    ``assets`` defaults to the whole bundle; pass :data:`SEND_HALF_ASSETS` for the
+    65 MiB that makes sending work. Anything already installed and intact is
+    skipped, so the two calls compose: a send half fetched first is not fetched
+    again by a later full download.
 
     Resumable because the weights file is 832 MiB and a mesh gateway's uplink is
     not always a datacentre's: a partial file is kept as ``<name>.part`` and
@@ -290,7 +317,7 @@ async def download_bundle(
     bundle = AeicBundle(root=root)
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-        for asset in AEIC_SE_FT32_ASSETS:
+        for asset in assets:
             final = bundle.path_for(asset)
             if final.is_file():
                 try:

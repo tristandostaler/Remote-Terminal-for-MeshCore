@@ -825,6 +825,22 @@ class AeicStatusResponse(BaseModel):
     download_total_bytes: int = 0
     installed_bytes: int = 0
     bundle_total_bytes: int
+    send_half_total_bytes: int = Field(
+        default=0,
+        description=(
+            "Bytes of the bundle that sending needs. The rest is only ever "
+            "loaded to reconstruct a received picture."
+        ),
+    )
+    download_scope: Literal["send", "full"] | None = Field(
+        default=None, description="Which half the download in flight is fetching, if any"
+    )
+    download_target_bytes: int = Field(
+        default=0, description="Bytes the download in flight is working toward"
+    )
+    download_done_bytes: int = Field(
+        default=0, description="Bytes of that target already on disk, the file in flight included"
+    )
     model_dir: str
     rate_point: str
     last_error: str | None = None
