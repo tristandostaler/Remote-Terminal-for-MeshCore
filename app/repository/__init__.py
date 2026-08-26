@@ -21,6 +21,10 @@ from app.repository.noise_floor import NoiseFloorRepository
 from app.repository.raw_packets import RawPacketRepository
 from app.repository.repeater_telemetry import RepeaterTelemetryRepository
 from app.repository.settings import AppSettingsRepository, StatisticsRepository
+from app.repository.unsupported_media import (
+    UnsupportedMediaArrival,
+    UnsupportedMediaRepository,
+)
 from app.repository.voice import VoiceRepository
 
 __all__ = [
@@ -44,5 +48,7 @@ __all__ = [
     "RawPacketRepository",
     "RepeaterTelemetryRepository",
     "StatisticsRepository",
+    "UnsupportedMediaArrival",
+    "UnsupportedMediaRepository",
     "VoiceRepository",
 ]

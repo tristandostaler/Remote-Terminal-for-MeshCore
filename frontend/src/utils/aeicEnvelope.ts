@@ -139,3 +139,18 @@ export function parseAeicBinaryRef(text: string): string | null {
   const key = text.slice(BINARY_MARKER_PREFIX.length).trim();
   return key.length > 0 ? key : null;
 }
+
+const UNSUPPORTED_MARKER_PREFIX = 'mediax:';
+
+/**
+ * A marker row for media this server kept but cannot decode.
+ *
+ * Like `aeib:`, it never goes on air -- the server mints it so the arrival has a
+ * place in the conversation. It carries only the id; the wording lives in the UI,
+ * where it can change without a migration.
+ */
+export function parseUnsupportedMediaRef(text: string): number | null {
+  if (!text.startsWith(UNSUPPORTED_MARKER_PREFIX)) return null;
+  const id = Number(text.slice(UNSUPPORTED_MARKER_PREFIX.length).trim());
+  return Number.isInteger(id) && id > 0 ? id : null;
+}

@@ -39,6 +39,7 @@ async def test_db():
         repeater_telemetry,
         room_poll,
         settings,
+        unsupported_media,
     )
     from app.repository import bots as bots_repo
     from app.repository import fanout as fanout_repo
@@ -59,6 +60,7 @@ async def test_db():
         contact_telemetry,
         room_poll,
         aeic_image,
+        unsupported_media,
     ]
     originals = [(mod, mod.db) for mod in submodules]
 

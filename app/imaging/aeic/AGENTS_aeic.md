@@ -199,6 +199,76 @@ puts AEIC on the air as a bare `0xAE1C`. Worth re-checking on an upstream bump: 
 AEIC ever did move, every inbound AEIC image would be dropped as an unknown type,
 and the symptom would be indistinguishable from the codec mismatch below.
 
+### A received channel image is announced as a message
+
+`_store_and_decode` mints the `aeib:` marker row and then has to **push it**. It
+used to write the row and stop: the only event it emitted was
+`aeic_image_session`, which **no client code handles** — the bubbles poll over
+HTTP instead — so a picture received on a channel appeared no earlier than the
+next fetch of that conversation. Sitting in the channel it arrived on you saw
+nothing at all, which made a working transfer indistinguishable from a dropped
+one, and made a stored-but-undecodable image look like silence rather than a
+reason. `_announce_marker_row` broadcasts it as an ordinary `message`, the way
+every other inbound message reaches the UI.
+
+### One picture, one completion
+
+A one-data-chunk image — upstream's *typical* ft32 size, its own capacity note
+puts the mean at 155.8 B — goes out as **two** packets: the data chunk and the
+parity chunk. It used to complete on both. The data chunk finished it and the
+pending entry was dropped; the parity chunk then started a fresh entry in which
+the single missing body was recoverable *from parity alone*, so it finished again
+and the caller minted a second message row and a second session. One picture, two
+identical bubbles, for the commonest image size there is. Multi-chunk images never
+showed it, because parity alone cannot rebuild two missing bodies.
+
+`ChannelDataReassembler._completed` remembers finished images for
+`SESSION_TTL_SECONDS` and ignores later chunks of them. It matches on the chunk
+`total` as well as the key, so a genuinely different image that reused the id
+inside the window is still accepted — the same signal the "restarted with a new
+chunk count" reset path already trusts. The map is capped at
+`MAX_PENDING_IMAGES`, since a peer cycling image ids would otherwise grow it.
+
+Note it completes on the last *data* chunk, not on the parity chunk. Parity is
+redundancy; waiting for it would delay every image by a packet.
+
+### An undecodable image is kept, and gets a box
+
+A picture in a codec this build has no decoder for used to be identified, refused
+and dropped. Correct, and invisible twice over: nothing in the conversation said a
+picture had been sent, and the bytes were gone, so adding the decoder later could
+not bring back a single image already received.
+
+`_note_undecodable` now does three things for an image. It **keeps the payload**
+(`UnsupportedMediaRepository`, migration 079) verbatim and in arrival order —
+verbatim because a format we cannot parse is one we must not normalise, and a
+future decoder needs exactly what the radio handed us. It **mints a marker row**,
+`mediax:<id>`, on the first blob of an arrival, so the conversation shows a box
+saying a picture came in and why it is not shown. And it logs at INFO.
+
+**Nothing expires on a timer.** The arrival is pinned to its marker message and
+cascades from it (the same rule migration 075 uses for image and voice sessions),
+so deleting that message is the way to reclaim the space — and the only way. That
+is deliberate: the value of these bytes is that they are still there when support
+arrives, which may be a long time, so a TTL would quietly defeat the feature. The
+cost is that a channel carrying foreign images grows the table until those
+messages are deleted.
+
+Grouping is a heuristic, and it is confined to one column. An unknown format gives
+no image id and no chunk count, so blobs of the same type on the same channel
+within `BLOB_GROUPING_WINDOW_SECONDS` are treated as one arrival; a gap starts a
+new one. Grouping too eagerly costs one box covering two pictures, never a wrong
+decode. `MAX_BLOBS_PER_ARRIVAL` bounds what one arrival can accumulate, since
+every blob extends the window.
+
+Text over GRP_DATA is **not** kept and stays at debug: it arrives decoded by other
+means, so storing it would be hoarding rather than recovery.
+
+`POST /api/unsupported-media/{id}/decode` is wired up knowing it will fail today.
+Without it, the box would have no way to tell the reader anything changed and the
+kept bytes would be unreachable; when a decoder lands it is called from there and
+every arrival already in the database becomes readable.
+
 ### An undecodable image says so, at INFO
 
 A picture in a codec this build cannot decode used to be dropped at DEBUG, and

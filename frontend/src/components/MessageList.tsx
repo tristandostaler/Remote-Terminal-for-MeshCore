@@ -9,7 +9,7 @@ import {
 } from 'react';
 import type { Channel, Contact, Message, MessagePath, RadioConfig, RawPacket } from '../types';
 import { CONTACT_TYPE_ROOM } from '../types';
-import { api } from '../api';
+import { api, type UnsupportedMediaStatus } from '../api';
 import type { AeicSessionStatus } from '../api';
 import {
   findLinkedChannelReferences,
@@ -44,6 +44,7 @@ import {
   aeicAspectRatio,
   parseAeicBinaryRef,
   parseAeicChunk,
+  parseUnsupportedMediaRef,
   type AeicChunk,
 } from '../utils/aeicEnvelope';
 
@@ -372,6 +373,85 @@ function AeicImageMessage({ message, chunk }: { message: Message; chunk?: AeicCh
           />
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Media that arrived in a codec this server cannot decode, and kept.
+ *
+ * The box exists because the alternative was silence: an image someone sent was
+ * identified, refused and dropped, with nothing in the conversation to say a
+ * picture had been sent at all. The bytes are stored, so this is not a tombstone
+ * -- retry is wired to a real endpoint, and the same button turns an image
+ * received today into a picture on the day a decoder for its codec ships.
+ */
+function UnsupportedMediaMessage({ mediaId }: { mediaId: number }) {
+  const [status, setStatus] = useState<UnsupportedMediaStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const next = await api.getUnsupportedMedia(mediaId);
+        if (!cancelled) setStatus(next);
+      } catch {
+        // The box still says something useful without it; see the fallback below.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaId]);
+
+  const retry = async () => {
+    setBusy(true);
+    try {
+      const next = await api.retryUnsupportedMediaDecode(mediaId);
+      setStatus(next);
+      if (!next.decoded) {
+        toast.info('Still no decoder for this format', { description: next.reason });
+      }
+    } catch (error) {
+      toast.error('Could not decode the picture', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const label = status?.codec_label ?? 'an unsupported format';
+  return (
+    <div className="w-56 max-w-full rounded-md border border-border bg-muted/40 p-2.5">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+        <ImageOff size={14} className="flex-shrink-0" />
+        <span>Picture not shown</span>
+      </div>
+      <p className="mt-1 text-xs leading-snug text-muted-foreground">
+        {status?.reason ?? `A picture arrived in ${label}, which this server cannot decode.`}
+      </p>
+      {status && status.blob_count > 0 && (
+        <p
+          className="mt-1 text-[0.6875rem] text-muted-foreground"
+          title="Kept exactly as it arrived, in packet order, so a decoder added later can read it."
+        >
+          {status.total_bytes} bytes kept in {status.blob_count} packet
+          {status.blob_count === 1 ? '' : 's'}
+        </p>
+      )}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="mt-2 h-7 w-full text-xs"
+        disabled={busy}
+        onClick={() => void retry()}
+      >
+        {busy ? <Loader2 className="animate-spin" size={13} /> : <RefreshCw size={13} />}
+        <span className="ml-1.5">Retry decoding</span>
+      </Button>
     </div>
   );
 }
@@ -1883,6 +1963,8 @@ export function MessageList({
             // An image received as binary GRP_DATA: no text crossed the air,
             // so the server left a marker for this bubble to hang off.
             const aeicBinaryRef = parseAeicBinaryRef(content);
+            // Media the server kept but cannot decode: a box rather than silence.
+            const unsupportedMediaRef = parseUnsupportedMediaRef(content);
             const directSenderName =
               msg.type === 'PRIV' && isRoomServer ? msg.sender_name || null : null;
             const channelSenderName = msg.type === 'CHAN' ? msg.sender_name || sender : null;
@@ -2085,6 +2167,8 @@ export function MessageList({
                     <div className="break-words whitespace-pre-wrap">
                       {parseImageEnvelope(content) ? (
                         <ImageMessage message={msg} content={content} />
+                      ) : unsupportedMediaRef ? (
+                        <UnsupportedMediaMessage mediaId={unsupportedMediaRef} />
                       ) : aeicBinaryRef ? (
                         <AeicImageMessage message={msg} />
                       ) : aeicChunk ? (
