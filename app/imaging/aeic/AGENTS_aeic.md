@@ -99,6 +99,49 @@ once stages *< i* have been decoded and pushed back through the context model.
 That is why there are two entropy graphs, not one, and why `decode_to_latent`
 interleaves network calls with rANS.
 
+## The bundle has two halves, and only one is a decision
+
+| half | files | disk | memory | who chooses |
+| --- | --- | --- | --- | --- |
+| send | `aeic_entropy_side_fp32_op17.onnx`, `aeic_cdf_ft32.bin` | 65 MiB | ~0.35 GiB | nobody: fetched automatically |
+| receive | the 832 MiB weights, its graph, the decode-side graph | 893 MiB | ~1.4 GiB **per picture** | an explicit button |
+
+`SEND_HALF_ASSETS` is defined as exactly what `supports_encode` needs, and a test
+pins that: a file in there that encoding does not need is 64 MiB of somebody's
+uplink spent for nothing.
+
+`ensure_send_half_installed()` runs at startup and again from `_require_ready`
+when a send finds the half missing, so a gateway that had no uplink at boot fixes
+itself on first use rather than needing a restart. It is refused by a missing
+runtime and by a download already in flight -- and *not* by
+`MESHCORE_ENABLE_AEIC=false`, which is the next section.
+
+## `MESHCORE_ENABLE_AEIC` switches off rebuilding, not the codec
+
+`false` means "never reconstruct a received picture". It does not stop sending:
+that is the 65 MiB half and ~0.35 GiB, none of it the synthesis weights, and the
+host most likely to have turned rebuilding off is exactly the host that still
+wants to send. So the switch is read in `unavailable_reason` **only** when
+`for_decode`, `status()` reports it as `reconstruction_enabled` separately from
+`runtime_available` (which is the dependency and nothing else), and the download
+route refuses `scope=full` while allowing `scope=send`.
+
+Two consequences worth keeping straight:
+
+* A received picture under `false` is *kept*, not dropped -- switching the value
+  back on decodes it later. The refusal sentence says so.
+* On a fresh install `false` still means nothing at all, because `run.sh` only
+  installs the ~120 MiB extra when the value is on. What `false` cannot do is
+  uninstall what an earlier `true` already put there, and that server -- extra
+  present, rebuilding unaffordable -- is the one this distinction is for.
+
+The halves compose (`download_bundle(assets=...)` skips whatever is installed and
+intact) but are **never mixable across checkpoints**: every asset here is
+per-checkpoint, and a send half from one with a receive half from another
+desynchronises rANS silently. Progress is reported against the half in flight --
+65 MiB measured against 958 MiB reads 3% and then stops, which looks exactly like
+a download that died.
+
 ## Memory contract (not an optimisation)
 
 Measured peaks: entropy graph alone 0.35 GiB, synthesis decoder alone **~1.3 GiB

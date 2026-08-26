@@ -150,6 +150,17 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Failed to start bot engine")
 
+    # Make sending AI pictures work without anyone downloading 958 MiB: the
+    # send half is 65 MiB, and unlike reconstruction it costs no memory worth
+    # worrying about. Never blocks startup and never raises -- a server with no
+    # uplink yet simply tries again on the next send.
+    try:
+        from app.imaging.aeic.service import aeic_service
+
+        aeic_service.ensure_send_half_installed()
+    except Exception:
+        logger.warning("Could not start the AEIC send-half download", exc_info=True)
+
     startup_radio_task = asyncio.create_task(_startup_radio_connect_and_setup())
     app.state.startup_radio_task = startup_radio_task
 

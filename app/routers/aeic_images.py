@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
@@ -60,24 +61,32 @@ async def get_status() -> dict:
 
 
 @router.post("/model/download", response_model=AeicStatusResponse)
-async def start_model_download() -> dict:
-    """Begin (or resume) the 958 MiB bundle download.
+async def start_model_download(scope: Literal["full", "send"] = "full") -> dict:
+    """Begin (or resume) the model download.
+
+    ``scope=send`` fetches only the 65 MiB that makes *sending* work, for a host
+    that cannot spare the 893 MiB of synthesis weights or the ~1.4 GiB of memory
+    each reconstruction needs. It is also what the server fetches by itself on
+    startup, so this route is for retrying rather than for opting in.
 
     Idempotent while a download is in flight: a second call is a no-op rather
     than a second concurrent fetch of the same 832 MiB file.
     """
-    # Refused when the codec is switched off, rather than spending 958 MiB of
-    # somebody's bandwidth on a model that nothing is allowed to load. The UI
-    # already hides the button in that state; this covers a direct API call.
-    if settings.enable_aeic is False:
+    # The receive half is refused when reconstruction is switched off, rather
+    # than spending 893 MiB of somebody's bandwidth on weights nothing is allowed
+    # to load. The send half is still allowed: sending works either way, so
+    # fetching what it needs is never wasted. The UI hides the button it should;
+    # this covers a direct API call.
+    if scope == "full" and settings.enable_aeic is False:
         raise HTTPException(
             status_code=409,
             detail=(
-                "The AI image codec is switched off on this server "
-                "(MESHCORE_ENABLE_AEIC=false); refusing to download its model."
+                "Rebuilding AI pictures is switched off on this server "
+                "(MESHCORE_ENABLE_AEIC=false); refusing to download the half of "
+                "the model that only reconstruction uses. Sending works without it."
             ),
         )
-    if not aeic_service.start_download():
+    if not aeic_service.start_download(send_half_only=scope == "send"):
         logger.info("AEIC model download already in progress; ignoring request")
     return aeic_service.status()
 

@@ -36,6 +36,7 @@ vi.mock('../api', async (importOriginal) => {
 function aeicStatus(): AeicStatus {
   return {
     runtime_available: true,
+    reconstruction_enabled: true,
     supports_encode: true,
     supports_decode: true,
     downloading: false,
@@ -44,6 +45,10 @@ function aeicStatus(): AeicStatus {
     download_total_bytes: 0,
     installed_bytes: 1,
     bundle_total_bytes: 1,
+    send_half_total_bytes: 1,
+    download_scope: null,
+    download_target_bytes: 0,
+    download_done_bytes: 0,
     model_dir: 'data/models/aeic',
     rate_point: 'ft32',
     last_error: null,

@@ -25,22 +25,30 @@ class Settings(BaseSettings):
     # database so a Home Assistant add-on's mapped /app/data volume keeps it
     # across restarts.
     aeic_model_dir: str = "data/models/aeic"
-    # Master switch for the AEIC neural image codec, read at RUNTIME.
+    # Switch for the AEIC neural image codec, read at RUNTIME.
+    #
+    # It governs RECONSTRUCTION, which is the half with a cost: 893 MiB of
+    # weights on disk and ~1.4 GiB of memory for every picture rebuilt. Sending
+    # is 65 MiB and ~0.35 GiB and never loads any of that, so it is not gated
+    # here -- a server told not to rebuild pictures can still send them.
     #
     # Tri-state on purpose:
     #   None  (unset) -- autodetect, the historical behaviour: the codec is usable
     #                    if onnxruntime and the model bundle happen to be present.
     #                    Every dev checkout that ran `uv sync --extra aeic` without
     #                    setting this relies on it, so unset must not mean "off".
-    #   False         -- HARD off, even when the dependency and the 958 MiB bundle
-    #                    are already installed. `run.sh` only consults this to
-    #                    decide whether to *install* the extra, so before this
-    #                    existed, flipping it back to false on a server that had
-    #                    once had it true changed nothing: onnxruntime still
-    #                    imported and the model was still on disk, so images kept
-    #                    being reconstructed.
-    #   True          -- on, subject to the dependency and bundle actually being
-    #                    there; it cannot conjure either.
+    #   False         -- never reconstruct a received picture, even with the
+    #                    dependency and the 958 MiB bundle already installed. The
+    #                    picture is kept, so switching this back on decodes it.
+    #                    Sending is unaffected.
+    #   True          -- reconstruction on, subject to the dependency and bundle
+    #                    actually being there; it cannot conjure either.
+    #
+    # `run.sh` reads this only to decide whether to *install* the ~120 MiB extra,
+    # and only `true` asks it to. So on a fresh install false still means nothing
+    # at all -- there is no onnxruntime to send with either. What false cannot do
+    # is uninstall what a previous `true` already put there, which is exactly the
+    # server this distinction exists for.
     enable_aeic: bool | None = None
     disable_bots: bool = False
     enable_message_poll_fallback: bool = False

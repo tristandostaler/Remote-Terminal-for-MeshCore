@@ -103,7 +103,15 @@ function useAeicStatus(open: boolean) {
   return { status, refresh };
 }
 
-/** Download / progress / diagnosis for the 958 MB model the AI codec needs. */
+/**
+ * Download / progress / diagnosis for the model the AI codec needs.
+ *
+ * The bundle has two halves and only one of them is anybody's decision. Sending
+ * needs 65 MB, costs no memory worth worrying about, and the server fetches it
+ * on its own -- so this panel never asks about it, it only reports it. Receiving
+ * needs the other 893 MB on disk and ~1.4 GB of memory per picture, which is a
+ * real question on a Pi, so that half stays an explicit button.
+ */
 function AeicModelPanel({
   status,
   onRefresh,
@@ -113,19 +121,22 @@ function AeicModelPanel({
 }) {
   const [busy, setBusy] = useState(false);
 
-  const start = useCallback(async () => {
-    setBusy(true);
-    try {
-      await api.startAeicModelDownload();
-      await onRefresh();
-    } catch (error) {
-      toast.error('Could not start the download', {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }, [onRefresh]);
+  const start = useCallback(
+    async (scope: 'send' | 'full') => {
+      setBusy(true);
+      try {
+        await api.startAeicModelDownload(scope);
+        await onRefresh();
+      } catch (error) {
+        toast.error('Could not start the download', {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [onRefresh]
+  );
 
   const cancel = useCallback(async () => {
     setBusy(true);
@@ -148,14 +159,19 @@ function AeicModelPanel({
   }
 
   if (status.downloading) {
-    const done = status.installed_bytes + status.downloaded_bytes;
-    const percent = Math.min(100, Math.round((done / status.bundle_total_bytes) * 100));
+    // Against the half in flight: 65 MB measured against the whole 958 would
+    // crawl to 7% and then call itself done.
+    const target = status.download_target_bytes || status.bundle_total_bytes;
+    const percent = Math.min(100, Math.round((status.download_done_bytes / target) * 100));
     return (
       <div className="mt-2 space-y-1.5">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 className="animate-spin" size={13} />
           <span className="truncate">
-            {status.download_file ?? 'Downloading'} — {percent}%
+            {status.download_scope === 'send'
+              ? `Getting ready to send (${formatMib(target)})`
+              : (status.download_file ?? 'Downloading')}{' '}
+            — {percent}%
           </span>
         </div>
         <div className="h-1 overflow-hidden rounded-full bg-muted">
@@ -175,25 +191,84 @@ function AeicModelPanel({
 
   if (status.supports_decode) return null;
 
-  const missing = status.assets.filter((asset) => !asset.installed).length;
+  if (!status.reconstruction_enabled) {
+    // MESHCORE_ENABLE_AEIC=false governs rebuilding only, so this is not the
+    // "switched off" dead end above: sending works, and saying so is the whole
+    // difference between a setting and a broken feature.
+    return (
+      <div className="mt-2 space-y-1.5">
+        <p className="text-xs leading-snug text-muted-foreground">
+          Sending works. Rebuilding photos other people send is switched off on this server (
+          <code>MESHCORE_ENABLE_AEIC=false</code>) — it needs about 1.4 GB of memory per photo. One
+          that arrives is kept and shown as a box, so switching this back on still decodes it.
+        </p>
+        {!status.supports_encode && (
+          <button
+            type="button"
+            onClick={() => void start('send')}
+            disabled={busy}
+            className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-accent disabled:opacity-60"
+          >
+            Get sending working ({formatMib(status.send_half_total_bytes)})
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  const error = status.last_error && (
+    <p className="text-xs leading-snug text-destructive">{status.last_error}</p>
+  );
+  const rest = status.bundle_total_bytes - status.send_half_total_bytes;
+
+  if (status.supports_encode) {
+    return (
+      <div className="mt-2 space-y-1.5">
+        <p className="text-xs leading-snug text-muted-foreground">
+          Sending works. Opening an AI photo someone sends you needs the rest of the model —{' '}
+          {formatMib(rest)} on the server, and about 1.4 GB of memory each time it rebuilds one,
+          which is more than a small Pi has. Until then a received photo is kept and shown as a box
+          you can open later or from a roomier machine.
+        </p>
+        {error}
+        <button
+          type="button"
+          onClick={() => void start('full')}
+          disabled={busy}
+          className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-accent disabled:opacity-60"
+        >
+          Download the rest ({formatMib(rest)})
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="mt-2 space-y-1.5">
       <p className="text-xs leading-snug text-muted-foreground">
-        Needs a one-time {formatMib(status.bundle_total_bytes)} model download ({missing} of{' '}
-        {status.assets.length} files still missing). It lives on the server, not in your browser,
-        and is what reconstructs a photo from ~150 bytes.
+        Sending needs {formatMib(status.send_half_total_bytes)} of model on the server, which it
+        fetches by itself — so this normally clears on its own. Start it now if you would rather not
+        wait, or take the whole {formatMib(status.bundle_total_bytes)} to open received photos too.
       </p>
-      {status.last_error && (
-        <p className="text-xs leading-snug text-destructive">{status.last_error}</p>
-      )}
-      <button
-        type="button"
-        onClick={() => void start()}
-        disabled={busy}
-        className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-accent disabled:opacity-60"
-      >
-        Download model ({formatMib(status.bundle_total_bytes)})
-      </button>
+      {error}
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          onClick={() => void start('send')}
+          disabled={busy}
+          className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-accent disabled:opacity-60"
+        >
+          Get sending working ({formatMib(status.send_half_total_bytes)})
+        </button>
+        <button
+          type="button"
+          onClick={() => void start('full')}
+          disabled={busy}
+          className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-accent disabled:opacity-60"
+        >
+          Whole model ({formatMib(status.bundle_total_bytes)})
+        </button>
+      </div>
     </div>
   );
 }

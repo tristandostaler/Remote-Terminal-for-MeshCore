@@ -817,6 +817,14 @@ class AeicStatusResponse(BaseModel):
     runtime_available: bool = Field(
         description="True when the optional onnxruntime dependency is importable"
     )
+    reconstruction_enabled: bool = Field(
+        default=True,
+        description=(
+            "False when MESHCORE_ENABLE_AEIC=false. That switch governs rebuilding "
+            "received pictures, which costs ~1.4 GB of memory each; sending is "
+            "unaffected by it."
+        ),
+    )
     supports_encode: bool
     supports_decode: bool
     downloading: bool
@@ -825,6 +833,22 @@ class AeicStatusResponse(BaseModel):
     download_total_bytes: int = 0
     installed_bytes: int = 0
     bundle_total_bytes: int
+    send_half_total_bytes: int = Field(
+        default=0,
+        description=(
+            "Bytes of the bundle that sending needs. The rest is only ever "
+            "loaded to reconstruct a received picture."
+        ),
+    )
+    download_scope: Literal["send", "full"] | None = Field(
+        default=None, description="Which half the download in flight is fetching, if any"
+    )
+    download_target_bytes: int = Field(
+        default=0, description="Bytes the download in flight is working toward"
+    )
+    download_done_bytes: int = Field(
+        default=0, description="Bytes of that target already on disk, the file in flight included"
+    )
     model_dir: str
     rate_point: str
     last_error: str | None = None

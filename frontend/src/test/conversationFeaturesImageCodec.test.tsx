@@ -31,10 +31,13 @@ vi.mock('../api', async (importOriginal) => {
 });
 
 const BUNDLE_BYTES = 1_004_548_432;
+// The send half: the send-side entropy graph plus the CDF tables.
+const SEND_HALF_BYTES = 68_075_815;
 
 function status(overrides: Partial<AeicStatus> = {}): AeicStatus {
   return {
     runtime_available: true,
+    reconstruction_enabled: true,
     supports_encode: true,
     supports_decode: true,
     downloading: false,
@@ -43,6 +46,10 @@ function status(overrides: Partial<AeicStatus> = {}): AeicStatus {
     download_total_bytes: 0,
     installed_bytes: BUNDLE_BYTES,
     bundle_total_bytes: BUNDLE_BYTES,
+    send_half_total_bytes: SEND_HALF_BYTES,
+    download_scope: null,
+    download_target_bytes: 0,
+    download_done_bytes: 0,
     model_dir: 'data/models/aeic',
     rate_point: 'ft32',
     last_error: null,
@@ -156,25 +163,38 @@ describe('photo codec selector', () => {
       renderModal();
       const ai = await screen.findByRole('radio', { name: 'AI reconstruction' });
       expect(ai).toBeDisabled();
-      expect(await screen.findByRole('button', { name: /Download model/ })).toBeVisible();
-      // 958 MB, so the size is stated before the user commits to it -- both in
-      // the explanation and on the button itself.
+      // Both sizes are stated before the reader commits to either: 65 MB to
+      // send, 958 MB to also open what others send.
+      expect(await screen.findByRole('button', { name: /Get sending working/ })).toBeVisible();
+      expect(screen.getByRole('button', { name: /Whole model/ })).toBeVisible();
       expect(screen.getAllByText(/958 MB/)).toHaveLength(2);
 
       fireEvent.click(ai);
       expect(onSetImageCodec).not.toHaveBeenCalled();
     });
 
-    it('starts the download and then re-reads the status', async () => {
+    it('starts the whole download and then re-reads the status', async () => {
       vi.mocked(api.getAeicStatus).mockResolvedValue(
         status({ supports_encode: false, supports_decode: false, installed_bytes: 0 })
       );
       vi.mocked(api.startAeicModelDownload).mockResolvedValue(status({ downloading: true }));
       renderModal();
-      fireEvent.click(await screen.findByRole('button', { name: /Download model/ }));
-      await waitFor(() => expect(api.startAeicModelDownload).toHaveBeenCalledTimes(1));
+      fireEvent.click(await screen.findByRole('button', { name: /Whole model/ }));
+      await waitFor(() => expect(api.startAeicModelDownload).toHaveBeenCalledWith('full'));
       // Once on mount, once after the download starts.
       await waitFor(() => expect(api.getAeicStatus).toHaveBeenCalledTimes(2));
+    });
+
+    it('can fetch the send half alone', async () => {
+      // The server fetches this by itself, so the button is for someone who
+      // would rather not wait -- and it must not pull the other 893 MB.
+      vi.mocked(api.getAeicStatus).mockResolvedValue(
+        status({ supports_encode: false, supports_decode: false, installed_bytes: 0 })
+      );
+      vi.mocked(api.startAeicModelDownload).mockResolvedValue(status({ downloading: true }));
+      renderModal();
+      fireEvent.click(await screen.findByRole('button', { name: /Get sending working/ }));
+      await waitFor(() => expect(api.startAeicModelDownload).toHaveBeenCalledWith('send'));
     });
 
     it('names the env var to set when the codec is switched off', async () => {
@@ -201,12 +221,97 @@ describe('photo codec selector', () => {
           download_file: 'aeic_decoder_qdq_conv_pct.onnx.data',
           downloaded_bytes: BUNDLE_BYTES / 2,
           installed_bytes: 0,
+          download_scope: 'full',
+          download_target_bytes: BUNDLE_BYTES,
+          download_done_bytes: BUNDLE_BYTES / 2,
         })
       );
       renderModal();
       expect(await screen.findByText(/aeic_decoder_qdq_conv_pct.onnx.data — 50%/)).toBeVisible();
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
       await waitFor(() => expect(api.cancelAeicModelDownload).toHaveBeenCalledTimes(1));
+    });
+
+    it('lets the AI codec be chosen once sending works, and asks for the rest', async () => {
+      // The whole point of the split: 65 MB on disk and the AI codec is
+      // selectable, with no 1.4 GB decode ever happening on this host.
+      vi.mocked(api.getAeicStatus).mockResolvedValue(
+        status({
+          supports_encode: true,
+          supports_decode: false,
+          installed_bytes: SEND_HALF_BYTES,
+        })
+      );
+      renderModal();
+
+      expect(await screen.findByRole('radio', { name: 'AI reconstruction' })).toBeEnabled();
+      expect(screen.getByText(/Sending works/)).toBeVisible();
+      expect(screen.getByRole('button', { name: /Download the rest/ })).toBeVisible();
+      // The rest, not the whole thing again: the send half is already on disk.
+      expect(screen.getByRole('button', { name: /893 MB/ })).toBeVisible();
+      expect(screen.queryByRole('button', { name: /Get sending working/ })).not.toBeInTheDocument();
+    });
+
+    it('measures a send-half download against the send half', async () => {
+      // Against the 958 MB bundle this would read 3% and then stop, which looks
+      // like a download that died.
+      vi.mocked(api.getAeicStatus).mockResolvedValue(
+        status({
+          supports_encode: false,
+          supports_decode: false,
+          downloading: true,
+          download_file: 'aeic_entropy_side_fp32_op17.onnx',
+          installed_bytes: 0,
+          download_scope: 'send',
+          download_target_bytes: SEND_HALF_BYTES,
+          download_done_bytes: SEND_HALF_BYTES / 2,
+        })
+      );
+      renderModal();
+
+      expect(await screen.findByText(/Getting ready to send \(65 MB\) — 50%/)).toBeVisible();
+    });
+
+    it('keeps sending selectable when rebuilding is switched off', async () => {
+      // MESHCORE_ENABLE_AEIC=false is about the ~1.4 GB rebuild, not the codec.
+      // The old panel showed "switched off, set MESHCORE_ENABLE_AEIC=true" here,
+      // which both hid a working sender and told the reader to install a
+      // dependency that was already installed.
+      vi.mocked(api.getAeicStatus).mockResolvedValue(
+        status({
+          runtime_available: true,
+          reconstruction_enabled: false,
+          supports_encode: true,
+          supports_decode: false,
+          installed_bytes: SEND_HALF_BYTES,
+        })
+      );
+      renderModal();
+
+      expect(await screen.findByRole('radio', { name: 'AI reconstruction' })).toBeEnabled();
+      expect(screen.getByText(/Rebuilding photos other people send is switched off/)).toBeVisible();
+      expect(screen.getByText('MESHCORE_ENABLE_AEIC=false')).toBeVisible();
+      // No offer to fetch 893 MB of weights that nothing is allowed to load.
+      expect(screen.queryByRole('button', { name: /Download the rest/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Whole model/ })).not.toBeInTheDocument();
+    });
+
+    it('still offers the send half when rebuilding is off and nothing is installed', async () => {
+      vi.mocked(api.getAeicStatus).mockResolvedValue(
+        status({
+          runtime_available: true,
+          reconstruction_enabled: false,
+          supports_encode: false,
+          supports_decode: false,
+          installed_bytes: 0,
+        })
+      );
+      vi.mocked(api.startAeicModelDownload).mockResolvedValue(status({ downloading: true }));
+      renderModal();
+
+      fireEvent.click(await screen.findByRole('button', { name: /Get sending working/ }));
+
+      await waitFor(() => expect(api.startAeicModelDownload).toHaveBeenCalledWith('send'));
     });
 
     it('surfaces a previous failure so it is not silently retried forever', async () => {
