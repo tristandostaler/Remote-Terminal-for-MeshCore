@@ -116,6 +116,7 @@ frontend/src/
 │   ├── ChatHeader.tsx          # Conversation header (trace, favorite, delete)
 │   ├── MessageList.tsx
 │   ├── MessageInput.tsx
+│   ├── TapTooltipLayer.tsx     # Reveals any native `title` on tap/click, for touch screens
 │   ├── NewMessageModal.tsx
 │   ├── SearchView.tsx          # Full-text message search pane
 │   ├── SettingsModal.tsx       # Layout shell — delegates to settings/ sections
