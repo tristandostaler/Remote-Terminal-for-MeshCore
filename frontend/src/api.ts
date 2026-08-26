@@ -125,6 +125,19 @@ export interface AeicSendResult {
   messages: unknown[];
 }
 
+/** Media that arrived in a codec this server has no decoder for, and kept. */
+export interface UnsupportedMediaStatus {
+  id: number;
+  conversation_key: string;
+  data_type: number;
+  codec_label: string;
+  received_at: number;
+  blob_count: number;
+  total_bytes: number;
+  decoded: boolean;
+  reason: string;
+}
+
 export interface ImageSessionStatus {
   session_id: string;
   state: string;
@@ -240,6 +253,10 @@ export const api = {
     fetchJson<AeicSessionStatus>(`/aeic/messages/${messageId}`),
   getAeicSession: (sessionKey: string) =>
     fetchJson<AeicSessionStatus>(`/aeic/sessions/${encodeURIComponent(sessionKey)}`),
+  getUnsupportedMedia: (mediaId: number) =>
+    fetchJson<UnsupportedMediaStatus>(`/unsupported-media/${mediaId}`),
+  retryUnsupportedMediaDecode: (mediaId: number) =>
+    fetchJson<UnsupportedMediaStatus>(`/unsupported-media/${mediaId}/decode`, { method: 'POST' }),
   retryAeicDecode: (sessionKey: string) =>
     fetchJson<AeicSessionStatus>(`/aeic/sessions/${encodeURIComponent(sessionKey)}/decode`, {
       method: 'POST',

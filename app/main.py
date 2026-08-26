@@ -79,6 +79,7 @@ from app.routers import (
     rooms,
     settings,
     statistics,
+    unsupported_media,
     voice,
     ws,
 )
@@ -243,6 +244,7 @@ app.include_router(push.router, prefix="/api")
 app.include_router(voice.router, prefix="/api")
 app.include_router(images.router, prefix="/api")
 app.include_router(aeic_images.router, prefix="/api")
+app.include_router(unsupported_media.router, prefix="/api")
 app.include_router(ws.router, prefix="/api")
 
 # Serve frontend static files in production

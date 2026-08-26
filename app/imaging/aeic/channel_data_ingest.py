@@ -212,15 +212,6 @@ reassembler = ChannelDataReassembler()
 _decode_tasks: set[asyncio.Task] = set()
 
 
-UNDECODABLE_NOTICE_INTERVAL_SECONDS = 300
-"""How often to repeat the "cannot decode this" notice per channel and type.
-
-One picture is up to sixteen chunks, and every one of them lands here, so a plain
-per-frame notice would print a paragraph for a single image. Long enough to
-collapse an image (and a burst of them) into one line, short enough that trying
-again after changing a setting says something rather than looking dead."""
-
-
 def describe_data_type(data_type: int, payload: bytes = b"") -> str:
     """Name what a GRP_DATA frame carries, for a human reading a log.
 
@@ -262,26 +253,42 @@ def carries_an_image(data_type: int, payload: bytes = b"") -> bool:
     return subtype is not None and subtype[0] == MCO_APP_SUBTYPE_MCO_IMAGE
 
 
-_undecodable_notices: dict[tuple[str, int], float] = {}
-"""Last time each ``(channel, data type)`` pair was reported, for suppression."""
+MARKER_UNSUPPORTED_PREFIX = "mediax:"
+"""Marker row for media we cannot decode: ``mediax:<arrival id>``.
+
+Deliberately holds only the id, not the codec wording. The wording belongs to the
+UI, which can change it without a migration, and an id cannot accidentally contain
+``": "`` -- which the client's sender parser would split on, turning the marker
+into a sender name and a fragment.
+"""
 
 
-def reset_undecodable_notices() -> None:
-    """Forget the suppression window. For tests; nothing in the app calls it."""
-    _undecodable_notices.clear()
+def unsupported_marker_text(media_id: int) -> str:
+    return f"{MARKER_UNSUPPORTED_PREFIX}{media_id}"
 
 
-def _note_undecodable(parsed: ParsedChannelData, *, now: float | None = None) -> None:
-    """Say that a frame arrived which this build cannot turn into a picture.
+async def _note_undecodable(
+    parsed: ParsedChannelData,
+    *,
+    conversation_key: str,
+    broadcast_fn=None,
+    now: float | None = None,
+) -> None:
+    """Keep and announce a frame this build cannot turn into a picture.
 
-    At INFO for an image, because the alternative is what sent us here: a picture
-    someone sent, dropped for a good reason, with nothing anywhere to say so. The
-    frame is well formed and correctly identified -- there is simply no decoder
-    for that codec -- so the only failure was that it happened in silence.
+    Three things happen for an image, and none of them used to. The payload is
+    stored verbatim so a decoder added later can still read a picture received
+    today; the first blob of an arrival mints a marker row so the conversation
+    shows that something came in and why it cannot be shown; and it is logged at
+    INFO, because the frame is well formed and correctly refused, and the only
+    failure was that it happened in silence.
 
-    Text stays at debug. It is ordinary channel traffic that also arrives decoded
-    by other means, so a notice would be noise rather than news.
+    Text stays at debug and is not stored. It is ordinary channel traffic that
+    also arrives decoded by other means, so keeping it would be hoarding, not
+    recovery.
     """
+    from app.repository import UnsupportedMediaRepository
+
     description = describe_data_type(parsed.data_type, parsed.payload)
     if not carries_an_image(parsed.data_type, parsed.payload):
         logger.debug(
@@ -289,23 +296,63 @@ def _note_undecodable(parsed: ParsedChannelData, *, now: float | None = None) ->
         )
         return
 
-    moment = time.time() if now is None else now
-    key = (str(parsed.channel_index), parsed.data_type)
-    last = _undecodable_notices.get(key)
-    if last is not None and moment - last < UNDECODABLE_NOTICE_INTERVAL_SECONDS:
+    moment = int(time.time() if now is None else now)
+    try:
+        media_id, started_new = await UnsupportedMediaRepository.append_blob(
+            conversation_key=conversation_key,
+            data_type=parsed.data_type,
+            codec_label=description,
+            payload=parsed.payload,
+            now=moment,
+        )
+    except Exception:
+        # Never take the radio path down over storage. The frame is already lost
+        # to us either way; the log line is what is left.
+        logger.exception("Could not store an undecodable GRP_DATA image")
+        return
+
+    if not started_new:
         logger.debug(
-            "Ignoring another GRP_DATA frame on channel %d: %s",
+            "Kept another blob of undecodable GRP_DATA image %d on channel %d: %s",
+            media_id,
             parsed.channel_index,
             description,
         )
         return
-    _undecodable_notices[key] = moment
+
     logger.info(
-        "Cannot show an image received on channel %d: %s. RemoteTerm decodes only "
-        "AEIC images on a channel -- ask the sender to send it as AEIC.",
+        "Keeping an image received on channel %d that this build cannot decode: %s. "
+        "It is stored, and will open if support for that codec is added.",
         parsed.channel_index,
         description,
     )
+    await _place_unsupported_marker(
+        media_id, conversation_key=conversation_key, received_at=moment, broadcast_fn=broadcast_fn
+    )
+
+
+async def _place_unsupported_marker(
+    media_id: int, *, conversation_key: str, received_at: int, broadcast_fn=None
+) -> None:
+    """Give a kept-but-undecodable arrival its place in the conversation."""
+    from app.repository import MessageRepository, UnsupportedMediaRepository
+
+    try:
+        message_id = await MessageRepository.create(
+            msg_type="CHAN",
+            text=unsupported_marker_text(media_id),
+            received_at=received_at,
+            conversation_key=conversation_key,
+            sender_key=None,
+        )
+        if message_id is None:
+            return
+        await UnsupportedMediaRepository.bind_message(media_id, message_id)
+    except Exception:
+        logger.exception("Could not place a marker for an undecodable GRP_DATA image")
+        return
+    if broadcast_fn is not None:
+        await _announce_marker_row(message_id, broadcast_fn)
 
 
 async def handle_channel_data(
@@ -320,7 +367,9 @@ async def handle_channel_data(
     a peer must not take the link down.
     """
     if parsed.data_type != DATA_TYPE_AEIC_IMAGE:
-        _note_undecodable(parsed)
+        await _note_undecodable(
+            parsed, conversation_key=conversation_key, broadcast_fn=broadcast_fn
+        )
         return False
 
     try:

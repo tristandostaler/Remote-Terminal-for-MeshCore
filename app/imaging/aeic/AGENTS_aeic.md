@@ -232,6 +232,43 @@ chunk count" reset path already trusts. The map is capped at
 Note it completes on the last *data* chunk, not on the parity chunk. Parity is
 redundancy; waiting for it would delay every image by a packet.
 
+### An undecodable image is kept, and gets a box
+
+A picture in a codec this build has no decoder for used to be identified, refused
+and dropped. Correct, and invisible twice over: nothing in the conversation said a
+picture had been sent, and the bytes were gone, so adding the decoder later could
+not bring back a single image already received.
+
+`_note_undecodable` now does three things for an image. It **keeps the payload**
+(`UnsupportedMediaRepository`, migration 079) verbatim and in arrival order —
+verbatim because a format we cannot parse is one we must not normalise, and a
+future decoder needs exactly what the radio handed us. It **mints a marker row**,
+`mediax:<id>`, on the first blob of an arrival, so the conversation shows a box
+saying a picture came in and why it is not shown. And it logs at INFO.
+
+**Nothing expires on a timer.** The arrival is pinned to its marker message and
+cascades from it (the same rule migration 075 uses for image and voice sessions),
+so deleting that message is the way to reclaim the space — and the only way. That
+is deliberate: the value of these bytes is that they are still there when support
+arrives, which may be a long time, so a TTL would quietly defeat the feature. The
+cost is that a channel carrying foreign images grows the table until those
+messages are deleted.
+
+Grouping is a heuristic, and it is confined to one column. An unknown format gives
+no image id and no chunk count, so blobs of the same type on the same channel
+within `BLOB_GROUPING_WINDOW_SECONDS` are treated as one arrival; a gap starts a
+new one. Grouping too eagerly costs one box covering two pictures, never a wrong
+decode. `MAX_BLOBS_PER_ARRIVAL` bounds what one arrival can accumulate, since
+every blob extends the window.
+
+Text over GRP_DATA is **not** kept and stays at debug: it arrives decoded by other
+means, so storing it would be hoarding rather than recovery.
+
+`POST /api/unsupported-media/{id}/decode` is wired up knowing it will fail today.
+Without it, the box would have no way to tell the reader anything changed and the
+kept bytes would be unreachable; when a decoder lands it is called from there and
+every arrival already in the database becomes readable.
+
 ### An undecodable image says so, at INFO
 
 A picture in a codec this build cannot decode used to be dropped at DEBUG, and

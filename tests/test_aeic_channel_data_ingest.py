@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import ANY
+
 import pytest
 
 from app.imaging.aeic.channel_data import (
@@ -18,13 +20,12 @@ from app.imaging.aeic.channel_data import (
 from app.imaging.aeic.channel_data_ingest import (
     MAX_PENDING_IMAGES,
     SESSION_TTL_SECONDS,
-    UNDECODABLE_NOTICE_INTERVAL_SECONDS,
     ChannelDataReassembler,
     carries_an_image,
     describe_data_type,
     handle_channel_data,
     marker_text,
-    reset_undecodable_notices,
+    unsupported_marker_text,
 )
 from app.imaging.aeic.text_transport import AeicStreamMetadata
 from app.imaging.aeic.transport import (
@@ -371,14 +372,61 @@ class TestMcoAppEnvelope:
         assert "subtype 7 v2" in describe_data_type(DATA_TYPE_MCO_APP, body)
 
 
-class TestUndecodableImageNotice:
-    """A picture that cannot be decoded has to SAY so.
+class _KeptMediaSpy:
+    """Stands in for the storage an undecodable arrival is kept in."""
 
-    This is the bug these tests exist for: an image sent from MCO Advanced in a
-    codec RemoteTerm has no decoder for was dropped at DEBUG, and the root logger
-    defaults to INFO -- so the frame was correctly identified, correctly refused,
-    and vanished without a trace anywhere, including ``/api/debug``. "I sent a
-    picture and nothing happened" was the entire diagnostic surface.
+    MESSAGE_ID = 909
+
+    def __init__(self, monkeypatch, *, fail: bool = False):
+        import app.repository as repo
+        from app.models import Message
+
+        self.blobs: list[bytes] = []
+        self.rows: list[dict] = []
+        self.bound: list[tuple[int, int]] = []
+        self._fail = fail
+        self._open = False
+
+        async def append_blob(*, conversation_key, data_type, codec_label, payload, now):
+            if self._fail:
+                raise RuntimeError("disk is on fire")
+            self.blobs.append(payload)
+            started_new = not self._open
+            self._open = True
+            return 55, started_new
+
+        async def bind_message(media_id, message_id):
+            self.bound.append((media_id, message_id))
+
+        async def create(**kw):
+            self.rows.append(kw)
+            return self.MESSAGE_ID
+
+        async def get_by_id(message_id):
+            return Message(
+                id=message_id,
+                type="CHAN",
+                text=self.rows[-1]["text"],
+                conversation_key=self.rows[-1]["conversation_key"],
+                sender_timestamp=0,
+                received_at=self.rows[-1]["received_at"],
+                outgoing=False,
+            )
+
+        monkeypatch.setattr(repo.UnsupportedMediaRepository, "append_blob", append_blob)
+        monkeypatch.setattr(repo.UnsupportedMediaRepository, "bind_message", bind_message)
+        monkeypatch.setattr(repo.MessageRepository, "create", create)
+        monkeypatch.setattr(repo.MessageRepository, "get_by_id", get_by_id)
+
+
+class TestKeepingAnUndecodableImage:
+    """An image in a codec we do not have must be kept, and must say so.
+
+    It used to be identified, refused and dropped -- correct, and invisible.
+    Nothing in the conversation said a picture had been sent, and the bytes were
+    gone, so adding the decoder later could not bring back a single image already
+    received. Three things have to happen now: keep the payload, put a box in the
+    conversation, and log it.
     """
 
     def _frame(self, data_type: int, payload: bytes, *, channel: int = 1) -> ParsedChannelData:
@@ -390,99 +438,91 @@ class TestUndecodableImageNotice:
             payload=payload,
         )
 
-    @pytest.fixture(autouse=True)
-    def _clean_notices(self):
-        reset_undecodable_notices()
-        yield
-        reset_undecodable_notices()
-
     @pytest.mark.asyncio
-    async def test_a_dropped_image_is_reported_at_info(self, caplog):
+    async def test_the_payload_is_kept_and_a_box_is_placed(self, monkeypatch, caplog):
+        spy = _KeptMediaSpy(monkeypatch)
+        events: list[tuple[str, object]] = []
+
         with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
             await handle_channel_data(
-                self._frame(DATA_TYPE_MCO_IMAGE, bytes(50)), conversation_key=CHANNEL
+                self._frame(DATA_TYPE_MCO_IMAGE, bytes(range(40))),
+                conversation_key=CHANNEL,
+                broadcast_fn=lambda name, payload, **kw: events.append((name, payload)),
             )
 
-        assert [record for record in caplog.records if record.levelname == "INFO"], (
-            "a picture was dropped with nothing at INFO to say so"
-        )
+        # Kept verbatim: a format we cannot parse is one we must not normalise.
+        assert spy.blobs == [bytes(range(40))]
+        # And it has a place in the conversation, announced live.
+        assert len(spy.rows) == 1
+        assert spy.rows[0]["text"] == unsupported_marker_text(55)
+        assert spy.bound == [(55, _KeptMediaSpy.MESSAGE_ID)]
+        assert ("message", ANY) in [(n, ANY) for n, _ in events]
         assert "MCOimg" in caplog.text
-        # Names the way out, not just the refusal: the sender's codec choice is
-        # the only thing that can fix this, and it is not guessable.
-        assert "AEIC" in caplog.text
+        # Says the bytes are kept, because that is the difference between this and
+        # the old behaviour and the reason the box is worth looking at later.
+        assert "stored" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_dropped_text_stays_at_debug(self, caplog):
-        with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
-            await handle_channel_data(
-                self._frame(DATA_TYPE_MCMP, bytes(50)), conversation_key=CHANNEL
-            )
+    async def test_one_arrival_places_one_box(self, monkeypatch):
+        """A multi-blob image must not mint a box per packet."""
+        spy = _KeptMediaSpy(monkeypatch)
 
-        assert not [record for record in caplog.records if record.levelname == "INFO"]
-
-    @pytest.mark.asyncio
-    async def test_one_image_reports_once_not_once_per_chunk(self, caplog):
-        """An image is up to sixteen chunks and every one lands here. A notice per
-        frame would print a paragraph for a single picture."""
-        with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
-            for _ in range(16):
-                await handle_channel_data(
-                    self._frame(DATA_TYPE_MCO_IMAGE, bytes(50)), conversation_key=CHANNEL
-                )
-
-        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 1
-
-    @pytest.mark.asyncio
-    async def test_suppression_is_per_channel_and_per_codec(self, caplog):
-        """Two channels, or two codecs, are two separate things to report -- and
-        collapsing them would hide the second."""
-        with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
+        for _ in range(8):
             await handle_channel_data(
-                self._frame(DATA_TYPE_MCO_IMAGE, bytes(50), channel=1), conversation_key=CHANNEL
-            )
-            await handle_channel_data(
-                self._frame(DATA_TYPE_MCO_IMAGE, bytes(50), channel=2), conversation_key=CHANNEL
-            )
-            await handle_channel_data(
-                self._frame(
-                    DATA_TYPE_MCO_APP, _mco_app_body(MCO_APP_SUBTYPE_MCO_IMAGE, 3), channel=1
-                ),
+                self._frame(DATA_TYPE_MCO_IMAGE, bytes(40)),
                 conversation_key=CHANNEL,
+                broadcast_fn=lambda *_a, **_k: None,
             )
 
-        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 3
+        assert len(spy.blobs) == 8, "every blob has to be kept"
+        assert len(spy.rows) == 1, "one picture, one box"
 
     @pytest.mark.asyncio
-    async def test_it_speaks_again_once_the_window_passes(self, caplog):
-        """Trying again after changing a setting has to say something. Permanent
-        suppression would make a second attempt look identical to a dead one."""
-        from app.imaging.aeic import channel_data_ingest
+    async def test_text_is_neither_kept_nor_announced(self, monkeypatch, caplog):
+        """Keeping text would be hoarding, not recovery: it arrives decoded by
+        other means, so there is nothing to recover later."""
+        spy = _KeptMediaSpy(monkeypatch)
 
-        frame = self._frame(DATA_TYPE_MCO_IMAGE, bytes(50))
-        with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
-            channel_data_ingest._note_undecodable(frame, now=1000.0)
-            channel_data_ingest._note_undecodable(
-                frame, now=1000.0 + UNDECODABLE_NOTICE_INTERVAL_SECONDS - 1
-            )
-            channel_data_ingest._note_undecodable(
-                frame, now=1000.0 + UNDECODABLE_NOTICE_INTERVAL_SECONDS + 1
-            )
-
-        assert len([r for r in caplog.records if r.levelname == "INFO"]) == 2
-
-    @pytest.mark.asyncio
-    async def test_an_aeic_image_reports_nothing(self, caplog):
-        """The whole point is that this codec DOES work. A notice here would be
-        telling someone about a picture that is about to appear."""
         with caplog.at_level("INFO", logger="app.imaging.aeic.channel_data_ingest"):
             await handle_channel_data(
-                self._frame(DATA_TYPE_AEIC_IMAGE, _blobs(bytes(300))[0]),
+                self._frame(DATA_TYPE_MCMP, bytes(40)),
                 conversation_key=CHANNEL,
+                broadcast_fn=lambda *_a, **_k: None,
             )
 
-        assert not [
-            r for r in caplog.records if r.levelname == "INFO" and "Cannot show" in r.message
-        ]
+        assert spy.blobs == []
+        assert spy.rows == []
+        assert not [r for r in caplog.records if r.levelname == "INFO"]
+
+    @pytest.mark.asyncio
+    async def test_storage_failing_does_not_break_the_radio_path(self, monkeypatch, caplog):
+        """This runs on the inbound frame path. A failed write must cost a log
+        line, not the link."""
+        _KeptMediaSpy(monkeypatch, fail=True)
+
+        handled = await handle_channel_data(
+            self._frame(DATA_TYPE_MCO_IMAGE, bytes(40)),
+            conversation_key=CHANNEL,
+            broadcast_fn=lambda *_a, **_k: None,
+        )
+
+        assert handled is False
+        assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_an_aeic_image_is_not_treated_as_unsupported(self, monkeypatch):
+        """The codec that DOES work must not be filed away as one that does not."""
+        spy = _KeptMediaSpy(monkeypatch)
+        sent = _StoreSpy(monkeypatch)
+
+        await handle_channel_data(
+            self._frame(DATA_TYPE_AEIC_IMAGE, _blobs(bytes(120))[0]),
+            conversation_key=CHANNEL,
+            broadcast_fn=lambda *_a, **_k: None,
+        )
+
+        assert spy.blobs == []
+        assert sent.session_keys, "the AEIC path did not run"
 
 
 class TestTransportSelection:
