@@ -240,8 +240,8 @@ export function ConversationFeaturesModal({
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
-      <DialogContent className="sm:max-w-[520px]">
-        <DialogHeader>
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden sm:max-w-[520px]">
+        <DialogHeader className="flex-shrink-0">
           <DialogTitle>Conversation features</DialogTitle>
           <DialogDescription>
             Optional features for{' '}
@@ -251,7 +251,9 @@ export function ConversationFeaturesModal({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-2">
+        {/* Only the feature list scrolls, so the title and its close button stay
+            reachable however many features are on. */}
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain">
           <div className="rounded-md border border-border p-3">
             <FeatureRow
               title="Compress messages (MCMP)"
