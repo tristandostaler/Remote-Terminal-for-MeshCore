@@ -55,6 +55,13 @@ desynchronises rANS without an error, so callers check.
 """
 
 
+DECODE_WORKER_EXIT_BAD_REQUEST = 2
+"""The decode worker was called wrongly (no bitstream, no model directory)."""
+
+DECODE_WORKER_EXIT_DECODE_FAILED = 3
+"""The decode worker ran and the decode itself raised; stderr carries the why."""
+
+
 class AeicRuntimeMissing(RuntimeError):
     """onnxruntime is not installed, so the AEIC codec cannot run at all."""
 

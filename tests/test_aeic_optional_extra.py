@@ -36,7 +36,16 @@ LIGHT_MODULES = (
     "bundle",
     "channel_data",
     "channel_data_ingest",
+    # The decode worker is spawned as `python -m`, so it is a fresh interpreter
+    # rather than something the app imports -- but it stays light anyway: its
+    # heavy imports live inside `decode()`, which means a base install can still
+    # *start* it and get a clean "onnxruntime is not installed" out of it instead
+    # of a traceback from the import machinery.
+    "decode_worker",
     "ingest",
+    # Stdlib only: the settings panel asks how much memory this host has on
+    # servers that have never installed the extra.
+    "memory",
     "png",
     "prepare",
     "rans",

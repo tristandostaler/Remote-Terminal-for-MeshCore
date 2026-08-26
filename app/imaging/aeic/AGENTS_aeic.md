@@ -101,8 +101,29 @@ interleaves network calls with rANS.
 
 ## Memory contract (not an optimisation)
 
-Measured peaks: entropy graph alone 0.35 GiB, synthesis decoder alone 2.16 GiB,
-both resident **2.44 GiB**. RemoteTerm often runs on a Pi or a small VPS.
+Measured peaks: entropy graph alone 0.35 GiB, synthesis decoder alone **~1.3 GiB
+with the weights mapped** (~2 GiB when ORT prepacks them onto the heap, which is
+why `_session_options(mmap_weights=True)` tells it not to -- see the cap-by-cap
+table in `memory.py`). RemoteTerm often runs on a Pi or a small VPS.
+
+**A decode runs in a worker process** (`decode_worker.py`), because ~1.4 GiB
+end to end is more than some hosts have and the OOM killer takes the biggest process: that used
+to be uvicorn, so one received picture killed the server and its radio link. The
+worker also raises its own `oom_score_adj`, returns every byte to the OS when it
+exits, and keeps inference sessions out of the server entirely on the receive
+path. `service._decode_in_process` remains for hosts that cannot spawn at all,
+and is the only reason the release discipline below still matters.
+
+A worker that *starts and dies* is never retried in-process. The likeliest reason
+it died is that the host is too small, and retrying in the server's own process
+is precisely how the server gets killed instead. Only an OS-level refusal to
+spawn falls back.
+
+Below ~900 MB free, `unavailable_reason(for_decode=True)` refuses up front and
+says so with both numbers. `memory.py` reads the cgroup limit as well as
+`MemAvailable`, because inside a container the latter reports the *host's* free
+memory -- a 512 MB container on a 16 GB box reads as roomy and then gets killed.
+Sending stays available either way: encoding never touches the synthesis graph.
 
 * `encode` creates the send-side entropy session and **keeps** it. A second
   photo is then free. The synthesis session is never touched.
@@ -117,9 +138,10 @@ both resident **2.44 GiB**. RemoteTerm often runs on a Pi or a small VPS.
 * Memory pressure drops the synthesis half first — it is 86% of the cost and the
   send path does not need it.
 
-Everything heavy goes through `asyncio.to_thread` with a semaphore of one. The
-event loop is also carrying the radio; a BLE notify stream stalled for the ~5 s
-synthesis pass drops mesh traffic.
+Everything heavy goes through `asyncio.to_thread` with a semaphore of one -- the
+worker spawn included, since it blocks for as long as the decode. The event loop
+is also carrying the radio; a BLE notify stream stalled for the ~5 s synthesis
+pass drops mesh traffic, and on a Pi paging mapped weights it is minutes.
 
 ## Two transports, and which one carries what
 

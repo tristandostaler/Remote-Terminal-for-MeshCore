@@ -29,6 +29,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
+import subprocess
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -42,7 +46,17 @@ from app.imaging.aeic.bundle import (
     AeicDownloadCancelled,
     download_bundle,
 )
-from app.imaging.aeic.constants import SQUARE_SIZE, onnxruntime_available
+from app.imaging.aeic.constants import (
+    DECODE_WORKER_EXIT_BAD_REQUEST,
+    SQUARE_SIZE,
+    onnxruntime_available,
+)
+from app.imaging.aeic.memory import (
+    DECODE_PEAK_BYTES,
+    available_memory_bytes,
+    decode_memory_shortfall,
+    format_bytes,
+)
 from app.imaging.aeic.prepare import prepare_square_rgb
 from app.imaging.aeic.text_transport import (
     AeicStreamMetadata,
@@ -73,6 +87,37 @@ so the receiver can letterbox back.
 
 class AeicUnavailable(RuntimeError):
     """The codec cannot run, with a sentence fit to show the user."""
+
+
+class AeicDecodeFailed(RuntimeError):
+    """One reconstruction failed, with a sentence fit to show the user.
+
+    Every decode error reaches a bubble: ``ingest.decode_session`` stores it
+    against the session and pushes it to the conversation, so these messages are
+    read by people, not only by logs.
+    """
+
+
+class AeicDecodeOutOfMemory(AeicDecodeFailed):
+    """The worker was killed mid-decode, which on a small host means memory."""
+
+
+class _WorkerNotStartable(RuntimeError):
+    """The worker process could not be started at all -- not a decode failure.
+
+    Only an OS-level refusal counts. A worker that starts and then dies is a
+    real result and must NOT fall back in-process: the most likely reason it
+    died is that the host has too little memory, and retrying in the server's
+    own process is precisely how the server gets killed instead.
+    """
+
+
+DECODE_WORKER_MODULE = "app.imaging.aeic.decode_worker"
+
+DECODE_TIMEOUT_SECONDS = 900
+"""Generous on purpose. The pass is ~5 s on a laptop but a Pi paging the mapped
+weights in and out can take minutes, and a slow answer is worth far more than a
+timeout that reads as a broken picture."""
 
 
 class AeicService:
@@ -163,6 +208,12 @@ class AeicService:
                 f"{len(AEIC_SE_FT32_ASSETS)} files missing, 958 MiB total). "
                 "Download it from the image codec settings."
             )
+        if for_decode:
+            # Only reconstruction is memory-hungry; sending stays available on a
+            # host that cannot receive, which is worth keeping true.
+            shortfall = decode_memory_shortfall()
+            if shortfall is not None:
+                return shortfall
         return None
 
     def _require_ready(self, *, for_decode: bool) -> None:
@@ -235,37 +286,125 @@ class AeicService:
     async def decode_to_png(self, bitstream: bytes) -> bytes:
         """A received bitstream -> a PNG of the reconstructed picture.
 
-        The two halves are separated by an explicit session release: holding the
-        entropy graph and the synthesis decoder at once measures 2.44 GiB.
+        Runs in a worker process (:mod:`app.imaging.aeic.decode_worker`). The
+        pass needs ~1.3 GiB, and when a host does not have it the kernel's OOM
+        killer picks the largest process -- in-process that was uvicorn, so one
+        received picture took the server and its radio link down with it. Out of
+        process the kill lands on the worker and the picture is reported as too
+        big for the host, which is a message rather than an outage.
         """
         self._require_ready(for_decode=True)
-
-        def run() -> bytes:
-            from app.imaging.aeic.png import encode_png
-
-            backend = self._get_backend()
-            try:
-                y_hat = self._codec(for_decode=True).decode_to_latent(bitstream)
-                # Mandatory, not tidy-up: see the memory contract in onnx_backend.
-                backend.release_entropy_sessions()
-                rgb = backend.decode_latent_to_rgb(y_hat)
-            finally:
-                # Both releases repeat in the finally because a raise here is
-                # SWALLOWED by the caller (ingest.decode_session logs and moves
-                # on), so anything still held stays held for the life of the
-                # process -- and the next decode would then allocate the entropy
-                # graph on top of the 2.16 GiB synthesis session, which is
-                # exactly the 2.44 GiB the memory contract exists to prevent.
-                # Both calls are idempotent, so repeating the success-path
-                # release above costs nothing.
-                backend.release_entropy_sessions()
-                backend.release_decoder_session()
-            return encode_png(rgb, SQUARE_SIZE, SQUARE_SIZE)
-
         async with self._inference_lock:
-            png = await asyncio.to_thread(run)
+            try:
+                png = await asyncio.to_thread(self._decode_in_worker, bitstream)
+            except _WorkerNotStartable as exc:
+                logger.warning(
+                    "Could not start the AEIC decode worker (%s); decoding in-process, "
+                    "where running out of memory would take this server with it",
+                    exc,
+                )
+                png = await asyncio.to_thread(self._decode_in_process, bitstream)
         logger.info("AEIC decoded %d bytes into a %dpx image", len(bitstream), SQUARE_SIZE)
         return png
+
+    def _decode_in_worker(self, bitstream: bytes) -> bytes:
+        """Spawn the worker, feed it the bitstream, and read back the PNG.
+
+        A blocking spawn on a worker thread rather than an asyncio subprocess:
+        the event loop is carrying the radio and must not also be running a child
+        watcher for a minutes-long decode, and this keeps the whole exchange one
+        readable call. The caller already holds the inference semaphore, so only
+        one of these exists at a time.
+        """
+        # The worker is started as a module, so its interpreter needs the repo on
+        # the path whatever the server's own working directory happens to be.
+        root = Path(__file__).resolve().parents[3]
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            part for part in (str(root), env.get("PYTHONPATH", "")) if part
+        )
+        command = [sys.executable, "-m", DECODE_WORKER_MODULE, str(self._model_dir)]
+        try:
+            finished = subprocess.run(  # noqa: S603 - fixed command, no shell
+                command,
+                input=bitstream,
+                capture_output=True,
+                timeout=DECODE_TIMEOUT_SECONDS,
+                cwd=str(root),
+                env=env,
+                check=False,
+            )
+        except (OSError, NotImplementedError) as exc:
+            # No subprocesses here at all: a sandbox, or a host that refuses to
+            # fork. The in-process path is worse but it works.
+            raise _WorkerNotStartable(str(exc)) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise AeicDecodeFailed(
+                f"The AI decoder gave up after {DECODE_TIMEOUT_SECONDS // 60} minutes "
+                "without finishing. The picture is kept, so it can be opened again."
+            ) from exc
+        return self._read_worker_result(finished.returncode, finished.stdout, finished.stderr)
+
+    def _read_worker_result(self, returncode: int | None, stdout: bytes, stderr: bytes) -> bytes:
+        lines = [line for line in stderr.decode(errors="replace").splitlines() if line.strip()]
+        detail = lines[-1] if lines else ""
+        if returncode == 0 and stdout.startswith(b"\x89PNG"):
+            return stdout
+        # A worker killed by a signal reports it as a negative return code; 128+n
+        # only appears when something in between went through a shell.
+        killed_by = -returncode if returncode is not None and returncode < 0 else None
+        if killed_by is None and returncode is not None and returncode > 128:
+            killed_by = returncode - 128
+        if killed_by == signal.SIGKILL:
+            raise AeicDecodeOutOfMemory(self._out_of_memory_sentence())
+        if killed_by is not None:
+            name = signal.Signals(killed_by).name if killed_by in set(signal.Signals) else killed_by
+            raise AeicDecodeFailed(
+                f"The AI decoder was stopped by the system ({name}) before it finished. "
+                f"{detail}".strip()
+            )
+        if returncode == DECODE_WORKER_EXIT_BAD_REQUEST:
+            raise AeicDecodeFailed(f"The AI decoder rejected the request: {detail}")
+        if returncode != 0:
+            raise AeicDecodeFailed(detail or f"The AI decoder failed (exit {returncode}).")
+        raise AeicDecodeFailed("The AI decoder finished without producing an image.")
+
+    def _out_of_memory_sentence(self) -> str:
+        available = available_memory_bytes()
+        had = f" This server had {format_bytes(available)} free." if available is not None else ""
+        return (
+            "The AI decoder ran out of memory and was stopped by the system before it "
+            f"finished. Reconstruction needs about {format_bytes(DECODE_PEAK_BYTES)}.{had} "
+            "The picture is kept, so it can be opened from a machine with more memory; "
+            "adding swap also works, slowly."
+        )
+
+    def _decode_in_process(self, bitstream: bytes) -> bytes:
+        """The fallback for a host that cannot spawn the worker.
+
+        Kept identical in behaviour to what the worker does, including the
+        session releases -- which matter far more here, since this process
+        outlives the decode.
+        """
+        from app.imaging.aeic.png import encode_png
+
+        backend = self._get_backend()
+        try:
+            y_hat = self._codec(for_decode=True).decode_to_latent(bitstream)
+            # Mandatory, not tidy-up: see the memory contract in onnx_backend.
+            backend.release_entropy_sessions()
+            rgb = backend.decode_latent_to_rgb(y_hat)
+        finally:
+            # Both releases repeat in the finally because a raise here is
+            # SWALLOWED by the caller (ingest.decode_session logs and moves on),
+            # so anything still held stays held for the life of the process --
+            # and the next decode would then allocate the entropy graph on top of
+            # the synthesis session, the peak this contract exists to prevent.
+            # Both calls are idempotent, so repeating the success-path release
+            # above costs nothing.
+            backend.release_entropy_sessions()
+            backend.release_decoder_session()
+        return encode_png(rgb, SQUARE_SIZE, SQUARE_SIZE)
 
     async def send_image(
         self,
