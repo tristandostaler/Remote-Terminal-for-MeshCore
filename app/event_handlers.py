@@ -430,8 +430,30 @@ def install_channel_data_adapter(meshcore) -> None:
 
     Same wrapping strategy as :func:`install_full_raw_data_adapter`, including
     the idempotency flag, so reconnects do not stack adapters.
+
+    Consuming the frame has a second obligation. Frame 27 usually arrives as the
+    firmware's answer to ``CMD_SYNC_NEXT_MESSAGE``, and meshcore-py's ``get_msg``
+    does not know it: the caller that asked is left waiting for a reply that
+    already came. The auto-fetch loop asks with NO timeout, so one queued image
+    hung it forever -- and its MESSAGES_WAITING handler refuses to start a second
+    task while the first is alive, so every later push-driven fetch was dead too.
+    Channel *text* still flowed (it is sniffed off raw RF, not pulled from this
+    queue), which is what made the failure read as "text always, images never".
+    A placeholder CHANNEL_MSG_RECV is dispatched for each frame so the waiter
+    resolves and keeps draining; the app's pulled-message consumers skip it (see
+    ``is_grp_data_placeholder``).
+
+    The placeholder goes out BEFORE the frame is processed, not after: handling
+    ends in a channel-slot lookup that can wait on the radio lock, and the drain
+    loops hold that lock for their whole run -- dispatching after would deadlock
+    the resolution against the very waiter it is meant to release.
     """
-    from app.imaging.aeic.channel_data import RESP_CODE_CHANNEL_DATA_RECV
+    from meshcore.events import Event
+
+    from app.imaging.aeic.channel_data import (
+        RESP_CODE_CHANNEL_DATA_RECV,
+        grp_data_placeholder_payload,
+    )
 
     reader = meshcore._reader
     if getattr(reader, "_remoteterm_channel_data", False):
@@ -440,6 +462,14 @@ def install_channel_data_adapter(meshcore) -> None:
 
     async def handle_rx(data: bytearray) -> None:
         if data and data[0] == RESP_CODE_CHANNEL_DATA_RECV:
+            try:
+                await meshcore.dispatcher.dispatch(
+                    Event(EventType.CHANNEL_MSG_RECV, grp_data_placeholder_payload())
+                )
+            except Exception:
+                # A dispatcher that is not running yet only costs a get_msg
+                # timeout; the image itself is still handled below.
+                logger.debug("Could not release the message waiter for a GRP_DATA frame")
             try:
                 await on_channel_data(bytes(data))
             except Exception:

@@ -25,6 +25,7 @@ from app.decoder import (
     parse_advertisement,
     parse_packet,
     try_decrypt_dm,
+    try_decrypt_group_data_packet,
     try_decrypt_packet_with_channel_key,
     try_decrypt_path,
     verify_advert_signature,
@@ -409,6 +410,11 @@ async def process_raw_packet(
         if decrypt_result:
             result.update(decrypt_result)
 
+    elif payload_type == PayloadType.GROUP_DATA:
+        decrypt_result = await _process_group_data(raw_bytes, snr=snr)
+        if decrypt_result:
+            result.update(decrypt_result)
+
     elif payload_type == PayloadType.PATH:
         await _process_path_packet(raw_bytes, ts, packet_info)
 
@@ -522,6 +528,103 @@ async def _process_group_text(
         }
 
     # Couldn't decrypt with any known key
+    return None
+
+
+async def _process_group_data(raw_bytes: bytes, *, snr: float | None = None) -> dict | None:
+    """Decode a GRP_DATA (binary channel) packet straight off raw RF.
+
+    This is the PRIMARY path for a channel picture now, mirroring how channel
+    text already works: try every known channel key, verify the 2-byte HMAC, and
+    feed what comes out to the same ingest the companion frame uses. It was
+    originally left to the firmware (frame 27) because the plaintext layout was
+    undocumented -- that is no longer true (``decrypt_group_data`` cites the
+    firmware source), and the real cost of relying on frame 27 turned out to be
+    total: a radio whose firmware never queues GRP_DATA for companions receives
+    every packet and delivers none of them, so pictures sent to a channel simply
+    never appeared. Decoding from RF works on any firmware whose radio can hear
+    the packet, needs no radio slot, and cannot decode wrongly -- a wrong key
+    fails the MAC.
+
+    Frame 27 is kept as a fallback for setups where the RF log is unavailable.
+    Both paths feed one reassembler, and a chunk arriving twice -- once per path,
+    or again via a repeater's re-flood -- is absorbed idempotently there.
+    """
+    from app.imaging.aeic.channel_data import (
+        DATA_TYPE_AEIC_IMAGE,
+        ParsedChannelData,
+        parse_chunk_blob,
+    )
+    from app.imaging.aeic.channel_data_ingest import handle_channel_data
+
+    channels = await ChannelRepository.get_all()
+    for channel in channels:
+        try:
+            channel_key_bytes = bytes.fromhex(channel.key)
+        except ValueError:
+            continue
+        decrypted = try_decrypt_group_data_packet(raw_bytes, channel_key_bytes)
+        if decrypted is None:
+            continue
+
+        # An echo of our own send: repeaters re-flood our packet and the RF log
+        # hears the copy. Without this check every picture we sent came straight
+        # back as an incoming one. Only an AEIC chunk carries a sender identity,
+        # so only it can be filtered this way; 1/65536 of peers share our prefix
+        # and upstream accepts those odds everywhere this field is used.
+        if decrypted.data_type == DATA_TYPE_AEIC_IMAGE:
+            chunk = parse_chunk_blob(decrypted.data)
+            self_prefix = _self_sender_prefix()
+            if (
+                chunk is not None
+                and self_prefix is not None
+                and (chunk.sender_prefix == self_prefix)
+            ):
+                logger.debug("Ignoring the RF echo of our own GRP_DATA chunk")
+                return {"decrypted": True, "channel_name": channel.name, "channel_key": channel.key}
+
+        logger.info(
+            "Decoded a GRP_DATA packet off RF for channel %s: data type 0x%04X, %d bytes",
+            channel.name,
+            decrypted.data_type,
+            len(decrypted.data),
+        )
+        try:
+            await handle_channel_data(
+                ParsedChannelData(
+                    snr_raw=int((snr or 0) * 4),
+                    # No radio slot: the channel was identified by KEY, which is
+                    # the whole point of this path. -1 only ever reaches logs.
+                    channel_index=-1,
+                    path_len_byte=0xFF,
+                    data_type=decrypted.data_type,
+                    payload=decrypted.data,
+                ),
+                conversation_key=channel.key,
+                broadcast_fn=broadcast_event,
+            )
+        except Exception:
+            logger.exception("Failed to ingest a GRP_DATA packet decoded off RF")
+        return {"decrypted": True, "channel_name": channel.name, "channel_key": channel.key}
+
+    # No known key fits. Same silence as channel text we cannot read.
+    return None
+
+
+def _self_sender_prefix() -> int | None:
+    """This node's 2-byte AEIC sender prefix, or None while it is unknown."""
+    from app.services.radio_runtime import radio_runtime
+
+    try:
+        meshcore = radio_runtime.meshcore
+        self_info = (meshcore.self_info if meshcore else None) or {}
+        public_key = self_info.get("public_key") or ""
+        if isinstance(public_key, str):
+            public_key = bytes.fromhex(public_key)
+        if len(public_key) >= 2:
+            return ((public_key[0] & 0xFF) << 8) | (public_key[1] & 0xFF)
+    except Exception:
+        pass
     return None
 
 
