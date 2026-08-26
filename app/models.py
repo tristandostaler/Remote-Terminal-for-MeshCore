@@ -817,6 +817,14 @@ class AeicStatusResponse(BaseModel):
     runtime_available: bool = Field(
         description="True when the optional onnxruntime dependency is importable"
     )
+    reconstruction_enabled: bool = Field(
+        default=True,
+        description=(
+            "False when MESHCORE_ENABLE_AEIC=false. That switch governs rebuilding "
+            "received pictures, which costs ~1.4 GB of memory each; sending is "
+            "unaffected by it."
+        ),
+    )
     supports_encode: bool
     supports_decode: bool
     downloading: bool

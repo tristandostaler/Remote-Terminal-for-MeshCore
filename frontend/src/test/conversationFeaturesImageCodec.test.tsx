@@ -37,6 +37,7 @@ const SEND_HALF_BYTES = 68_075_815;
 function status(overrides: Partial<AeicStatus> = {}): AeicStatus {
   return {
     runtime_available: true,
+    reconstruction_enabled: true,
     supports_encode: true,
     supports_decode: true,
     downloading: false,
@@ -269,6 +270,48 @@ describe('photo codec selector', () => {
       renderModal();
 
       expect(await screen.findByText(/Getting ready to send \(65 MB\) — 50%/)).toBeVisible();
+    });
+
+    it('keeps sending selectable when rebuilding is switched off', async () => {
+      // MESHCORE_ENABLE_AEIC=false is about the ~1.4 GB rebuild, not the codec.
+      // The old panel showed "switched off, set MESHCORE_ENABLE_AEIC=true" here,
+      // which both hid a working sender and told the reader to install a
+      // dependency that was already installed.
+      vi.mocked(api.getAeicStatus).mockResolvedValue(
+        status({
+          runtime_available: true,
+          reconstruction_enabled: false,
+          supports_encode: true,
+          supports_decode: false,
+          installed_bytes: SEND_HALF_BYTES,
+        })
+      );
+      renderModal();
+
+      expect(await screen.findByRole('radio', { name: 'AI reconstruction' })).toBeEnabled();
+      expect(screen.getByText(/Rebuilding photos other people send is switched off/)).toBeVisible();
+      expect(screen.getByText('MESHCORE_ENABLE_AEIC=false')).toBeVisible();
+      // No offer to fetch 893 MB of weights that nothing is allowed to load.
+      expect(screen.queryByRole('button', { name: /Download the rest/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Whole model/ })).not.toBeInTheDocument();
+    });
+
+    it('still offers the send half when rebuilding is off and nothing is installed', async () => {
+      vi.mocked(api.getAeicStatus).mockResolvedValue(
+        status({
+          runtime_available: true,
+          reconstruction_enabled: false,
+          supports_encode: false,
+          supports_decode: false,
+          installed_bytes: 0,
+        })
+      );
+      vi.mocked(api.startAeicModelDownload).mockResolvedValue(status({ downloading: true }));
+      renderModal();
+
+      fireEvent.click(await screen.findByRole('button', { name: /Get sending working/ }));
+
+      await waitFor(() => expect(api.startAeicModelDownload).toHaveBeenCalledWith('send'));
     });
 
     it('surfaces a previous failure so it is not silently retried forever', async () => {

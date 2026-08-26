@@ -152,17 +152,19 @@ class AeicService:
 
     def status(self) -> dict:
         bundle = self.bundle()
-        # An explicit MESHCORE_ENABLE_AEIC=false reports as "no runtime", which is
-        # what the settings panel already renders as "switched off on this server,
-        # set MESHCORE_ENABLE_AEIC=true" -- precisely the right message, and it
-        # was previously unreachable on a server that had the extra installed.
-        # Without this the panel would offer to download 958 MiB for a codec that
-        # unavailable_reason() refuses to run.
-        runtime = onnxruntime_available() and settings.enable_aeic is not False
+        # `runtime_available` is the dependency, nothing else: it is what the
+        # panel renders as "switched off, set MESHCORE_ENABLE_AEIC=true and
+        # restart -- it installs ~120 MB", which is only true of a missing
+        # onnxruntime. The switch is reported separately because it now governs
+        # reconstruction alone; folding it in here would hide a server that can
+        # still send.
+        runtime = onnxruntime_available()
+        reconstruction_enabled = settings.enable_aeic is not False
         return {
             "runtime_available": runtime,
+            "reconstruction_enabled": reconstruction_enabled,
             "supports_encode": runtime and bundle.supports_encode,
-            "supports_decode": runtime and bundle.supports_decode,
+            "supports_decode": runtime and reconstruction_enabled and bundle.supports_decode,
             "downloading": self.is_downloading,
             "download_file": self._download_file if self.is_downloading else None,
             "downloaded_bytes": self._downloaded_bytes,
@@ -211,17 +213,19 @@ class AeicService:
         """A sentence to show the user, or None when the codec is usable.
 
         The single chokepoint for "can the codec run": both ``_require_ready``
-        (encode and decode) and the settings UI go through here, so the switch
-        below cannot be true in one place and false in another.
+        (encode and decode) and the settings UI go through here, so the answer
+        cannot differ between them.
         """
-        if settings.enable_aeic is False:
-            # Checked FIRST and independently of the dependency and the bundle,
-            # which is the whole point: an explicit false has to win even on a
-            # server where both are already installed, and reconstruction is
-            # exactly what keeps working otherwise. `run.sh` reads this variable
-            # only to decide whether to install the extra, so it cannot uninstall
-            # anything when the value flips back.
-            return "The AI image codec is switched off on this server (MESHCORE_ENABLE_AEIC=false)."
+        if for_decode and settings.enable_aeic is False:
+            # Checked first for decoding and not at all for sending. The switch
+            # exists to keep a host out of a ~1.4 GiB reconstruction it cannot
+            # afford; sending costs 65 MiB and ~0.35 GiB and is nobody's problem,
+            # so switching reconstruction off must not take it away.
+            return (
+                "Rebuilding AI pictures is switched off on this server "
+                "(MESHCORE_ENABLE_AEIC=false). The picture is kept, so switching "
+                "it back on will still decode this one."
+            )
         if not onnxruntime_available():
             return (
                 "The AI image codec needs the optional onnxruntime dependency, "
@@ -656,7 +660,12 @@ class AeicService:
 
         Returns whether a download was started; every reason not to is normal.
         """
-        if settings.enable_aeic is False or not onnxruntime_available():
+        if not onnxruntime_available():
+            # Nothing to send with. Note this deliberately does NOT check
+            # MESHCORE_ENABLE_AEIC: a server told not to rebuild pictures can
+            # still send them, and 65 MiB is what that costs. On a fresh install
+            # with the switch off there is no onnxruntime here anyway, because
+            # `run.sh` only installs the extra when it is on.
             return False
         if self.bundle().supports_encode or self.is_downloading:
             return False

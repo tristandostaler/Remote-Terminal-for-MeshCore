@@ -112,9 +112,28 @@ uplink spent for nothing.
 
 `ensure_send_half_installed()` runs at startup and again from `_require_ready`
 when a send finds the half missing, so a gateway that had no uplink at boot fixes
-itself on first use rather than needing a restart. It is refused by an explicit
-`MESHCORE_ENABLE_AEIC=false`, by a missing runtime, and by a download already in
-flight -- everything else starts a `scope=send` download.
+itself on first use rather than needing a restart. It is refused by a missing
+runtime and by a download already in flight -- and *not* by
+`MESHCORE_ENABLE_AEIC=false`, which is the next section.
+
+## `MESHCORE_ENABLE_AEIC` switches off rebuilding, not the codec
+
+`false` means "never reconstruct a received picture". It does not stop sending:
+that is the 65 MiB half and ~0.35 GiB, none of it the synthesis weights, and the
+host most likely to have turned rebuilding off is exactly the host that still
+wants to send. So the switch is read in `unavailable_reason` **only** when
+`for_decode`, `status()` reports it as `reconstruction_enabled` separately from
+`runtime_available` (which is the dependency and nothing else), and the download
+route refuses `scope=full` while allowing `scope=send`.
+
+Two consequences worth keeping straight:
+
+* A received picture under `false` is *kept*, not dropped -- switching the value
+  back on decodes it later. The refusal sentence says so.
+* On a fresh install `false` still means nothing at all, because `run.sh` only
+  installs the ~120 MiB extra when the value is on. What `false` cannot do is
+  uninstall what an earlier `true` already put there, and that server -- extra
+  present, rebuilding unaffordable -- is the one this distinction is for.
 
 The halves compose (`download_bundle(assets=...)` skips whatever is installed and
 intact) but are **never mixable across checkpoints**: every asset here is

@@ -191,6 +191,31 @@ function AeicModelPanel({
 
   if (status.supports_decode) return null;
 
+  if (!status.reconstruction_enabled) {
+    // MESHCORE_ENABLE_AEIC=false governs rebuilding only, so this is not the
+    // "switched off" dead end above: sending works, and saying so is the whole
+    // difference between a setting and a broken feature.
+    return (
+      <div className="mt-2 space-y-1.5">
+        <p className="text-xs leading-snug text-muted-foreground">
+          Sending works. Rebuilding photos other people send is switched off on this server (
+          <code>MESHCORE_ENABLE_AEIC=false</code>) — it needs about 1.4 GB of memory per photo. One
+          that arrives is kept and shown as a box, so switching this back on still decodes it.
+        </p>
+        {!status.supports_encode && (
+          <button
+            type="button"
+            onClick={() => void start('send')}
+            disabled={busy}
+            className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-accent disabled:opacity-60"
+          >
+            Get sending working ({formatMib(status.send_half_total_bytes)})
+          </button>
+        )}
+      </div>
+    );
+  }
+
   const error = status.last_error && (
     <p className="text-xs leading-snug text-destructive">{status.last_error}</p>
   );

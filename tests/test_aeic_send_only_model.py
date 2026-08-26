@@ -175,12 +175,22 @@ class TestTheAutomaticFetch:
 
         assert service.ensure_send_half_installed() is False
 
-    def test_an_explicit_off_switch_is_honoured(self, service, monkeypatch):
-        """MESHCORE_ENABLE_AEIC=false must not spend anyone's bandwidth."""
-        monkeypatch.setattr(service_module.settings, "enable_aeic", False)
-        monkeypatch.setattr(service, "start_download", lambda **_: pytest.fail("downloaded anyway"))
+    def test_it_still_runs_with_reconstruction_switched_off(self, service, monkeypatch):
+        """MESHCORE_ENABLE_AEIC=false means "never rebuild", not "never send".
 
-        assert service.ensure_send_half_installed() is False
+        The 65 MiB is the price of sending, and a host that has deliberately
+        given up rebuilding pictures is exactly the host that wants to keep
+        sending them. On a fresh install with the switch off there is no
+        onnxruntime to reach this code at all.
+        """
+        monkeypatch.setattr(service_module.settings, "enable_aeic", False)
+        started = []
+        monkeypatch.setattr(
+            service, "start_download", lambda **kw: bool(started.append(kw)) or True
+        )
+
+        assert service.ensure_send_half_installed() is True
+        assert started == [{"send_half_only": True}]
 
     def test_it_stays_quiet_without_the_runtime(self, service, monkeypatch):
         monkeypatch.setattr(service_module, "onnxruntime_available", lambda: False)
@@ -287,6 +297,38 @@ class TestStartupFetchesIt:
 
         with self._stubbed_startup(explode):
             await self._run_lifespan()  # must not raise
+
+
+class TestTheDownloadEndpointWithRebuildingOff:
+    """``scope`` decides whether MESHCORE_ENABLE_AEIC=false refuses.
+
+    The receive half is 893 MiB of weights that a server with rebuilding off will
+    never load, so fetching it is pure waste and is refused. The send half is
+    what sending needs, and sending works either way.
+    """
+
+    @pytest.fixture
+    def rebuilding_off(self, monkeypatch):
+        monkeypatch.setattr(service_module.settings, "enable_aeic", False)
+        monkeypatch.setattr(service_module.aeic_service, "start_download", lambda **_kwargs: True)
+
+    async def test_the_send_half_is_allowed(self, client, rebuilding_off):
+        response = await client.post("/api/aeic/model/download?scope=send")
+
+        assert response.status_code == 200, response.text
+
+    async def test_the_receive_half_is_refused_and_says_sending_still_works(
+        self, client, rebuilding_off
+    ):
+        response = await client.post("/api/aeic/model/download?scope=full")
+
+        assert response.status_code == 409
+        assert "Sending works without it" in response.json()["detail"]
+
+    async def test_the_default_scope_is_still_the_whole_bundle(self, client, rebuilding_off):
+        response = await client.post("/api/aeic/model/download")
+
+        assert response.status_code == 409
 
 
 @requires_bundle

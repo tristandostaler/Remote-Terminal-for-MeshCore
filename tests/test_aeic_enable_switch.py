@@ -1,4 +1,4 @@
-"""``MESHCORE_ENABLE_AEIC`` as a runtime kill switch.
+"""``MESHCORE_ENABLE_AEIC`` as the runtime switch for *reconstruction*.
 
 The variable used to be install-time only: ``run.sh`` read it to decide whether
 to ``uv pip install`` the optional extra. That made it one-way. On a server that
@@ -6,15 +6,23 @@ had once had it true, the dependency and the 958 MiB bundle were already on disk
 so setting it back to false changed nothing -- onnxruntime still imported, the
 model still loaded, and received images were still reconstructed.
 
-These tests pin the tri-state the app now reads at runtime:
+Made a runtime switch, it then went too far the other way and took sending with
+it. The two halves do not cost the same thing: rebuilding a received picture is
+893 MiB of weights and ~1.4 GiB of memory *per picture*, which is what anyone
+turning this off is turning off; sending is 65 MiB and ~0.35 GiB and never loads
+any of it. So false now means "never rebuild", and sending is left alone.
+
+These tests pin the tri-state the app reads at runtime:
 
 * unset -> autodetect, the historical behaviour (a dev checkout that ran
   ``uv sync --extra aeic`` without ever setting the variable must keep working)
-* false -> hard off, regardless of what is installed
+* false -> never reconstruct, regardless of what is installed; sending unaffected
 * true  -> on, but it cannot conjure a missing dependency or model
 """
 
 from __future__ import annotations
+
+import pathlib
 
 import pytest
 
@@ -32,16 +40,46 @@ def enable_aeic(monkeypatch):
     return _set
 
 
-class TestExplicitFalseIsHardOff:
+class _ReadyBundle:
+    supports_encode = True
+    supports_decode = True
+
+    def missing_assets(self):
+        return []
+
+    def installed_bytes(self, assets=None):
+        return 0
+
+    def path_for(self, _asset):
+        return pathlib.Path("nowhere")
+
+
+class TestExplicitFalseStopsRebuilding:
     def test_false_reports_unavailable_for_decode(self, enable_aeic):
         enable_aeic(False)
         reason = aeic_service.unavailable_reason(for_decode=True)
         assert reason is not None
         assert "MESHCORE_ENABLE_AEIC" in reason
 
-    def test_false_reports_unavailable_for_encode(self, enable_aeic):
+    def test_false_says_the_picture_is_kept(self, enable_aeic):
+        """It is not lost, and switching the codec back on decodes it -- which is
+        the difference between a setting and a shredder."""
         enable_aeic(False)
-        assert aeic_service.unavailable_reason(for_decode=False) is not None
+        reason = aeic_service.unavailable_reason(for_decode=True)
+        assert reason is not None and "picture is kept" in reason
+
+    def test_false_leaves_sending_alone(self, enable_aeic, monkeypatch):
+        """The point of this switch is the ~1.4 GiB reconstruction, not the codec.
+
+        A host told not to rebuild pictures can still send them: 65 MiB on disk
+        and ~0.35 GiB of memory, none of it the synthesis weights.
+        """
+        monkeypatch.setattr("app.imaging.aeic.service.onnxruntime_available", lambda: True)
+        monkeypatch.setattr(aeic_service, "bundle", lambda: _ReadyBundle())
+        enable_aeic(False)
+
+        assert aeic_service.unavailable_reason(for_decode=False) is None
+        aeic_service._require_ready(for_decode=False)  # must not raise
 
     def test_false_wins_even_when_everything_is_installed(self, enable_aeic, monkeypatch):
         """The whole point: installed dependency + installed model, still off.
@@ -51,15 +89,7 @@ class TestExplicitFalseIsHardOff:
         ready, and the codec must still refuse.
         """
         monkeypatch.setattr("app.imaging.aeic.service.onnxruntime_available", lambda: True)
-
-        class ReadyBundle:
-            supports_encode = True
-            supports_decode = True
-
-            def missing_assets(self):
-                return []
-
-        monkeypatch.setattr(aeic_service, "bundle", lambda: ReadyBundle())
+        monkeypatch.setattr(aeic_service, "bundle", lambda: _ReadyBundle())
 
         # Sanity: with the switch unset this configuration IS usable, so the
         # assertion below is about the switch and nothing else.
@@ -69,28 +99,28 @@ class TestExplicitFalseIsHardOff:
         enable_aeic(False)
         assert aeic_service.unavailable_reason(for_decode=True) is not None
 
-    def test_false_blocks_the_encode_entry_point(self, enable_aeic):
-        enable_aeic(False)
-        with pytest.raises(AeicUnavailable):
-            aeic_service._require_ready(for_decode=False)
-
     def test_false_blocks_the_decode_entry_point(self, enable_aeic):
         enable_aeic(False)
         with pytest.raises(AeicUnavailable):
             aeic_service._require_ready(for_decode=True)
 
-    def test_false_reports_no_runtime_in_status(self, enable_aeic, monkeypatch):
-        """The settings panel keys off ``runtime_available``.
+    def test_status_separates_the_switch_from_the_dependency(self, enable_aeic, monkeypatch):
+        """``runtime_available`` is the dependency and nothing else.
 
-        Reporting it false is what makes the panel say "switched off on this
-        server, set MESHCORE_ENABLE_AEIC=true" instead of offering to download a
-        958 MiB model that nothing is allowed to load.
+        The panel renders it as "switched off, set MESHCORE_ENABLE_AEIC=true and
+        restart -- it installs ~120 MB", which is only ever true of a missing
+        onnxruntime. Folding the switch into it hid a server that could still
+        send, and told the reader to install something already installed.
         """
         monkeypatch.setattr("app.imaging.aeic.service.onnxruntime_available", lambda: True)
+        monkeypatch.setattr(aeic_service, "bundle", lambda: _ReadyBundle())
         enable_aeic(False)
+
         status = aeic_service.status()
-        assert status["runtime_available"] is False
-        assert status["supports_encode"] is False
+
+        assert status["runtime_available"] is True
+        assert status["reconstruction_enabled"] is False
+        assert status["supports_encode"] is True, "sending was taken away with rebuilding"
         assert status["supports_decode"] is False
 
 
@@ -103,15 +133,7 @@ class TestUnsetKeepsAutodetect:
         regression for them.
         """
         monkeypatch.setattr("app.imaging.aeic.service.onnxruntime_available", lambda: True)
-
-        class ReadyBundle:
-            supports_encode = True
-            supports_decode = True
-
-            def missing_assets(self):
-                return []
-
-        monkeypatch.setattr(aeic_service, "bundle", lambda: ReadyBundle())
+        monkeypatch.setattr(aeic_service, "bundle", lambda: _ReadyBundle())
         enable_aeic(None)
         assert aeic_service.unavailable_reason(for_decode=True) is None
 
