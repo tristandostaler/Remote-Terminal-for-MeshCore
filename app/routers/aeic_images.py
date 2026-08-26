@@ -72,15 +72,18 @@ async def start_model_download(scope: Literal["full", "send"] = "full") -> dict:
     Idempotent while a download is in flight: a second call is a no-op rather
     than a second concurrent fetch of the same 832 MiB file.
     """
-    # Refused when the codec is switched off, rather than spending 958 MiB of
-    # somebody's bandwidth on a model that nothing is allowed to load. The UI
-    # already hides the button in that state; this covers a direct API call.
-    if settings.enable_aeic is False:
+    # The receive half is refused when reconstruction is switched off, rather
+    # than spending 893 MiB of somebody's bandwidth on weights nothing is allowed
+    # to load. The send half is still allowed: sending works either way, so
+    # fetching what it needs is never wasted. The UI hides the button it should;
+    # this covers a direct API call.
+    if scope == "full" and settings.enable_aeic is False:
         raise HTTPException(
             status_code=409,
             detail=(
-                "The AI image codec is switched off on this server "
-                "(MESHCORE_ENABLE_AEIC=false); refusing to download its model."
+                "Rebuilding AI pictures is switched off on this server "
+                "(MESHCORE_ENABLE_AEIC=false); refusing to download the half of "
+                "the model that only reconstruction uses. Sending works without it."
             ),
         )
     if not aeic_service.start_download(send_half_only=scope == "send"):

@@ -36,6 +36,7 @@ vi.mock('../api', async (importOriginal) => {
 function aeicStatus(): AeicStatus {
   return {
     runtime_available: true,
+    reconstruction_enabled: true,
     supports_encode: true,
     supports_decode: true,
     downloading: false,

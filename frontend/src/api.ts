@@ -89,6 +89,8 @@ export interface AeicAssetStatus {
 /** Whether this server can run the AEIC codec, and how the model download is going. */
 export interface AeicStatus {
   runtime_available: boolean;
+  /** False with MESHCORE_ENABLE_AEIC=false: rebuilding is off, sending is not. */
+  reconstruction_enabled: boolean;
   supports_encode: boolean;
   supports_decode: boolean;
   downloading: boolean;
