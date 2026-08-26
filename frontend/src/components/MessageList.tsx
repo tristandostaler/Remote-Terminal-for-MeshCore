@@ -209,7 +209,23 @@ function ImageMessage({ message, content }: { message: Message; content: string 
  * Chunk 0 carries the metadata byte and owns the bubble; a later chunk renders
  * as a small chip so the conversation does not show a wall of basE91.
  */
-function AeicImageMessage({ message, chunk }: { message: Message; chunk?: AeicChunk }) {
+function AeicImageMessage({
+  message,
+  chunk,
+  sessionKey,
+}: {
+  message: Message;
+  chunk?: AeicChunk;
+  /**
+   * The session named by an `aeib:` marker row, when this is one.
+   *
+   * Preferred over looking the session up by message id, because a
+   * content-addressed session belongs to as many rows as there were sends of
+   * that picture and can only be bound to the first of them. Resolving by
+   * message id left every later bubble reporting no session at all.
+   */
+  sessionKey?: string | null;
+}) {
   const [session, setSession] = useState<AeicSessionStatus | null>(null);
   const [state, setState] = useState<'idle' | 'loading' | 'decoded' | 'unavailable'>('idle');
   const [detail, setDetail] = useState<string | null>(null);
@@ -227,7 +243,9 @@ function AeicImageMessage({ message, chunk }: { message: Message; chunk?: AeicCh
       setState('loading');
       setDetail(null);
       try {
-        let current = await api.getAeicSessionForMessage(message.id);
+        let current = sessionKey
+          ? await api.getAeicSession(sessionKey)
+          : await api.getAeicSessionForMessage(message.id);
         if (token.cancelled) return;
         setSession(current);
         // The synthesis pass is seconds, not milliseconds, and it is queued behind
@@ -257,7 +275,7 @@ function AeicImageMessage({ message, chunk }: { message: Message; chunk?: AeicCh
         setDetail(error instanceof Error ? error.message : String(error));
       }
     },
-    [message.id]
+    [message.id, sessionKey]
   );
 
   // An inbound image decodes on its own as soon as it is reassembled, so look
@@ -2170,7 +2188,7 @@ export function MessageList({
                       ) : unsupportedMediaRef ? (
                         <UnsupportedMediaMessage mediaId={unsupportedMediaRef} />
                       ) : aeicBinaryRef ? (
-                        <AeicImageMessage message={msg} />
+                        <AeicImageMessage message={msg} sessionKey={aeicBinaryRef} />
                       ) : aeicChunk ? (
                         aeicChunk.index === 0 ? (
                           <AeicImageMessage message={msg} chunk={aeicChunk} />

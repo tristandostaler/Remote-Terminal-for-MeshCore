@@ -419,10 +419,28 @@ async def _store_and_decode(
         return
 
     key = inbound_channel_data_session_key(conversation_key, bitstream)
+    arrived_at = int(time.time())
+    # The arrival time is what makes two sends of the SAME picture two rows.
+    #
+    # The session key is content-addressed on purpose -- one stored bitstream and
+    # one decoded PNG however many times a picture arrives. But the CHAN dedup
+    # index covers (type, conversation_key, text, sender_timestamp), and the
+    # marker text is that same content hash, so with no timestamp every resend
+    # collapsed onto the first row: `create` returned None, nothing was announced,
+    # and re-sending a photo to a channel could never produce a bubble -- for
+    # ever, since the row has no expiry. That is precisely what someone does when
+    # a picture does not show up, so the retry was guaranteed to fail too.
+    #
+    # Duplicate suppression does not live here. A repeater's re-flood carries the
+    # same sender_prefix + img_id, which `_already_finished` drops before it ever
+    # reaches this function, so anything arriving here is a distinct send. Keeping
+    # both layers guessing at "same picture" is what split the notion of identity
+    # in the first place.
     message_id = await MessageRepository.create(
         msg_type="CHAN",
         text=marker_text(key),
-        received_at=int(time.time()),
+        received_at=arrived_at,
+        sender_timestamp=arrived_at,
         conversation_key=conversation_key,
         sender_key=None,
     )

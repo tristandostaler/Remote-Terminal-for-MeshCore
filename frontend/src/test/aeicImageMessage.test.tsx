@@ -143,7 +143,7 @@ describe('AEIC image bubble polling', () => {
    * on the exact path it happens on.
    */
   it('surfaces the reason for a channel image that arrived as binary GRP_DATA', async () => {
-    mockApi.getAeicSessionForMessage.mockResolvedValue({
+    mockApi.getAeicSession.mockResolvedValue({
       ...undecoded(),
       session_key: 'grp:92e4d63e5ee135f3',
       decode_error:
@@ -152,7 +152,32 @@ describe('AEIC image bubble polling', () => {
     render(<MessageList messages={[aeicBinaryChannelMessage()]} contacts={[]} loading={false} />);
 
     expect(await screen.findByText(/switched off on this server/)).toBeVisible();
-    expect(mockApi.getAeicSessionForMessage).toHaveBeenCalledWith(78);
+    // Resolved by the key in the marker, not by message id: see the next test.
+    expect(mockApi.getAeicSession).toHaveBeenCalledWith('grp:92e4d63e5ee135f3');
+  });
+
+  /*
+   * Sending the same photo to a channel twice. The session is content-addressed,
+   * so both rows name it — but it can only be BOUND to the first row, and
+   * resolving by message id therefore left the second bubble reporting no
+   * session at all. Someone re-sending a picture that did not appear is the
+   * likeliest person to be looking at these rows, so the second one has to work.
+   */
+  it('renders every marker row that names the same session', async () => {
+    mockApi.getAeicSession.mockResolvedValue({
+      ...undecoded(),
+      session_key: 'grp:92e4d63e5ee135f3',
+      decoded: true,
+    });
+    const first = aeicBinaryChannelMessage();
+    const resend = { ...first, id: 79, sender_timestamp: (first.sender_timestamp ?? 0) + 265 };
+
+    render(<MessageList messages={[first, resend]} contacts={[]} loading={false} />);
+
+    await waitFor(() =>
+      expect(screen.getAllByAltText('AI-reconstructed image message')).toHaveLength(2)
+    );
+    expect(mockApi.getAeicSessionForMessage).not.toHaveBeenCalled();
   });
 
   it('surfaces a stored decode reason immediately instead of polling for a minute', async () => {
