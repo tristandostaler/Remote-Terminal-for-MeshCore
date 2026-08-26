@@ -170,6 +170,86 @@ def _mco_app_body(subtype: int, version: int, *, name: bytes = b"Alice") -> byte
     return bytes([len(name)]) + name + bytes([(subtype << 4) | version]) + bytes(20)
 
 
+class TestAnnouncingTheMarkerRow:
+    """A received channel image has to appear without a reload.
+
+    The row was written and nothing was pushed. The only event this path emitted
+    was ``aeic_image_session``, which no client code handles -- the bubbles poll
+    over HTTP -- so the picture appeared no earlier than the next fetch of the
+    conversation. Sitting in the channel it arrived on, you saw nothing, which
+    made a working transfer look exactly like a dropped one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_row_is_broadcast_as_a_message(self, monkeypatch):
+        events: list[tuple[str, object]] = []
+        sent = _StoreSpy(monkeypatch)
+
+        await handle_channel_data(
+            ParsedChannelData(0, 1, 0xFF, DATA_TYPE_AEIC_IMAGE, _blobs(bytes(120))[0]),
+            conversation_key=CHANNEL,
+            broadcast_fn=lambda name, payload, **kw: events.append((name, payload)),
+        )
+
+        assert sent.rows, "no marker row was written"
+        names = [name for name, _payload in events]
+        assert "message" in names, (
+            "the marker row was never announced; it would appear only on a reload"
+        )
+        # And it is the row itself, so the client can render the bubble from it.
+        payload = next(p for name, p in events if name == "message")
+        assert payload["id"] == _StoreSpy.MESSAGE_ID
+        assert payload["text"] == marker_text(sent.session_keys[0])
+
+
+class _StoreSpy:
+    """Stubs the storage edges of ``_store_and_decode`` and records what it wrote."""
+
+    MESSAGE_ID = 4242
+
+    def __init__(self, monkeypatch):
+        import app.repository as repo
+        from app.config import settings
+        from app.imaging.aeic import channel_data_ingest as cdi
+        from app.models import Message
+
+        self.rows: list[dict] = []
+        self.session_keys: list[str] = []
+        # Decoding off, which is the case that has to show something rather than
+        # quietly hold a bitstream nobody can see.
+        monkeypatch.setattr(settings, "enable_aeic", False)
+
+        async def create(**kw):
+            self.rows.append(kw)
+            return self.MESSAGE_ID
+
+        async def create_session(**kw):
+            self.session_keys.append(kw["key"])
+
+        async def noop(*_a, **_k):
+            return None
+
+        async def get_by_id(message_id):
+            row = self.rows[-1]
+            return Message(
+                id=message_id,
+                type="CHAN",
+                text=row["text"],
+                conversation_key=row["conversation_key"],
+                sender_timestamp=0,
+                received_at=row["received_at"],
+                outgoing=False,
+            )
+
+        monkeypatch.setattr(repo.MessageRepository, "create", create)
+        monkeypatch.setattr(repo.MessageRepository, "get_by_id", get_by_id)
+        monkeypatch.setattr(repo.AeicImageRepository, "create_session", create_session)
+        monkeypatch.setattr(repo.AeicImageRepository, "store_bitstream", noop)
+        monkeypatch.setattr(repo.AeicImageRepository, "store_decode_error", noop)
+        monkeypatch.setattr(repo.AeicImageRepository, "enforce_cache_limit", noop)
+        monkeypatch.setattr(cdi.reassembler, "_completed", {})
+
+
 class TestCompletingOnlyOnce:
     """One picture must produce one completion, whatever its size.
 

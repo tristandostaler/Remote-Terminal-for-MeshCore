@@ -393,6 +393,7 @@ async def _store_and_decode(
     )
     await AeicImageRepository.store_bitstream(key, bitstream)
     if broadcast_fn is not None:
+        await _announce_marker_row(message_id, broadcast_fn)
         broadcast_fn(
             "aeic_image_session",
             {
@@ -404,3 +405,29 @@ async def _store_and_decode(
             },
         )
     await _schedule_decode(key, bitstream, broadcast_fn)
+
+
+async def _announce_marker_row(message_id: int | None, broadcast_fn) -> None:
+    """Push a freshly minted marker row to the UI as an ordinary message.
+
+    Without this the row reached the database and stopped there. The only event
+    this path emitted was ``aeic_image_session``, which NOTHING on the client
+    handles -- the bubbles poll over HTTP instead -- so an image received on a
+    channel appeared no earlier than the next time the conversation was fetched.
+    Sitting in the channel it was sent to, you saw nothing at all: the reported
+    symptom, and it made a working transfer indistinguishable from a dropped one.
+
+    A marker row is a real row in a real conversation, so it is announced the way
+    every other inbound message is.
+    """
+    from app.repository import MessageRepository
+    from app.services.messages import broadcast_message
+
+    if message_id is None:
+        # No row to announce. `create` returns None when the write did not produce
+        # one, and there is nothing for a client to render in that case.
+        return
+    message = await MessageRepository.get_by_id(message_id)
+    if message is None:  # pragma: no cover - the row was just written
+        return
+    broadcast_message(message=message, broadcast_fn=broadcast_fn)

@@ -199,6 +199,18 @@ puts AEIC on the air as a bare `0xAE1C`. Worth re-checking on an upstream bump: 
 AEIC ever did move, every inbound AEIC image would be dropped as an unknown type,
 and the symptom would be indistinguishable from the codec mismatch below.
 
+### A received channel image is announced as a message
+
+`_store_and_decode` mints the `aeib:` marker row and then has to **push it**. It
+used to write the row and stop: the only event it emitted was
+`aeic_image_session`, which **no client code handles** — the bubbles poll over
+HTTP instead — so a picture received on a channel appeared no earlier than the
+next fetch of that conversation. Sitting in the channel it arrived on you saw
+nothing at all, which made a working transfer indistinguishable from a dropped
+one, and made a stored-but-undecodable image look like silence rather than a
+reason. `_announce_marker_row` broadcasts it as an ordinary `message`, the way
+every other inbound message reaches the UI.
+
 ### One picture, one completion
 
 A one-data-chunk image — upstream's *typical* ft32 size, its own capacity note
