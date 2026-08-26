@@ -1,4 +1,4 @@
-## [Unreleased]
+## [4.0.0] - 2026-08-26
 
 * Bug: On a phone there was no way to read a tooltip. What a message's timestamp, its 2/3 attempt counter or its compression badge actually mean lives in a native tooltip, which a mouse shows on hover and a touch screen shows never -- and the long press that comes closest was already taken: inside a message bubble it opens the retry-and-delete dialog, so reaching for an explanation offered to re-send the message instead. Tapping any of them now shows the explanation, and a long press shows it too rather than the dialog. This covers every tooltip in the app rather than the message list alone, since they all hang off the same attribute. Anything that already answers a press keeps it -- a button, a link, the hop badge that opens the route -- because pressing those shows the detail they describe, and right-clicking a message on a desktop still opens the actions dialog
 
