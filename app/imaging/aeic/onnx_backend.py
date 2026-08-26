@@ -14,16 +14,22 @@ graphs:
 
 ## MEMORY CONTRACT (this is not an optimisation)
 
-Peaks measured upstream: entropy graph alone 0.35 GiB, image decoder alone
-2.16 GiB, both resident 2.44 GiB. RemoteTerm often runs on a Pi or a small VPS,
-so this matters more here than it did on a phone:
+Peaks: entropy graph alone 0.35 GiB, image decoder alone ~1.3 GiB with mapped
+weights (~2 GiB when ORT prepacks them, which is why it does not -- see
+``_session_options``), both resident correspondingly more. RemoteTerm often runs
+on a Pi or a small VPS, so this matters more here than it did on a phone:
+
+A decode normally runs in a process of its own (:mod:`decode_worker`), so the
+releases below are what protects the *fallback* in-process path -- and the
+sessions the send side keeps.
 
 * :meth:`OnnxAeicBackend.encode` creates the SEND-side entropy session, runs,
   and **keeps** it. Sending a second photo then costs nothing. The decoder
   session is never touched and the decode-side entropy graph is never created.
 * :meth:`OnnxAeicBackend.decode` creates the DECODE-side entropy session, runs
   the entropy loop, then calls :meth:`release_entropy_sessions` **before**
-  creating the synthesis session. Holding both at once means 2.44 GiB.
+  creating the synthesis session. Holding both at once adds the entropy graph
+  to the most expensive moment there is.
 * Only one entropy direction is ever resident; no operation needs both.
 * :meth:`release_decoder_session` drops the expensive half first, because the
   send path only needs the small one.
@@ -104,7 +110,7 @@ logger = logging.getLogger(__name__)
 _require_onnxruntime = require_onnxruntime
 
 
-def _session_options(*, single_threaded: bool):
+def _session_options(*, single_threaded: bool, mmap_weights: bool = False):
     """Session options for one graph.
 
     ``graph_optimization_level`` is deliberately NOT set, for either graph. See
@@ -116,9 +122,20 @@ def _session_options(*, single_threaded: bool):
     measured bit-identical and keeps a mesh gateway responsive. The synthesis
     graph is far too expensive to run single-threaded and is downstream of the
     coder anyway, so it takes the default pool.
+
+    ``mmap_weights`` disables ORT's weight prepacking, which is what makes the
+    synthesis pass fit on a small host at all. Prepacking copies the 832 MiB of
+    int8 weights into the heap; without it they stay memory-mapped, so they are
+    clean file-backed pages the kernel can evict and re-read under pressure
+    rather than anonymous pages it can only OOM-kill. Measured under hard cgroup
+    caps with no swap: prepacked needs ~2 GiB and is killed at 1536 MiB, while
+    mapped completes at 1280 MiB -- with bit-identical output, and ~0.4 s slower
+    on a warm cache. See :mod:`app.imaging.aeic.memory` for the full table.
     """
     ort = _require_onnxruntime()
     options = ort.SessionOptions()
+    if mmap_weights:
+        options.add_session_config_entry("session.disable_prepacking", "1")
     if single_threaded:
         options.intra_op_num_threads = 1
         options.inter_op_num_threads = 1
@@ -291,10 +308,10 @@ class OnnxAeicBackend:
             # The graph references its ~835 MiB external-weights sibling by a
             # literal relative filename, so ORT must resolve it from the graph's
             # own directory. bundle.verify_layout() has already checked it is there.
-            logger.info("Loading AEIC synthesis decoder from %s (~2.2 GiB peak)", path)
+            logger.info("Loading AEIC synthesis decoder from %s (~1.3 GiB peak)", path)
             self._synthesis = ort.InferenceSession(
                 str(path),
-                sess_options=_session_options(single_threaded=False),
+                sess_options=_session_options(single_threaded=False, mmap_weights=True),
                 providers=["CPUExecutionProvider"],
             )
         return self._synthesis

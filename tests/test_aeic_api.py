@@ -520,11 +520,11 @@ class TestUndecodableSessionsExplainThemselves:
 class TestDecodeReleasesSessionsOnFailure:
     """The synthesis session must be released even when the decode raises.
 
-    This is the memory contract, not tidy-up. ``ingest.decode_session`` swallows
-    a decode failure, so anything still held stays held for the life of the
-    process -- and the next decode then allocates the 0.35 GiB entropy graph on
-    top of the 2.16 GiB synthesis session, which is exactly the 2.44 GiB the
-    contract forbids.
+    This is the memory contract, not tidy-up, and it applies to the in-process
+    fallback -- the path whose process outlives the decode. ``decode_session``
+    swallows a decode failure, so anything still held stays held for the life of
+    the server, and the next decode then stacks the entropy graph on top of the
+    synthesis session.
     """
 
     class _Backend:
@@ -555,18 +555,16 @@ class TestDecodeReleasesSessionsOnFailure:
         monkeypatch.setattr(aeic_service, "_codec", lambda **_: self._Codec())
         return backend
 
-    @pytest.mark.asyncio
-    async def test_a_failed_synthesis_still_releases_the_decoder(self, monkeypatch):
+    def test_a_failed_synthesis_still_releases_the_decoder(self, monkeypatch):
         backend = self._wire(monkeypatch, fail=True)
         with pytest.raises(RuntimeError, match="synthesis blew up"):
-            await aeic_service.decode_to_png(b"whatever")
+            aeic_service._decode_in_process(b"whatever")
         assert backend.released_decoder == 1
         assert backend.released_entropy >= 1
 
-    @pytest.mark.asyncio
-    async def test_a_successful_decode_releases_both_halves(self, monkeypatch):
+    def test_a_successful_decode_releases_both_halves(self, monkeypatch):
         backend = self._wire(monkeypatch, fail=False)
-        png = await aeic_service.decode_to_png(b"whatever")
+        png = aeic_service._decode_in_process(b"whatever")
         assert png.startswith(b"\x89PNG")
         assert backend.released_decoder == 1
         # Released before synthesis is created, and again in the finally.
