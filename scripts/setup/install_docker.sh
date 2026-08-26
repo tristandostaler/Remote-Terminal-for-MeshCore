@@ -181,7 +181,7 @@ prompt = no
 
 [req_distinguished_name]
 CN = RemoteTerm Snakeoil
-O = RemoteTerm for MeshCore
+O = RemoteTerm for MeshCore Advanced
 
 [v3_req]
 subjectAltName = @alt_names
@@ -217,7 +217,7 @@ elif ! docker compose version &>/dev/null; then
     echo -e "${RED}Warning: docker compose is not available. A compose file will still be generated, but you will need the Docker Compose plugin to run it.${NC}"
 fi
 
-echo -e "${BOLD}=== RemoteTerm for MeshCore — Docker Setup ===${NC}"
+echo -e "${BOLD}=== RemoteTerm for MeshCore Advanced — Docker Setup ===${NC}"
 echo
 echo -e "  Repo directory     : ${CYAN}${REPO_DIR}${NC}"
 echo -e "  Example compose    : ${CYAN}${EXAMPLE_FILE}${NC}"
@@ -437,7 +437,7 @@ mkdir -p "$REPO_DIR/data"
     if [ "$IMAGE_MODE" = "build" ]; then
         echo "    build: ."
     else
-        echo "    image: docker.io/jkingsman/remoteterm-meshcore:latest"
+        echo "    image: docker.io/tristandostaler/remoteterm-meshcore:latest"
     fi
     if [[ "$RUN_AS_HOST_USER" =~ ^[Yy]$ ]]; then
         echo "    user: \"$(id -u):$(id -g)\""

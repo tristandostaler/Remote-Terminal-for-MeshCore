@@ -1,7 +1,7 @@
 import type { HealthStatus } from '../../types';
 import { Separator } from '../ui/separator';
 
-const GITHUB_URL = 'https://github.com/jkingsman/Remote-Terminal-for-MeshCore';
+const GITHUB_URL = 'https://github.com/tristandostaler/Remote-Terminal-for-MeshCore';
 
 export function SettingsAboutSection({
   health,
@@ -18,7 +18,7 @@ export function SettingsAboutSection({
       <div className="space-y-6">
         {/* Version */}
         <div className="text-center space-y-1">
-          <h3 className="text-lg font-semibold">RemoteTerm for MeshCore</h3>
+          <h3 className="text-lg font-semibold">RemoteTerm for MeshCore Advanced</h3>
           <div className="text-sm text-muted-foreground">
             v{version}
             {commit ? (

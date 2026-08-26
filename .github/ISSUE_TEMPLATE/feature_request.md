@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea or improvement for RemoteTerm for MeshCore
+about: Suggest an idea or improvement for RemoteTerm for MeshCore Advanced
 title: ''
 labels: 'feature to add'
 assignees: ''

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # install_service.sh
 #
-# Sets up RemoteTerm for MeshCore as a persistent systemd service running as
-# the current user from the current repo directory. No separate service account
-# is needed. After installation, git pull and rebuilds work without any sudo -u
-# gymnastics.
+# Sets up RemoteTerm for MeshCore Advanced as a persistent systemd service
+# running as the current user from the current repo directory. No separate
+# service account is needed. After installation, git pull and rebuilds work
+# without any sudo -u gymnastics.
 #
 # Run from anywhere inside the repo:
 #   bash scripts/setup/install_service.sh
@@ -24,7 +24,7 @@ CURRENT_USER="$(id -un)"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 FRONTEND_MODE="build"
 
-echo -e "${BOLD}=== RemoteTerm for MeshCore — Service Installer ===${NC}"
+echo -e "${BOLD}=== RemoteTerm for MeshCore Advanced — Service Installer ===${NC}"
 echo
 
 # ── sanity checks ──────────────────────────────────────────────────────────────
@@ -328,7 +328,7 @@ systemd_escape_env_value() {
 
 generate_service_file() {
     echo "[Unit]"
-    echo "Description=RemoteTerm for MeshCore"
+    echo "Description=RemoteTerm for MeshCore Advanced"
     echo "After=network.target"
     echo ""
     echo "[Service]"

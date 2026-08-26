@@ -67,7 +67,7 @@ describe('useFaviconBadge', () => {
       <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
       <link rel="shortcut icon" href="/favicon.ico" />
     `;
-    document.title = 'RemoteTerm for MeshCore';
+    document.title = 'RemoteTerm for MeshCore Advanced';
     objectUrlCounter = 0;
     fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -161,7 +161,7 @@ describe('useFaviconBadge', () => {
         [makeChannel('fav-chan', true)]
       )
     ).toBe(10);
-    expect(getUnreadTitle({}, [], [])).toBe('RemoteTerm for MeshCore');
+    expect(getUnreadTitle({}, [], [])).toBe('RemoteTerm for MeshCore Advanced');
     expect(
       getUnreadTitle(
         {
@@ -273,7 +273,7 @@ describe('useFaviconBadge', () => {
       }
     );
 
-    expect(document.title).toBe('RemoteTerm for MeshCore');
+    expect(document.title).toBe('RemoteTerm for MeshCore Advanced');
 
     rerender({
       unreadCounts: {
@@ -288,6 +288,6 @@ describe('useFaviconBadge', () => {
 
     unmount();
 
-    expect(document.title).toBe('RemoteTerm for MeshCore');
+    expect(document.title).toBe('RemoteTerm for MeshCore Advanced');
   });
 });
