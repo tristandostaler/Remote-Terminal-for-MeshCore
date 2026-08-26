@@ -118,6 +118,34 @@ MAX_DATA_CHUNKS = 15
 CHUNK_ZERO_IMAGE_BYTES = BODY_BYTES - METADATA_BYTES
 """157 image bytes in chunk 0, 158 in the rest."""
 
+GRP_DATA_PLACEHOLDER_KEY = "remoteterm_grp_data_frame"
+"""Marks the synthetic ``CHANNEL_MSG_RECV`` event dispatched for a frame 27.
+
+Frame 27 is a response to ``CMD_SYNC_NEXT_MESSAGE`` -- MCO Advanced's own sync
+tracker lists it beside the msg-recv codes -- but meshcore-py's ``get_msg`` only
+resolves on CONTACT_MSG_RECV / CHANNEL_MSG_RECV / ERROR / NO_MORE_MSGS. Our
+adapter consumes the frame, so without this the caller that asked the firmware
+for it was left waiting for a reply that had already arrived: the auto-fetch
+loop calls ``get_msg`` with **no timeout** and therefore hung forever on the
+first queued image, taking all push-driven message fetching down with it, and
+the drain loops burned their 2 s timeouts and stopped early. The adapter now
+dispatches a CHANNEL_MSG_RECV carrying this key so the waiter resolves and the
+queue keeps draining; every consumer of pulled channel messages must skip it.
+
+Local convention between the adapter and this app's own drain code. Never on
+the wire, and nothing outside this codebase sees it.
+"""
+
+
+def grp_data_placeholder_payload() -> dict:
+    """The payload of the synthetic event standing in for one frame 27."""
+    return {GRP_DATA_PLACEHOLDER_KEY: True}
+
+
+def is_grp_data_placeholder(payload) -> bool:
+    """Whether a pulled CHANNEL_MSG_RECV is the adapter's stand-in, not a message."""
+    return isinstance(payload, dict) and bool(payload.get(GRP_DATA_PLACEHOLDER_KEY))
+
 
 class ChannelDataFormatError(ValueError):
     """A GRP_DATA blob is not well-formed."""

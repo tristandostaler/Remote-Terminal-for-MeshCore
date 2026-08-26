@@ -22,6 +22,7 @@ from meshcore import EventType, MeshCore
 from app.channel_constants import PUBLIC_CHANNEL_KEY, PUBLIC_CHANNEL_NAME
 from app.config import settings
 from app.event_handlers import cleanup_expired_acks, on_contact_message
+from app.imaging.aeic.channel_data import is_grp_data_placeholder
 from app.models import _VALID_CONTACT_TYPES, Contact, ContactUpsert
 from app.radio import RadioOperationBusyError
 from app.repository import (
@@ -413,6 +414,13 @@ async def _store_pending_direct_message(event) -> None:
 
 async def _store_pending_channel_message(mc: MeshCore, payload: dict) -> None:
     """Persist a CHANNEL_MSG_RECV event pulled via get_msg()."""
+    from app.imaging.aeic.channel_data import is_grp_data_placeholder
+
+    if is_grp_data_placeholder(payload):
+        # Not a message: the stand-in the GRP_DATA adapter dispatches so the
+        # get_msg that pulled a frame 27 resolves. The image was already handled
+        # on the frame path; there is nothing here to store.
+        return
     channel_idx = payload.get("channel_idx")
     if channel_idx is None:
         logger.warning("Pending channel message missing channel_idx; dropping payload")
@@ -544,6 +552,12 @@ async def drain_pending_messages(mc: MeshCore) -> int:
                 break
             elif result.type in (EventType.CONTACT_MSG_RECV, EventType.CHANNEL_MSG_RECV):
                 if result.type == EventType.CHANNEL_MSG_RECV:
+                    if is_grp_data_placeholder(result.payload):
+                        # A frame 27 stood here, already handled on the frame
+                        # path. Keep draining -- it is not a caught message, and
+                        # counting it would make the poll audit cry wolf.
+                        await asyncio.sleep(0.1)
+                        continue
                     await _store_pending_channel_message(mc, result.payload)
                 elif result.type == EventType.CONTACT_MSG_RECV:
                     await _store_pending_direct_message(result)
@@ -583,6 +597,11 @@ async def poll_for_messages(mc: MeshCore) -> int:
             return 0
         elif result.type in (EventType.CONTACT_MSG_RECV, EventType.CHANNEL_MSG_RECV):
             if result.type == EventType.CHANNEL_MSG_RECV:
+                if is_grp_data_placeholder(result.payload):
+                    # A frame 27, already handled on the frame path. The queue
+                    # may hold more behind it, so drain -- but do not count it,
+                    # or the hourly audit reports a message nothing missed.
+                    return count + await drain_pending_messages(mc)
                 await _store_pending_channel_message(mc, result.payload)
             elif result.type == EventType.CONTACT_MSG_RECV:
                 await _store_pending_direct_message(result)
