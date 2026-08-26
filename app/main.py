@@ -190,7 +190,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="RemoteTerm for MeshCore API",
+    title="RemoteTerm for MeshCore Advanced API",
     description=API_DESCRIPTION,
     version=get_app_build_info().version,
     openapi_tags=API_TAGS_METADATA,

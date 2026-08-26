@@ -126,7 +126,7 @@ def register_frontend_static_routes(app: FastAPI, frontend_dir: Path) -> bool:
         """Serve a dynamic web manifest using the active request base URL."""
         base = _resolve_request_base(request)
         manifest = {
-            "name": "RemoteTerm for MeshCore",
+            "name": "RemoteTerm for MeshCore Advanced",
             "short_name": "RemoteTerm",
             "id": base,
             "start_url": base,

@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a problem with RemoteTerm for MeshCore
+about: Report a problem with RemoteTerm for MeshCore Advanced
 title: ''
 labels: 'bug to fix'
 assignees: ''

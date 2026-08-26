@@ -39,7 +39,7 @@ export function SettingsHttpsSection({ className }: { className?: string }) {
         </div>
       )}
       <a
-        href="https://github.com/jkingsman/Remote-Terminal-for-MeshCore/blob/main/README_ADVANCED.md#https--ssl"
+        href="https://github.com/tristandostaler/Remote-Terminal-for-MeshCore/blob/main/README_ADVANCED.md#https--ssl"
         target="_blank"
         rel="noreferrer"
         className="inline-flex items-center gap-2 text-sm text-primary hover:underline"

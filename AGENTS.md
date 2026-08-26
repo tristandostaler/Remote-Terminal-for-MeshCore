@@ -1,4 +1,4 @@
-# RemoteTerm for MeshCore
+# RemoteTerm for MeshCore Advanced
 
 ## Important Rules
 

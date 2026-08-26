@@ -1,4 +1,6 @@
-# RemoteTerm for MeshCore
+# RemoteTerm for MeshCore Advanced
+
+A fork of [RemoteTerm for MeshCore](https://github.com/jkingsman/Remote-Terminal-for-MeshCore) by Jack Kingsman, adding MCMP text compression, AEIC image transfer, and further interoperability work with other MeshCore clients.
 
 Backend server + browser interface for MeshCore mesh radio networks, providing a rich, web-based power-user management and messaging system through a companion radio.
 
@@ -71,7 +73,7 @@ usbipd attach --wsl --busid 3-8
 **This approach is recommended over Docker due to intermittent serial communications issues I've seen on \*nix systems.**
 
 ```bash
-git clone https://github.com/jkingsman/Remote-Terminal-for-MeshCore.git
+git clone https://github.com/tristandostaler/Remote-Terminal-for-MeshCore.git
 cd Remote-Terminal-for-MeshCore
 
 uv sync
@@ -144,7 +146,7 @@ sudo docker compose up -d
 The example file and setup script default to the published Docker Hub image. To build locally from your checkout instead, replace:
 
 ```yaml
-image: docker.io/jkingsman/remoteterm-meshcore:latest
+image: docker.io/tristandostaler/remoteterm-meshcore:latest
 ```
 
 with:
