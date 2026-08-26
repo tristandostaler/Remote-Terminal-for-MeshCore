@@ -45,6 +45,15 @@ export function SettingsAboutSection({
               className="text-primary hover:underline"
             >
               Jack Kingsman
+            </a>{' '}
+            and enhanced by{' '}
+            <a
+              href="https://github.com/tristandostaler"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary hover:underline"
+            >
+              Tristan Dostaler
             </a>
           </p>
           <p>
@@ -59,14 +68,23 @@ export function SettingsAboutSection({
             </a>
           </p>
           <p>
-            This code is free, and ad-free, forever. If you love my work,{' '}
+            This code is free, and ad-free, forever. If you love this work,{' '}
             <a
               href="https://ko-fi.com/jackkingsman"
               target="_blank"
               rel="noopener noreferrer"
               className="text-primary hover:underline"
             >
-              buy me a coffee!
+              buy Jack a coffee
+            </a>{' '}
+            or{' '}
+            <a
+              href="https://buymeacoffee.com/tristandostaler"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary hover:underline"
+            >
+              buy Tristan one!
             </a>
           </p>
         </div>
