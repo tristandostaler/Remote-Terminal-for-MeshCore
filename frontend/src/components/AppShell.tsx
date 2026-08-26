@@ -18,6 +18,7 @@ import { ContactInfoPane } from './ContactInfoPane';
 import { ChannelInfoPane } from './ChannelInfoPane';
 import { CommandPalette } from './CommandPalette';
 import { SecurityWarningModal } from './SecurityWarningModal';
+import { TapTooltipLayer } from './TapTooltipLayer';
 import { Toaster } from './ui/sonner';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 import {
@@ -373,6 +374,7 @@ export function AppShell({
       <SecurityWarningModal health={statusProps.health} />
       <ContactInfoPane {...contactInfoPaneProps} />
       <ChannelInfoPane {...channelInfoPaneProps} />
+      <TapTooltipLayer />
       <Toaster
         position="top-right"
         offset={toastTopOffset !== undefined ? { top: toastTopOffset } : undefined}
