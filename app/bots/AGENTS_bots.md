@@ -160,7 +160,11 @@ token gate only.
   `"none"` because the editor then opens on "Only…" with nothing ticked — a list
   to add to, not a switch to flip. Migration 080 writes the empty list onto
   scopes that predate rooms, which only makes the stored scope say out loud what
-  the engine already reads it as.
+  the engine already reads it as. **081 exists because 080 shipped once with the
+  opposite rule** — it inherited `respond_to_dms`, so a node that upgraded during
+  that build stores `"rooms": "all"`, and the runner never re-runs a migration
+  whose number the database has recorded. Editing a shipped migration only helps
+  databases that have not seen it; changing one's mind needs a new number.
 - Newly installed SMS bots are `admin_only`; existing installations retain
   their stored permission flag during version refreshes.
 - `ui_triggers` only feed handlers declared with **no-argument** decorators
