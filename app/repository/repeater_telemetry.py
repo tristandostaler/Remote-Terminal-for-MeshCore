@@ -7,10 +7,10 @@ from app.database import db
 logger = logging.getLogger(__name__)
 
 # Maximum age for telemetry history entries (30 days)
-_MAX_AGE_SECONDS = 30 * 86400
+_MAX_AGE_SECONDS = 365 * 86400
 
 # Maximum entries to keep per repeater (sanity cap)
-_MAX_ENTRIES_PER_REPEATER = 1000
+_MAX_ENTRIES_PER_REPEATER = 50000
 
 
 class RepeaterTelemetryRepository:
