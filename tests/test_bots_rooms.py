@@ -429,3 +429,69 @@ class TestMigration:
         # migration, and its neighbour is still migrated.
         assert broken is not None
         assert fine is not None and fine.scope["rooms"] == {"only": []}
+
+
+class TestOptInMigration:
+    """Migration 081: nodes that upgraded while 080 inherited ``respond_to_dms``.
+
+    The runner never re-runs a migration the database has already recorded, so
+    those bots keep ``"rooms": "all"`` however 080 reads today.
+    """
+
+    async def _run(self, test_db, rows):
+        from app.migrations._081_bot_rooms_opt_in import migrate
+
+        async with test_db.tx() as conn:
+            for bot_id, scope in rows:
+                await conn.execute(
+                    "INSERT INTO bots (id, name, scope, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 0, 0)",
+                    (bot_id, bot_id, scope),
+                )
+        async with test_db.tx() as conn:
+            await migrate(conn)
+
+    async def test_all_rooms_becomes_an_empty_pick_list(self, test_db):
+        from app.repository.bots import BotRepository
+
+        await self._run(test_db, [("loose", '{"channels": "all", "rooms": "all"}')])
+        bot = await BotRepository.get("loose")
+        assert bot is not None and bot.scope["rooms"] == {"only": []}
+        # The channel half is left exactly as it was.
+        assert bot.scope["channels"] == "all"
+
+    async def test_a_narrower_selection_is_a_decision_and_is_kept(self, test_db):
+        from app.repository.bots import BotRepository
+
+        await self._run(
+            test_db,
+            [
+                ("picked", '{"channels": "all", "rooms": {"only": ["ab"]}}'),
+                ("all-but", '{"channels": "all", "rooms": {"except": ["ab"]}}'),
+                ("silent", '{"channels": "all", "rooms": {"only": []}}'),
+                ("none", '{"channels": "all", "rooms": "none"}'),
+                ("unsaid", '{"channels": "all"}'),
+            ],
+        )
+        for bot_id, expected in [
+            ("picked", {"only": ["ab"]}),
+            ("all-but", {"except": ["ab"]}),
+            ("silent", {"only": []}),
+            ("none", "none"),
+        ]:
+            bot = await BotRepository.get(bot_id)
+            assert bot is not None and bot.scope["rooms"] == expected
+        # A scope that never named rooms is already read as no room.
+        unsaid = await BotRepository.get("unsaid")
+        assert unsaid is not None and "rooms" not in unsaid.scope
+
+    async def test_survives_an_unreadable_scope(self, test_db):
+        from app.repository.bots import BotRepository
+
+        await self._run(
+            test_db, [("broken", "not json"), ("fine", '{"channels": "all", "rooms": "all"}')]
+        )
+        broken = await BotRepository.get("broken")
+        fine = await BotRepository.get("fine")
+        assert broken is not None
+        assert fine is not None and fine.scope["rooms"] == {"only": []}
