@@ -20,10 +20,9 @@ import {
   giphyUrlForId,
   parseGif,
   parseReaction,
-  QUICK_REACTION_EMOJIS,
-  REACTION_EMOJI_CATEGORIES,
   splitReplyMention,
 } from '../utils/meshcoreOpenPayloads';
+import { EmojiPickerPanel } from './EmojiPickerPanel';
 import { useRichPayloads } from '../contexts/RichPayloadContext';
 import { usePathHopWidth } from '../contexts/PathHopWidthContext';
 import { formatHopCounts, formatPathHopWidths, type SenderInfo } from '../utils/pathUtils';
@@ -1170,7 +1169,6 @@ function MessageActionsDialog({
   const status = message.outgoing ? displaySendStatus(message) : null;
   const canCancel = !!onCancel && status === 'sending';
   const canRetry = !!onRetry && message.outgoing;
-  const [showAllEmojis, setShowAllEmojis] = useState(false);
 
   const run = (action: () => void | Promise<void>) => () => {
     onClose();
@@ -1185,54 +1183,10 @@ function MessageActionsDialog({
           <DialogDescription className="line-clamp-2 break-words">{message.text}</DialogDescription>
         </DialogHeader>
         {onReact && (
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-1">
-              {QUICK_REACTION_EMOJIS.map((emoji) => (
-                <button
-                  key={emoji}
-                  type="button"
-                  className="flex h-9 w-9 items-center justify-center rounded-full text-xl transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  aria-label={`React with ${emoji}`}
-                  onClick={run(() => onReact(message, emoji))}
-                >
-                  {emoji}
-                </button>
-              ))}
-              <button
-                type="button"
-                className="flex h-9 w-9 items-center justify-center rounded-full text-sm text-muted-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                aria-label={showAllEmojis ? 'Hide emoji list' : 'More emojis'}
-                aria-expanded={showAllEmojis}
-                onClick={() => setShowAllEmojis((prev) => !prev)}
-              >
-                {showAllEmojis ? <X className="h-4 w-4" /> : '⋯'}
-              </button>
-            </div>
-            {showAllEmojis && (
-              <div className="max-h-48 overflow-y-auto rounded-md border border-border p-2">
-                {REACTION_EMOJI_CATEGORIES.map((category) => (
-                  <div key={category.label}>
-                    <div className="px-1 pb-1 pt-2 text-xs font-medium text-muted-foreground first:pt-0">
-                      {category.label}
-                    </div>
-                    <div className="flex flex-wrap">
-                      {category.emojis.map((emoji, i) => (
-                        <button
-                          key={`${category.label}-${i}`}
-                          type="button"
-                          className="flex h-8 w-8 items-center justify-center rounded text-lg transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          aria-label={`React with ${emoji}`}
-                          onClick={run(() => onReact(message, emoji))}
-                        >
-                          {emoji}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <EmojiPickerPanel
+            emojiLabel={(emoji) => `React with ${emoji}`}
+            onPick={(emoji) => run(() => onReact(message, emoji))()}
+          />
         )}
         <div className="flex flex-col gap-2">
           <Button variant="outline" onClick={run(() => onCopy(message))}>
