@@ -5,7 +5,7 @@
  * behavior for both DM and channel conversations.
  */
 
-import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import { MessageInput } from '../components/MessageInput';
@@ -718,9 +718,9 @@ describe('MessageInput', () => {
 
       openActions();
       fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
-      fireEvent.click(screen.getByRole('button', { name: 'Insert 😀' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Insert 👍' }));
 
-      expect(getInput()).toHaveValue('😀');
+      expect(getInput()).toHaveValue('👍');
       expect(screen.getByRole('button', { name: 'Show message options' })).toBeVisible();
     });
 
@@ -758,17 +758,53 @@ describe('MessageInput', () => {
   });
 
   describe('emoji picker', () => {
-    it('opens the picker and inserts an emoji into the message', () => {
+    it('opens the picker and inserts a quick-row emoji into the message', () => {
       renderInput({ conversationType: 'contact', voice: true });
 
       openActions();
       fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
       expect(screen.getByRole('dialog', { name: 'Emoji picker' })).toBeVisible();
+      fireEvent.click(screen.getByRole('button', { name: 'Insert 👍' }));
+
+      expect(getInput()).toHaveValue('👍');
+      expect(screen.queryByRole('dialog', { name: 'Emoji picker' })).not.toBeInTheDocument();
+      expect(getSendButton()).toBeEnabled();
+    });
+
+    it('offers the reaction quick row first, in MCO Advanced order', () => {
+      renderInput({ conversationType: 'contact', voice: true });
+
+      openActions();
+      fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
+
+      // Same table (and order) as the reaction picker — the composer and the
+      // message-actions dialog share one panel.
+      const picker = screen.getByRole('dialog', { name: 'Emoji picker' });
+      const quick = ['👍', '❤️', '😂', '🎉', '👏', '🔥'];
+      const buttons = within(picker).getAllByRole('button');
+      expect(buttons.slice(0, quick.length).map((b) => b.textContent)).toEqual(quick);
+      // The full grid stays behind the ⋯ toggle until asked for.
+      expect(within(picker).queryByRole('button', { name: 'Insert 😀' })).toBeNull();
+    });
+
+    it('expands the scrollable grid of every choice and inserts from it', () => {
+      renderInput({ conversationType: 'contact', voice: true });
+
+      openActions();
+      fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
+      fireEvent.click(screen.getByRole('button', { name: 'More emojis' }));
+
+      expect(screen.getByText('Smileys')).toBeVisible();
+      expect(screen.getByText('Gestures')).toBeVisible();
+      expect(screen.getByText('Hearts')).toBeVisible();
+      expect(screen.getByText('Objects')).toBeVisible();
+
       fireEvent.click(screen.getByRole('button', { name: 'Insert 😀' }));
 
       expect(getInput()).toHaveValue('😀');
       expect(screen.queryByRole('dialog', { name: 'Emoji picker' })).not.toBeInTheDocument();
-      expect(getSendButton()).toBeEnabled();
+      // Inserting collapses the tray, same as before.
+      expect(screen.getByRole('button', { name: 'Show message options' })).toBeVisible();
     });
   });
 });

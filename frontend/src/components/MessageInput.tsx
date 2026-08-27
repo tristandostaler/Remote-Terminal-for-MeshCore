@@ -12,6 +12,7 @@ import {
   type PointerEvent,
 } from 'react';
 import { ImagePlus, Loader2, Mic, Plus, Smile, X } from 'lucide-react';
+import { EmojiPickerPanel } from './EmojiPickerPanel';
 import { api } from '../api';
 import {
   encodeMeshImage,
@@ -45,32 +46,6 @@ const CHANNEL_DANGER_BUFFER = 8; // Red zone starts this many bytes before hard 
 
 const textEncoder = new TextEncoder();
 const RADIO_NO_RESPONSE_SNIPPET = 'no response was heard back';
-const COMPOSER_EMOJIS = [
-  '😀',
-  '😂',
-  '😊',
-  '😍',
-  '🥰',
-  '😎',
-  '🤔',
-  '😢',
-  '😮',
-  '👍',
-  '👎',
-  '👏',
-  '🙏',
-  '💪',
-  '❤️',
-  '🔥',
-  '🎉',
-  '✨',
-  '✅',
-  '📻',
-  '📍',
-  '🚀',
-  '👋',
-  '💬',
-];
 /** Get UTF-8 byte length of a string (LoRa packets are byte-constrained, not character-constrained). */
 function byteLen(s: string): number {
   return textEncoder.encode(s).length;
@@ -727,19 +702,13 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
               <div
                 role="dialog"
                 aria-label="Emoji picker"
-                className="absolute bottom-12 left-0 z-20 grid w-56 grid-cols-6 gap-1 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
+                // Wide enough for the quick row (6 emojis + the ⋯ toggle) with
+                // a viewport clamp for narrow phones.
+                className="absolute bottom-12 left-0 z-20 w-[19rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
               >
-                {COMPOSER_EMOJIS.map((emoji) => (
-                  <button
-                    key={emoji}
-                    type="button"
-                    className="flex h-8 w-8 items-center justify-center rounded-md text-lg hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    aria-label={`Insert ${emoji}`}
-                    onClick={() => insertEmoji(emoji)}
-                  >
-                    {emoji}
-                  </button>
-                ))}
+                {/* Same picker as message reactions: the MCO Advanced table,
+                    quick row first, full categorized grid behind the ⋯. */}
+                <EmojiPickerPanel emojiLabel={(emoji) => `Insert ${emoji}`} onPick={insertEmoji} />
               </div>
             )}
           </div>
