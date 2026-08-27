@@ -393,6 +393,8 @@ class TestContactMessageCLIFiltering:
             "send_attempts",
             "send_max_attempts",
             "send_state",
+            "reactions",
+            "is_reaction",
         }
 
         with patch("app.event_handlers.broadcast_event") as mock_broadcast:

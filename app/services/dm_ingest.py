@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from app.compression import decode_and_describe
 from app.imaging.aeic.ingest import note_inbound_chunk
 from app.models import CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM, Contact, ContactUpsert, Message
+from app.reactions import apply_reaction, parse_reaction
 from app.repository import (
     AmbiguousPublicKeyPrefixError,
     ContactRepository,
@@ -182,6 +183,11 @@ async def _store_direct_message(
             await note_inbound_text_chunk(text=text, sender_key=sender_key or conversation_key)
         return None
 
+    # A reaction payload (bare "r:HHHH:II" on the DM/room wire) is stored like
+    # any message so dedup keeps working, but hidden and applied to its target
+    # instead of broadcast as a bubble.
+    reaction = parse_reaction(text)
+
     async def store() -> Message | None:
         if linked_packet_dedup and packet_id is not None:
             linked_message_id = await raw_packet_repository.get_linked_message_id(packet_id)
@@ -239,6 +245,7 @@ async def _store_direct_message(
             transport_code=transport_code,
             region=region,
             compression=compression,
+            is_reaction=reaction is not None,
         )
         if msg_id is None:
             await handle_duplicate_message(
@@ -277,21 +284,39 @@ async def _store_direct_message(
             transport_code=transport_code,
             region=region,
             compression=compression,
+            is_reaction=reaction is not None,
         )
-        broadcast_message(
-            message=message, broadcast_fn=broadcast_fn, realtime=realtime, packet_hash=packet_hash
-        )
+        if reaction is not None:
+            # Incoming reactions land on their target now. Outgoing ones only
+            # reach this path as self-echoes or historical decrypts of sends the
+            # react endpoint already applied (or chose not to), so they stay
+            # stored-but-inert.
+            if not outgoing:
+                await apply_reaction(
+                    msg_type="PRIV",
+                    conversation_key=conversation_key,
+                    reaction=reaction,
+                    reactor_is_self=False,
+                    broadcast_fn=broadcast_fn,
+                )
+        else:
+            broadcast_message(
+                message=message,
+                broadcast_fn=broadcast_fn,
+                realtime=realtime,
+                packet_hash=packet_hash,
+            )
 
-        # An aei1: body is one chunk of an AEIC image. The text stays in the
-        # message (as the IE4 envelope does); this feeds the reassembler.
-        await note_inbound_chunk(
-            text=text,
-            message_id=msg_id,
-            conversation_type="PRIV",
-            conversation_key=conversation_key,
-            peer_public_key=sender_key or conversation_key,
-            broadcast_fn=broadcast_fn,
-        )
+            # An aei1: body is one chunk of an AEIC image. The text stays in the
+            # message (as the IE4 envelope does); this feeds the reassembler.
+            await note_inbound_chunk(
+                text=text,
+                message_id=msg_id,
+                conversation_type="PRIV",
+                conversation_key=conversation_key,
+                peer_public_key=sender_key or conversation_key,
+                broadcast_fn=broadcast_fn,
+            )
 
         if update_last_contacted_key:
             await contact_repository.update_last_contacted(update_last_contacted_key, received_at)

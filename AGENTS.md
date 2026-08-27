@@ -392,6 +392,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | POST | `/api/messages/direct` | Send direct message |
 | POST | `/api/messages/channel` | Send channel message |
 | POST | `/api/messages/channel/{message_id}/resend` | Resend channel message (default: byte-perfect within 30s; `?new_timestamp=true`: fresh timestamp, no time limit, creates new message row) |
+| POST | `/api/messages/{message_id}/react` | Send a MeshCore Open Advanced compatible emoji reaction to a message (see `app/AGENTS.md` § Emoji reactions) |
 | GET | `/api/packets/undecrypted/count` | Count of undecrypted packets |
 | GET | `/api/packets/{packet_id}` | Fetch one stored raw packet by row ID for on-demand inspection |
 | POST | `/api/packets/region-backfill` | Re-resolve region scope for stored channel messages with retained raw packets |

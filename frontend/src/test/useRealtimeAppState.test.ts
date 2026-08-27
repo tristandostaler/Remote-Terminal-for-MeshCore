@@ -97,6 +97,7 @@ function createRealtimeArgs(overrides: Partial<Parameters<typeof useRealtimeAppS
       receiveMessageAck: vi.fn(),
       receiveMessageStatus: vi.fn(),
       receiveMessageDeleted: vi.fn(),
+      receiveMessageReactions: vi.fn(),
       notifyIncomingMessage: vi.fn(),
       ...overrides,
     },

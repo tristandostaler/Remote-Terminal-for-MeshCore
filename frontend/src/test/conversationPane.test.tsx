@@ -156,6 +156,7 @@ function createProps(overrides: Partial<React.ComponentProps<typeof Conversation
     onRetryMessage: vi.fn(async () => {}),
     onCancelMessage: vi.fn(async () => {}),
     onDeleteMessage: vi.fn(async () => {}),
+    onReactToMessage: vi.fn(async () => {}),
     onTargetReached: vi.fn(),
     onLoadNewer: vi.fn(async () => {}),
     onJumpToBottom: vi.fn(),

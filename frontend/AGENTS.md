@@ -296,6 +296,7 @@ That gives the store a load-bearing invariant: **no ancestor of `MessageList` ma
 - Backend also emits WS `message` for outgoing sends so other clients stay in sync.
 - ACK/repeat updates arrive as `message_acked` events; outgoing send progress arrives separately as `message_status`, and a removed message as `message_deleted`. Progress and delivery are kept apart because they are different facts — a send can exhaust its attempts without an ACK, and an ACK can land after the attempts are done.
 - Outgoing channel messages show a 30-second resend control; resend calls `POST /api/messages/channel/{message_id}/resend`.
+- **Emoji reactions (MCO Advanced compatible):** `Message.reactions` (`{emoji: count}`) renders as chips under the bubble; clicking a chip re-sends that emoji. The message-actions dialog opens with a quick-emoji row plus a full picker — only emojis from `REACTION_EMOJI_CATEGORIES` (`utils/meshcoreOpenPayloads.ts`, the wire-index table) are offered, because the wire encodes a table index, not the emoji itself. Reacting calls `POST /api/messages/{id}/react`; updates arrive as `message_reaction` events (`receiveMessageReactions`) — reaction payload rows themselves never reach the frontend, the backend hides them. In 1:1 DMs only received messages are reactable (`canReactToMessage`): the peer matches incoming reactions against its own outgoing messages, so reacting to your own bubble could never land (rooms and channels allow all messages).
 - Conversation-scoped message caching now lives inside `useConversationMessages.ts` rather than a standalone `messageCache.ts` module. If you touch message timeline restore/dedup/reconnect behavior, start there.
 - `contact_resolved` is a real-time identity migration event, not just a contact-list update. Changes in that area need to consider active conversation state, cached messages, unread state keys, and reconnect reconciliation together.
 
@@ -367,7 +368,7 @@ The tray collapses after an emoji is inserted, after a photo is chosen, after a 
 - Auto reconnect (3s) with cleanup guard on unmount.
 - Heartbeat ping every 30s.
 - Incoming JSON is parsed through `wsEvents.ts`, which validates the top-level envelope and known event type strings, then casts payloads at the handler boundary. It does not schema-validate per-event payload shapes.
-- Event handlers: `health`, `message`, `contact`, `contact_resolved`, `channel`, `raw_packet`, `message_acked`, `message_status`, `message_deleted`, `contact_deleted`, `channel_deleted`, `error`, `success`, `pong` (ignored).
+- Event handlers: `health`, `message`, `contact`, `contact_resolved`, `channel`, `raw_packet`, `message_acked`, `message_status`, `message_deleted`, `message_reaction`, `contact_deleted`, `channel_deleted`, `error`, `success`, `pong` (ignored).
 - For `raw_packet` events, use `observation_id` as event identity; `id` is a storage reference and may repeat.
 
 ## URL Hash Navigation (`utils/urlHash.ts`)

@@ -497,6 +497,15 @@ export const api = {
       { method: 'POST' }
     ),
   /**
+   * Send a MeshCore Open Advanced compatible emoji reaction ("remoji") to a
+   * message. Returns the target message with its updated reactions map.
+   */
+  reactToMessage: (messageId: number, emoji: string) =>
+    fetchJson<Message>(`/messages/${messageId}/react`, {
+      method: 'POST',
+      body: JSON.stringify({ emoji }),
+    }),
+  /**
    * Retransmit an outgoing message. Direct messages go out byte-identical under
    * their original timestamp (so the recipient dedups it as a retry rather than
    * showing it twice) and restart their retry run; `newTimestamp` applies to

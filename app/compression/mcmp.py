@@ -40,6 +40,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 
 logger = logging.getLogger(__name__)
@@ -1035,14 +1036,20 @@ def _log_model_load_failure() -> None:
 # radio would TRUNCATE it. A truncated basE91 chunk corrupts the whole image.
 _FRAMED_PREFIXES = ("mcmp2:", "mcmp3:", "aei1", "IE4:", "VE3:", "rmt1:")
 
+# MeshCore Open Advanced reaction payloads (r:HHHH:II). MCO Advanced sends
+# these plain on both the channel and DM paths -- wrapping one in MCMP would be
+# pure overhead for 9 ASCII chars and would hide it from plain-text clients.
+_REACTION_PAYLOAD_RE = re.compile(r"^r:[0-9a-f]{4}:[0-9a-f]{2}$")
+
 
 def is_framed_payload(text: str) -> bool:
     """Whether ``text`` is already a transport envelope, not user prose.
 
     See :data:`_FRAMED_PREFIXES`. Used by :func:`encode_outbound` to leave such
-    payloads alone; exposed so senders can assert the same invariant.
+    payloads alone; exposed so senders can assert the same invariant. Reaction
+    payloads count too: they are protocol, not prose.
     """
-    return text.startswith(_FRAMED_PREFIXES)
+    return text.startswith(_FRAMED_PREFIXES) or _REACTION_PAYLOAD_RE.match(text) is not None
 
 
 def encode_outbound(text: str, *, version: int = 2, timestamp: int = 0) -> str:

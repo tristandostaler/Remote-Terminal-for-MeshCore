@@ -20,6 +20,8 @@ import {
   giphyUrlForId,
   parseGif,
   parseReaction,
+  QUICK_REACTION_EMOJIS,
+  REACTION_EMOJI_CATEGORIES,
   splitReplyMention,
 } from '../utils/meshcoreOpenPayloads';
 import { useRichPayloads } from '../contexts/RichPayloadContext';
@@ -586,6 +588,8 @@ interface MessageListProps {
   onCancelMessage?: (message: Message) => void;
   /** Drop the message from our history. Local only -- the mesh has no unsend. */
   onDeleteMessage?: (message: Message) => void;
+  /** Send a MeshCore Open Advanced compatible emoji reaction to a message. */
+  onReactToMessage?: (message: Message, emoji: string) => void | Promise<void>;
   onChannelReferenceClick?: (channelName: string) => void;
   radioName?: string;
   config?: RadioConfig | null;
@@ -1152,6 +1156,7 @@ function MessageActionsDialog({
   onRetry,
   onCancel,
   onDelete,
+  onReact,
 }: {
   message: Message;
   onClose: () => void;
@@ -1159,10 +1164,13 @@ function MessageActionsDialog({
   onRetry?: (message: Message, newTimestamp?: boolean) => void;
   onCancel?: (message: Message) => void;
   onDelete?: (message: Message) => void;
+  /** Present only when this message can carry a reaction. */
+  onReact?: (message: Message, emoji: string) => void | Promise<void>;
 }) {
   const status = message.outgoing ? displaySendStatus(message) : null;
   const canCancel = !!onCancel && status === 'sending';
   const canRetry = !!onRetry && message.outgoing;
+  const [showAllEmojis, setShowAllEmojis] = useState(false);
 
   const run = (action: () => void | Promise<void>) => () => {
     onClose();
@@ -1176,6 +1184,56 @@ function MessageActionsDialog({
           <DialogTitle>Message actions</DialogTitle>
           <DialogDescription className="line-clamp-2 break-words">{message.text}</DialogDescription>
         </DialogHeader>
+        {onReact && (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-1">
+              {QUICK_REACTION_EMOJIS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  className="flex h-9 w-9 items-center justify-center rounded-full text-xl transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-label={`React with ${emoji}`}
+                  onClick={run(() => onReact(message, emoji))}
+                >
+                  {emoji}
+                </button>
+              ))}
+              <button
+                type="button"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-sm text-muted-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                aria-label={showAllEmojis ? 'Hide emoji list' : 'More emojis'}
+                aria-expanded={showAllEmojis}
+                onClick={() => setShowAllEmojis((prev) => !prev)}
+              >
+                {showAllEmojis ? <X className="h-4 w-4" /> : '⋯'}
+              </button>
+            </div>
+            {showAllEmojis && (
+              <div className="max-h-48 overflow-y-auto rounded-md border border-border p-2">
+                {REACTION_EMOJI_CATEGORIES.map((category) => (
+                  <div key={category.label}>
+                    <div className="px-1 pb-1 pt-2 text-xs font-medium text-muted-foreground first:pt-0">
+                      {category.label}
+                    </div>
+                    <div className="flex flex-wrap">
+                      {category.emojis.map((emoji, i) => (
+                        <button
+                          key={`${category.label}-${i}`}
+                          type="button"
+                          className="flex h-8 w-8 items-center justify-center rounded text-lg transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          aria-label={`React with ${emoji}`}
+                          onClick={run(() => onReact(message, emoji))}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex flex-col gap-2">
           <Button variant="outline" onClick={run(() => onCopy(message))}>
             Copy text
@@ -1250,6 +1308,7 @@ export function MessageList({
   onRetryMessage,
   onCancelMessage,
   onDeleteMessage,
+  onReactToMessage,
   onChannelReferenceClick,
   radioName,
   config,
@@ -1767,9 +1826,30 @@ export function MessageList({
     [config?.name, config?.public_key, config?.lat, config?.lon, config?.path_hash_mode]
   );
 
-  // Copy / retry / cancel / delete: the menu only appears when the host wired at
-  // least one of them, so a read-only embedding of the list stays read-only.
-  const hasMessageActions = !!(onRetryMessage || onCancelMessage || onDeleteMessage);
+  // Copy / retry / cancel / delete / react: the menu only appears when the host
+  // wired at least one of them, so a read-only embedding of the list stays
+  // read-only.
+  const hasMessageActions = !!(
+    onRetryMessage ||
+    onCancelMessage ||
+    onDeleteMessage ||
+    onReactToMessage
+  );
+
+  // Whether a MeshCore Open Advanced reaction can address this message. The
+  // wire hash needs a sender timestamp, and in 1:1 chats the peer's client only
+  // matches incoming reactions against its own outgoing messages -- so reacting
+  // to our own bubble could never land anywhere and is not offered.
+  const canReactToMessage = useCallback(
+    (msg: Message): boolean => {
+      if (!onReactToMessage || msg.sender_timestamp == null) return false;
+      if (msg.type === 'CHAN') return true;
+      const conversationContact = contacts.find((c) => c.public_key === msg.conversation_key);
+      if (conversationContact?.type === CONTACT_TYPE_ROOM) return true;
+      return !msg.outgoing;
+    },
+    [contacts, onReactToMessage]
+  );
 
   const copyMessageText = useCallback(async (message: Message) => {
     try {
@@ -2208,6 +2288,36 @@ export function MessageList({
                         ))
                       )}
                     </div>
+                    {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {Object.entries(msg.reactions).map(([emoji, count]) =>
+                          canReactToMessage(msg) ? (
+                            <button
+                              key={emoji}
+                              type="button"
+                              className="inline-flex items-center gap-1 rounded-full border border-border bg-background/60 px-2 py-0.5 text-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              title={`React with ${emoji}`}
+                              onClick={() => void onReactToMessage?.(msg, emoji)}
+                            >
+                              <span>{emoji}</span>
+                              {count > 1 && (
+                                <span className="text-xs text-muted-foreground">{count}</span>
+                              )}
+                            </button>
+                          ) : (
+                            <span
+                              key={emoji}
+                              className="inline-flex items-center gap-1 rounded-full border border-border bg-background/60 px-2 py-0.5 text-sm"
+                            >
+                              <span>{emoji}</span>
+                              {count > 1 && (
+                                <span className="text-xs text-muted-foreground">{count}</span>
+                              )}
+                            </span>
+                          )
+                        )}
+                      </div>
+                    )}
                     <MessageMetaLine
                       message={msg}
                       paths={msg.paths ?? null}
@@ -2364,6 +2474,7 @@ export function MessageList({
           onRetry={onRetryMessage}
           onCancel={onCancelMessage}
           onDelete={onDeleteMessage}
+          onReact={canReactToMessage(actionsTarget) ? onReactToMessage : undefined}
         />
       )}
     </div>

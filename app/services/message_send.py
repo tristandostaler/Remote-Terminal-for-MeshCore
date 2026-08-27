@@ -1275,7 +1275,10 @@ async def send_channel_message_to_channel(
         send_state=SEND_STATE_SENT,
         message_repository=message_repository,
     )
-    broadcast_message(message=outgoing_message, broadcast_fn=broadcast_fn)
+    # Reaction rows stay hidden: the react endpoint broadcasts the target's
+    # updated reactions instead of this bookkeeping row.
+    if not outgoing_message.is_reaction:
+        broadcast_message(message=outgoing_message, broadcast_fn=broadcast_fn)
 
     # Spawn echo watchdog if auto-resend is enabled
     try:
