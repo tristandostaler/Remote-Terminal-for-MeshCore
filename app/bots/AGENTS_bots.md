@@ -135,7 +135,14 @@ token gate only.
 ## Invariants worth keeping
 
 - Legacy `def bot(**kwargs)` sources must keep running unchanged (migration
-  064 moved them here verbatim).
+  064 moved them here verbatim). Their signature has no room of its own and its
+  two kinds are "DM" and "everything else", so `call_legacy` hands a room post
+  over as its room: `channel_key`/`channel_name` carry the room contact rather
+  than `None`. A bot written before rooms reads `not is_dm` as "`channel_key` is
+  a string", and `execute_bot_code` swallows the TypeError — the bot would just
+  go quiet, with nothing in Bots › Logs. Decorated bots keep `channel_key` None
+  on purpose: they have `msg.room_key`, and `ctx.send` must never mistake a room
+  for a channel.
 - Seeded bots ship disabled — enabling what a node answers is an operator act.
 - New and seeded bots are scoped to `#bot` / `#bots` + DMs, never "all
   channels": a command bot on Public is noise for the whole mesh. A built-in may

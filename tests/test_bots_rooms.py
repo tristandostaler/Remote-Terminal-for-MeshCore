@@ -253,6 +253,61 @@ class TestReplyTarget:
             await self.make_ctx().send_room("K0PHX", "hello")
 
 
+class TestLegacyBots:
+    """A migrated ``def bot(**kwargs)`` source must keep working (AGENTS invariant)."""
+
+    LEGACY = (
+        "def bot(**kwargs):\n"
+        "    if kwargs['is_dm']:\n"
+        "        return 'private answer'\n"
+        "    # Pre-rooms bots reasonably read 'not a DM' as 'a channel'.\n"
+        "    return 'on ' + kwargs['channel_key'][:8] + '/' + str(kwargs['channel_name'])\n"
+    )
+
+    async def _run(self, msg: BotMessage) -> list[dict]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        from app.bots.runtime import call_legacy, load_bot_code
+
+        ctx = BotContext(
+            bot_id="b",
+            bot_name="b",
+            settings={},
+            state={},
+            is_test=True,
+            origin_is_dm=msg.is_dm,
+            origin_sender_key=msg.sender_key,
+            origin_channel_key=msg.channel_key,
+            origin_is_room=msg.is_room,
+            origin_room_key=msg.room_key,
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            await call_legacy(load_bot_code(self.LEGACY), ctx, msg, 10.0, pool)
+        return ctx.captured_sends
+
+    async def test_dm_and_channel_are_untouched(self):
+        dm = await self._run(BotMessage(text="hi", is_dm=True, sender_key=POSTER_KEY))
+        assert dm[0]["destination"] == POSTER_KEY
+        assert dm[0]["text"] == "private answer"
+
+        chan = await self._run(
+            BotMessage(text="hi", is_dm=False, channel_key="A" * 32, channel_name="#g")
+        )
+        assert chan[0]["channel_key"] == "A" * 32
+        assert chan[0]["text"] == "on AAAAAAAA/#g"
+
+    async def test_a_room_arrives_as_that_room_not_as_a_none_channel(self):
+        # The legacy signature has no room of its own, so the room stands in as
+        # the conversation. Handing it None here made the bot raise inside the
+        # legacy executor, which swallows it — a working bot going quiet with no
+        # reply and nothing in Bots › Logs.
+        sends = await self._run(room_msg())
+        assert sends[0]["text"] == f"on {ROOM_KEY[:8]}/Ops Board"
+        # The answer still goes into the room, like any other bot's.
+        assert sends[0]["is_dm"] is True
+        assert sends[0]["destination"] == ROOM_KEY
+
+
 class TestEchoGuard:
     def _engine_with_spy(self, monkeypatch, self_key):
         engine = BotEngine()
