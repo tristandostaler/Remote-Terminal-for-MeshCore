@@ -97,6 +97,7 @@ interface ConversationPaneProps {
   onRetryMessage: (message: Message, newTimestamp?: boolean) => Promise<void>;
   onCancelMessage: (message: Message) => Promise<void>;
   onDeleteMessage: (message: Message) => Promise<void>;
+  onReactToMessage: (message: Message, emoji: string) => Promise<void>;
   onTargetReached: () => void;
   onLoadNewer: () => Promise<void>;
   onJumpToBottom: () => void;
@@ -185,6 +186,7 @@ export function ConversationPane({
   onRetryMessage,
   onCancelMessage,
   onDeleteMessage,
+  onReactToMessage,
   onTargetReached,
   onLoadNewer,
   onJumpToBottom,
@@ -457,6 +459,7 @@ export function ConversationPane({
           onRetryMessage={onRetryMessage}
           onCancelMessage={onCancelMessage}
           onDeleteMessage={onDeleteMessage}
+          onReactToMessage={onReactToMessage}
           radioName={config?.name}
           config={config}
           onOpenContactInfo={onOpenContactInfo}

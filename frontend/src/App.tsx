@@ -377,6 +377,7 @@ export function App() {
     receiveMessageAck,
     receiveMessageStatus,
     receiveMessageDeleted,
+    receiveMessageReactions,
     reconcileOnReconnect,
     renameConversationMessages,
     removeConversationMessages,
@@ -497,6 +498,7 @@ export function App() {
     receiveMessageAck,
     receiveMessageStatus,
     receiveMessageDeleted,
+    receiveMessageReactions,
     notifyIncomingMessage,
   });
   const handleVisibilityPolicyChanged = useCallback(() => {
@@ -527,6 +529,7 @@ export function App() {
     handleRetryMessage,
     handleCancelMessage,
     handleDeleteMessage,
+    handleReactToMessage,
     handleSetChannelFloodScopeOverride,
     handleSetChannelPathHashModeOverride,
     handleSenderClick,
@@ -539,6 +542,7 @@ export function App() {
     setChannels,
     observeMessage,
     removeMessageFromView: receiveMessageDeleted,
+    applyMessageReactions: receiveMessageReactions,
     messageInputRef,
   });
   const handleCreateCrackedChannel = useCallback(
@@ -718,6 +722,7 @@ export function App() {
     onRetryMessage: handleRetryMessage,
     onCancelMessage: handleCancelMessage,
     onDeleteMessage: handleDeleteMessage,
+    onReactToMessage: handleReactToMessage,
     onTargetReached: () => setTargetMessageId(null),
     onLoadNewer: fetchNewerMessages,
     onJumpToBottom: jumpToBottom,

@@ -142,6 +142,18 @@ export class ConversationMessageCache {
     }
   }
 
+  /** Replace a message's reactions map (the backend sends the full map). */
+  updateReactions(messageId: number, reactions: Record<string, number>): void {
+    for (const entry of this.cache.values()) {
+      const index = entry.messages.findIndex((message) => message.id === messageId);
+      if (index < 0) continue;
+      const updated = [...entry.messages];
+      updated[index] = { ...updated[index], reactions };
+      entry.messages = updated;
+      return;
+    }
+  }
+
   /** Drop a deleted message from every conversation that holds it. */
   removeMessage(messageId: number): void {
     for (const entry of this.cache.values()) {
@@ -316,6 +328,7 @@ interface UseConversationMessagesResult {
   ) => void;
   receiveMessageStatus: (messageId: number, status: MessageSendStatusUpdate) => void;
   receiveMessageDeleted: (messageId: number) => void;
+  receiveMessageReactions: (messageId: number, reactions: Record<string, number>) => void;
   reconcileOnReconnect: () => void;
   renameConversationMessages: (oldId: string, newId: string) => void;
   removeConversationMessages: (conversationId: string) => void;
@@ -941,6 +954,22 @@ export function useConversationMessages(
     [setMessages]
   );
 
+  const receiveMessageReactions = useCallback(
+    (messageId: number, reactions: Record<string, number>) => {
+      // Like send status: no pending bookkeeping. A message not loaded yet
+      // carries its reactions when fetched.
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === messageId);
+        if (idx < 0) return prev;
+        const updated = [...prev];
+        updated[idx] = { ...updated[idx], reactions };
+        return updated;
+      });
+      conversationMessageCache.updateReactions(messageId, reactions);
+    },
+    [setMessages]
+  );
+
   const observeMessage = useCallback(
     (msg: Message): { added: boolean; activeConversation: boolean } => {
       const msgWithPendingAck = applyPendingAck(msg);
@@ -998,6 +1027,7 @@ export function useConversationMessages(
     receiveMessageAck,
     receiveMessageStatus,
     receiveMessageDeleted,
+    receiveMessageReactions,
     reconcileOnReconnect,
     renameConversationMessages,
     removeConversationMessages,

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from app.compression import CompressionInfo, decode_and_describe
 from app.imaging.aeic.ingest import note_inbound_chunk
 from app.models import Message, MessagePath
+from app.reactions import apply_reaction, extract_reaction_from_stored_text
 from app.repository import ContactRepository, MessageRepository, RawPacketRepository
 
 if TYPE_CHECKING:
@@ -77,6 +78,7 @@ def build_message_model(
     send_attempts: int | None = None,
     send_max_attempts: int | None = None,
     send_state: str | None = None,
+    is_reaction: bool = False,
 ) -> Message:
     """Build a Message model with the canonical backend payload shape."""
     return Message(
@@ -104,6 +106,7 @@ def build_message_model(
         send_attempts=send_attempts,
         send_max_attempts=send_max_attempts,
         send_state=send_state,
+        is_reaction=is_reaction,
     )
 
 
@@ -157,6 +160,7 @@ async def build_stored_outgoing_channel_message(
         compression=compression,
         send_attempts=send_attempts,
         send_state=send_state,
+        is_reaction=extract_reaction_from_stored_text("CHAN", text) is not None,
     )
 
 
@@ -339,6 +343,11 @@ async def create_message_from_decrypted(
     text = f"{sender}: {message_text}" if sender else message_text
     channel_key_normalized = channel_key.upper()
 
+    # A reaction payload ("Name: r:HHHH:II") is stored like any message so
+    # flood-echo dedup works, but hidden and applied to its target instead of
+    # broadcast as a bubble.
+    reaction = extract_reaction_from_stored_text("CHAN", text)
+
     resolved_sender_key: str | None = None
     if sender:
         candidates = await ContactRepository.get_by_name(sender)
@@ -360,6 +369,7 @@ async def create_message_from_decrypted(
         transport_code=transport_code,
         region=region,
         compression=compression,
+        is_reaction=reaction is not None,
     )
 
     if msg_id is None:
@@ -378,6 +388,17 @@ async def create_message_from_decrypted(
             broadcast_fn=broadcast_fn,
         )
         return None
+
+    if reaction is not None:
+        await RawPacketRepository.mark_decrypted(packet_id, msg_id)
+        await apply_reaction(
+            msg_type="CHAN",
+            conversation_key=channel_key_normalized,
+            reaction=reaction,
+            reactor_is_self=False,
+            broadcast_fn=broadcast_fn,
+        )
+        return msg_id
 
     logger.info(
         'Stored channel message "%s" for %r (msg ID %d in chan ID %s)',
@@ -520,6 +541,9 @@ async def create_fallback_channel_message(
     message_text, compression = decode_and_describe(message_text)
     text = f"{sender_name}: {message_text}" if sender_name else message_text
 
+    # Same reaction handling as the raw-RF route: store hidden, apply to target.
+    reaction = extract_reaction_from_stored_text("CHAN", text)
+
     resolved_sender_key: str | None = None
     if sender_name:
         candidates = await ContactRepository.get_by_name(sender_name)
@@ -538,6 +562,7 @@ async def create_fallback_channel_message(
         sender_name=sender_name,
         sender_key=resolved_sender_key,
         compression=compression,
+        is_reaction=reaction is not None,
     )
     if msg_id is None:
         await handle_duplicate_message(
@@ -550,6 +575,16 @@ async def create_fallback_channel_message(
             path=path,
             received_at=received_at,
             path_len=path_len,
+            broadcast_fn=broadcast_fn,
+        )
+        return None
+
+    if reaction is not None:
+        await apply_reaction(
+            msg_type="CHAN",
+            conversation_key=conversation_key_normalized,
+            reaction=reaction,
+            reactor_is_self=False,
             broadcast_fn=broadcast_fn,
         )
         return None
@@ -599,6 +634,9 @@ async def create_outgoing_direct_message(
     message_repository=MessageRepository,
 ) -> Message | None:
     """Store and broadcast an outgoing direct message."""
+    # An outgoing reaction row is stored hidden; the react endpoint applies it
+    # to its target only after the radio accepts the send.
+    is_reaction = extract_reaction_from_stored_text("PRIV", text) is not None
     msg_id = await message_repository.create(
         msg_type="PRIV",
         text=text,
@@ -610,6 +648,7 @@ async def create_outgoing_direct_message(
         send_attempts=send_attempts,
         send_max_attempts=send_max_attempts,
         send_state=send_state,
+        is_reaction=is_reaction,
     )
     if msg_id is None:
         return None
@@ -628,7 +667,8 @@ async def create_outgoing_direct_message(
         send_max_attempts=send_max_attempts,
         send_state=send_state,
     )
-    broadcast_message(message=message, broadcast_fn=broadcast_fn)
+    if not is_reaction:
+        broadcast_message(message=message, broadcast_fn=broadcast_fn)
     return message
 
 
@@ -649,6 +689,9 @@ async def create_outgoing_channel_message(
     message_repository=MessageRepository,
 ) -> Message | None:
     """Store and broadcast an outgoing channel message."""
+    # Outgoing reactions ("OurName: r:HHHH:II") are stored hidden; the react
+    # endpoint applies them to their target once the radio accepts the send.
+    is_reaction = extract_reaction_from_stored_text("CHAN", text) is not None
     msg_id = await message_repository.create(
         msg_type="CHAN",
         text=text,
@@ -661,6 +704,7 @@ async def create_outgoing_channel_message(
         compression=compression,
         send_attempts=send_attempts,
         send_state=send_state,
+        is_reaction=is_reaction,
     )
     if msg_id is None:
         return None
@@ -679,6 +723,6 @@ async def create_outgoing_channel_message(
         send_state=send_state,
         message_repository=message_repository,
     )
-    if broadcast:
+    if broadcast and not is_reaction:
         broadcast_message(message=message, broadcast_fn=broadcast_fn)
     return message

@@ -32,6 +32,14 @@ export interface MessageDeletedPayload {
   message_id: number;
 }
 
+/** A message's reactions changed (someone reacted, here or on the mesh). */
+export interface MessageReactionPayload {
+  message_id: number;
+  conversation_key: string;
+  type: 'PRIV' | 'CHAN';
+  reactions: Record<string, number>;
+}
+
 export interface ContactDeletedPayload {
   public_key: string;
 }
@@ -62,6 +70,7 @@ export type KnownWsEvent =
   | { type: 'message_acked'; data: MessageAckedPayload }
   | { type: 'message_status'; data: MessageStatusPayload }
   | { type: 'message_deleted'; data: MessageDeletedPayload }
+  | { type: 'message_reaction'; data: MessageReactionPayload }
   | { type: 'bot_log'; data: BotLogEntry }
   | { type: 'error'; data: ToastPayload }
   | { type: 'success'; data: ToastPayload }
@@ -98,6 +107,7 @@ export function parseWsEvent(raw: string): ParsedWsEvent {
     case 'message_acked':
     case 'message_status':
     case 'message_deleted':
+    case 'message_reaction':
     case 'bot_log':
     case 'error':
     case 'success':

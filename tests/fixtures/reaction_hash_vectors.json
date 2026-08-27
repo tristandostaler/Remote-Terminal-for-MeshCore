@@ -1,0 +1,165 @@
+{
+  "_source": "Generated from a C transcription of the Dart SDK string hash (runtime/vm/hash.h CombineHashes/FinalizeHash over UTF-16-LE code units, finalized to 30 bits, 0 mapped to 1) — the algorithm behind Dart VM String.hashCode, which MeshCore Open Advanced reaction hashes are built on. dart_hash is the full 30-bit hashCode; reaction_hash is format(hashCode & 0xFFFF, '04x') over the input '{ts}{sender}{first5}' / '{ts}{first5}'.",
+  "string_hashes": [
+    {
+      "text": "",
+      "dart_hash": 1
+    },
+    {
+      "text": "a",
+      "dart_hash": 170824770
+    },
+    {
+      "text": "1234567890Hello",
+      "dart_hash": 90569536
+    },
+    {
+      "text": "1234567890AliceHello",
+      "dart_hash": 183411998
+    },
+    {
+      "text": "1745699301AliceHi ru",
+      "dart_hash": 561341400
+    },
+    {
+      "text": "1745699301Bob 📻⚡ radio",
+      "dart_hash": 476607968
+    },
+    {
+      "text": "1699999999👍👍�",
+      "dart_hash": 780476450
+    },
+    {
+      "text": "0",
+      "dart_hash": 775707755
+    },
+    {
+      "text": "-1",
+      "dart_hash": 159735807
+    },
+    {
+      "text": "1756300000Zoé Héllo",
+      "dart_hash": 112011672
+    },
+    {
+      "text": "1756300000Ünïcødé Test ➜ done",
+      "dart_hash": 473872891
+    },
+    {
+      "text": "1756300000N0deName!Testing 123",
+      "dart_hash": 16221113
+    },
+    {
+      "text": "1756300000💀",
+      "dart_hash": 355719181
+    },
+    {
+      "text": "1756300000❤️‍🔥ab",
+      "dart_hash": 426096831
+    },
+    {
+      "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "dart_hash": 772480514
+    },
+    {
+      "text": "1756300000yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyabcde",
+      "dart_hash": 405229397
+    },
+    {
+      "text": "тест по-русски",
+      "dart_hash": 634380661
+    },
+    {
+      "text": "1756300000Приём!",
+      "dart_hash": 647439526
+    },
+    {
+      "text": "日本語のメッセージ",
+      "dart_hash": 1069416488
+    },
+    {
+      "text": "1756300000🎉🎉🎉🎉🎉",
+      "dart_hash": 627518902
+    }
+  ],
+  "reaction_hashes": [
+    {
+      "timestamp": 1745699301,
+      "sender_name": "Alice",
+      "text": "Hello world",
+      "reaction_hash": "65e4"
+    },
+    {
+      "timestamp": 1745699301,
+      "sender_name": "Alice",
+      "text": "Hi",
+      "reaction_hash": "ba19"
+    },
+    {
+      "timestamp": 1745699301,
+      "sender_name": null,
+      "text": "Hello world",
+      "reaction_hash": "d134"
+    },
+    {
+      "timestamp": 1745699301,
+      "sender_name": null,
+      "text": "",
+      "reaction_hash": "1f76"
+    },
+    {
+      "timestamp": 1699999999,
+      "sender_name": "Bob 📻",
+      "text": "📻 radio check",
+      "reaction_hash": "9af6"
+    },
+    {
+      "timestamp": 1699999999,
+      "sender_name": "Zoé",
+      "text": "café ☕ time",
+      "reaction_hash": "8e00"
+    },
+    {
+      "timestamp": 1756300000,
+      "sender_name": "N0de-Name",
+      "text": "12345 rest is ignored",
+      "reaction_hash": "f220"
+    },
+    {
+      "timestamp": 1756300000,
+      "sender_name": "Unknown",
+      "text": "r:beef:00",
+      "reaction_hash": "b802"
+    },
+    {
+      "timestamp": 1756300000,
+      "sender_name": null,
+      "text": "💀💀💀",
+      "reaction_hash": "dbe6"
+    },
+    {
+      "timestamp": 1756300000,
+      "sender_name": "日本語",
+      "text": "こんにちは世界",
+      "reaction_hash": "98c7"
+    },
+    {
+      "timestamp": 1756300000,
+      "sender_name": "Тест",
+      "text": "Привет мир",
+      "reaction_hash": "07d3"
+    },
+    {
+      "timestamp": 0,
+      "sender_name": null,
+      "text": "x",
+      "reaction_hash": "ac9f"
+    },
+    {
+      "timestamp": 4294967295,
+      "sender_name": "MaxTs",
+      "text": "boundary",
+      "reaction_hash": "11bb"
+    }
+  ]
+}

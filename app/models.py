@@ -611,6 +611,20 @@ class Message(BaseModel):
             "from acked > 0. None for incoming and legacy rows."
         ),
     )
+    reactions: dict[str, int] | None = Field(
+        default=None,
+        description=(
+            "Emoji reactions attached to this message (emoji -> count), MeshCore Open "
+            "Advanced compatible. None when nobody reacted."
+        ),
+    )
+    is_reaction: bool = Field(
+        default=False,
+        description=(
+            "This row is itself a reaction payload (r:HHHH:II). Stored for echo dedup "
+            "but hidden from every conversation surface."
+        ),
+    )
 
 
 class MessagesAroundResponse(BaseModel):
@@ -718,6 +732,15 @@ class SendMessageRequest(BaseModel):
 class SendDirectMessageRequest(SendMessageRequest):
     destination: str = Field(
         description="Recipient public key (64-char hex preferred; prefix must resolve uniquely)"
+    )
+
+
+class ReactToMessageRequest(BaseModel):
+    emoji: str = Field(
+        description=(
+            "Reaction emoji. Must be one of the MeshCore Open Advanced reaction table "
+            "entries (the wire encodes an index into that fixed list)."
+        )
     )
 
 

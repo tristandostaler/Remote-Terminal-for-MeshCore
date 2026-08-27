@@ -424,6 +424,16 @@ export interface Message {
   send_max_attempts?: number | null;
   /** Outgoing send progress. Delivery is not here -- it stays derived from `acked`. */
   send_state?: MessageSendState | null;
+  /**
+   * Emoji reactions attached to this message (emoji -> count), MeshCore Open
+   * Advanced compatible. Null/absent when nobody reacted.
+   */
+  reactions?: Record<string, number> | null;
+  /**
+   * The row is itself a reaction payload. Always false on messages the
+   * frontend sees -- the backend hides reaction rows from every surface.
+   */
+  is_reaction?: boolean;
 }
 
 /** Compression codecs a message body can arrive or leave under. */

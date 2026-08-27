@@ -6,14 +6,23 @@ from fastapi import APIRouter, HTTPException, Query
 from app.compression import encode_outbound
 from app.event_handlers import track_pending_ack
 from app.models import (
+    CONTACT_TYPE_ROOM,
     McmpEstimateRequest,
     McmpEstimateResponse,
     Message,
     MessageActionResponse,
     MessagesAroundResponse,
+    ReactToMessageRequest,
     ResendChannelMessageResponse,
     SendChannelMessageRequest,
     SendDirectMessageRequest,
+)
+from app.reactions import (
+    ReactionInfo,
+    apply_reaction,
+    emoji_to_index_hex,
+    encode_reaction,
+    reaction_hash_for_message,
 )
 from app.repository import AmbiguousPublicKeyPrefixError, AppSettingsRepository, MessageRepository
 from app.services.message_send import (
@@ -198,6 +207,118 @@ async def send_channel_message(request: SendChannelMessageRequest) -> Message:
         flood_scope_override=flood_scope_override,
         message_repository=MessageRepository,
     )
+
+
+@router.post("/{message_id}/react", response_model=Message)
+async def react_to_message(message_id: int, request: ReactToMessageRequest) -> Message:
+    """Send a MeshCore Open Advanced compatible emoji reaction to a message.
+
+    Transmits ``r:HHHH:II`` (the target hash and the emoji's table index) as an
+    ordinary channel/DM message, then attaches the emoji to the target row and
+    broadcasts a ``message_reaction`` event. In 1:1 conversations only received
+    messages can be reacted to -- the peer's client matches incoming reactions
+    against its own outgoing messages, so a reaction to our own bubble could
+    never land anywhere (MCO Advanced has the same rule).
+    """
+    radio_manager.require_connected()
+
+    msg = await MessageRepository.get_by_id(message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if msg.is_reaction:
+        raise HTTPException(status_code=400, detail="Cannot react to a reaction")
+    if msg.sender_timestamp is None:
+        raise HTTPException(
+            status_code=400, detail="Message has no sender timestamp; reactions cannot address it"
+        )
+
+    emoji_index = emoji_to_index_hex(request.emoji)
+    if emoji_index is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Emoji is not in the MeshCore Open reaction table; "
+                "only listed emojis can ride the wire"
+            ),
+        )
+
+    from app.repository import ChannelRepository, ContactRepository
+
+    is_room = False
+    contact = None
+    if msg.type == "PRIV":
+        contact = await ContactRepository.get_by_key(msg.conversation_key.lower())
+        if not contact:
+            raise HTTPException(
+                status_code=404, detail=f"Contact not found in database: {msg.conversation_key}"
+            )
+        if len(contact.public_key) < 64:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot react in a prefix-only conversation until a full key is known",
+            )
+        is_room = contact.type == CONTACT_TYPE_ROOM
+        if not is_room and msg.outgoing:
+            raise HTTPException(
+                status_code=400,
+                detail="In direct chats you can only react to messages you received",
+            )
+
+    our_name: str | None = None
+    mc = radio_manager.meshcore
+    if mc and mc.self_info:
+        our_name = mc.self_info.get("name") or None
+
+    target_hash = reaction_hash_for_message(msg, is_room=is_room, our_name=our_name)
+    if target_hash is None:
+        raise HTTPException(status_code=400, detail="Message cannot be hashed for a reaction")
+    reaction_text = encode_reaction(target_hash, emoji_index)
+
+    if msg.type == "CHAN":
+        db_channel = await ChannelRepository.get_by_key(msg.conversation_key)
+        if not db_channel:
+            raise HTTPException(
+                status_code=404, detail=f"Channel {msg.conversation_key} not found in database"
+            )
+        try:
+            key_bytes = bytes.fromhex(msg.conversation_key)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid channel key format: {msg.conversation_key}"
+            ) from None
+        await send_channel_message_to_channel(
+            channel=db_channel,
+            channel_key_upper=msg.conversation_key.upper(),
+            key_bytes=key_bytes,
+            text=reaction_text,
+            radio_manager=radio_manager,
+            broadcast_fn=broadcast_event,
+            error_broadcast_fn=broadcast_error,
+            now_fn=time.time,
+            temp_radio_slot=TEMP_RADIO_SLOT,
+            message_repository=MessageRepository,
+        )
+    else:
+        await send_direct_message_to_contact(
+            contact=contact,
+            text=reaction_text,
+            radio_manager=radio_manager,
+            broadcast_fn=broadcast_event,
+            track_pending_ack_fn=track_pending_ack,
+            now_fn=time.time,
+            message_repository=MessageRepository,
+            contact_repository=ContactRepository,
+        )
+
+    updated = await apply_reaction(
+        msg_type=msg.type,
+        conversation_key=msg.conversation_key,
+        reaction=ReactionInfo(target_hash=target_hash, emoji=request.emoji),
+        reactor_is_self=True,
+        broadcast_fn=broadcast_event,
+        fallback_target=msg,
+    )
+    return updated or msg
 
 
 RESEND_WINDOW_SECONDS = 30

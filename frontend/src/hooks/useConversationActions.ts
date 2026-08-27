@@ -12,6 +12,7 @@ interface UseConversationActionsArgs {
   setChannels: React.Dispatch<React.SetStateAction<Channel[]>>;
   observeMessage: (msg: Message) => { added: boolean; activeConversation: boolean };
   removeMessageFromView: (messageId: number) => void;
+  applyMessageReactions: (messageId: number, reactions: Record<string, number>) => void;
   messageInputRef: RefObject<MessageInputHandle | null>;
 }
 
@@ -21,6 +22,7 @@ interface UseConversationActionsResult {
   handleRetryMessage: (message: Message, newTimestamp?: boolean) => Promise<void>;
   handleCancelMessage: (message: Message) => Promise<void>;
   handleDeleteMessage: (message: Message) => Promise<void>;
+  handleReactToMessage: (message: Message, emoji: string) => Promise<void>;
   handleSetChannelFloodScopeOverride: (
     channelKey: string,
     floodScopeOverride: string
@@ -41,6 +43,7 @@ export function useConversationActions({
   setChannels,
   observeMessage,
   removeMessageFromView,
+  applyMessageReactions,
   messageInputRef,
 }: UseConversationActionsArgs): UseConversationActionsResult {
   const mergeChannelIntoList = useCallback(
@@ -154,6 +157,24 @@ export function useConversationActions({
     [removeMessageFromView]
   );
 
+  const handleReactToMessage = useCallback(
+    async (message: Message, emoji: string) => {
+      try {
+        const updated = await api.reactToMessage(message.id, emoji);
+        // The message_reaction broadcast covers other clients; applying the
+        // response locally makes the chip appear without the round trip.
+        if (updated.reactions) {
+          applyMessageReactions(updated.id, updated.reactions);
+        }
+      } catch (err) {
+        toast.error('Failed to send reaction', {
+          description: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    },
+    [applyMessageReactions]
+  );
+
   const handleSetChannelFloodScopeOverride = useCallback(
     async (channelKey: string, floodScopeOverride: string) => {
       try {
@@ -229,6 +250,7 @@ export function useConversationActions({
     handleRetryMessage,
     handleCancelMessage,
     handleDeleteMessage,
+    handleReactToMessage,
     handleSetChannelFloodScopeOverride,
     handleSetChannelPathHashModeOverride,
     handleSenderClick,

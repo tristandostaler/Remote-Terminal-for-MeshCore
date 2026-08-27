@@ -68,6 +68,20 @@ export const REACTION_EMOJIS: readonly string[] = [
   ...OBJECTS,
 ];
 
+/** The quick-reaction row, in meshcore-open's order. */
+export const QUICK_REACTION_EMOJIS: readonly string[] = QUICK_EMOJIS;
+
+/** Reaction emojis by category, for pickers. Only these can ride the wire. */
+export const REACTION_EMOJI_CATEGORIES: ReadonlyArray<{
+  label: string;
+  emojis: readonly string[];
+}> = [
+  { label: 'Smileys', emojis: SMILEYS },
+  { label: 'Gestures', emojis: GESTURES },
+  { label: 'Hearts', emojis: HEARTS },
+  { label: 'Objects', emojis: OBJECTS },
+];
+
 // --- GIF (g:<gifId>) ---
 
 const GIF_PATTERN = /^g:([A-Za-z0-9_-]+)$/;

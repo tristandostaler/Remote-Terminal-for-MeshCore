@@ -60,6 +60,7 @@ interface UseRealtimeAppStateArgs {
   ) => void;
   receiveMessageStatus: (messageId: number, status: MessageSendStatusUpdate) => void;
   receiveMessageDeleted: (messageId: number) => void;
+  receiveMessageReactions: (messageId: number, reactions: Record<string, number>) => void;
   notifyIncomingMessage?: (msg: Message) => void;
   /** Buffer cap override. Defaults to the store's own cap; tests use it to force eviction. */
   maxRawPackets?: number;
@@ -111,6 +112,7 @@ export function useRealtimeAppState({
   receiveMessageAck,
   receiveMessageStatus,
   receiveMessageDeleted,
+  receiveMessageReactions,
   notifyIncomingMessage,
   maxRawPackets = MAX_RAW_PACKETS,
 }: UseRealtimeAppStateArgs): UseWebSocketOptions {
@@ -287,6 +289,9 @@ export function useRealtimeAppState({
       onMessageDeleted: (messageId: number) => {
         receiveMessageDeleted(messageId);
       },
+      onMessageReaction: (payload) => {
+        receiveMessageReactions(payload.message_id, payload.reactions);
+      },
     }),
     [
       activeConversationRef,
@@ -306,6 +311,7 @@ export function useRealtimeAppState({
       receiveMessageAck,
       receiveMessageStatus,
       receiveMessageDeleted,
+      receiveMessageReactions,
       observeMessage,
       refreshUnreads,
       reconcileOnReconnect,

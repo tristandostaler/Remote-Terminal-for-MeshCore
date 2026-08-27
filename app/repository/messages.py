@@ -13,6 +13,7 @@ from app.models import (
     Message,
     MessagePath,
 )
+from app.reactions import parse_reactions_json
 
 
 class MessageRepository:
@@ -72,6 +73,7 @@ class MessageRepository:
         send_attempts: int | None = None,
         send_max_attempts: int | None = None,
         send_state: str | None = None,
+        is_reaction: bool = False,
     ) -> int | None:
         """Create a message, returning the ID or None if duplicate.
 
@@ -108,8 +110,8 @@ class MessageRepository:
                                                 sender_name, sender_key, transport_code, region,
                                                 compression, plain_bytes, wire_bytes,
                                                 payload_bytes, send_attempts, send_max_attempts,
-                                                send_state)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                                send_state, is_reaction)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     msg_type,
@@ -132,6 +134,7 @@ class MessageRepository:
                     send_attempts,
                     send_max_attempts,
                     send_state,
+                    int(is_reaction),
                 ),
             ) as cursor:
                 rowcount = cursor.rowcount
@@ -376,9 +379,10 @@ class MessageRepository:
 
         return f"NOT ({prefix}outgoing = 0 AND ({' OR '.join(blocked_matchers)}))", params
 
-    # Columns added by migration 74. Selected with `messages.*`, so a row from a
-    # database that has not been migrated yet simply lacks them -- read through
-    # `_optional` rather than indexing, and the Message model's defaults apply.
+    # Columns added by migrations 74/82. Selected with `messages.*`, so a row
+    # from a database that has not been migrated yet simply lacks them -- read
+    # through `_optional` rather than indexing, and the Message model's defaults
+    # apply.
     _OPTIONAL_COLUMNS = (
         "packet_id",
         "transport_code",
@@ -390,6 +394,8 @@ class MessageRepository:
         "send_attempts",
         "send_max_attempts",
         "send_state",
+        "reactions",
+        "is_reaction",
     )
 
     @staticmethod
@@ -428,6 +434,8 @@ class MessageRepository:
             send_attempts=optional["send_attempts"],
             send_max_attempts=optional["send_max_attempts"],
             send_state=optional["send_state"],
+            reactions=parse_reactions_json(optional["reactions"]),
+            is_reaction=bool(optional["is_reaction"]),
         )
 
     @staticmethod
@@ -458,7 +466,8 @@ class MessageRepository:
             "AND messages.conversation_key = contacts.public_key "
             "LEFT JOIN channels ON messages.type = 'CHAN' "
             "AND messages.conversation_key = channels.key "
-            "WHERE 1=1"
+            # Reaction payload rows are bookkeeping, never conversation content.
+            "WHERE messages.is_reaction = 0"
         )
         params: list[Any] = []
 
@@ -540,7 +549,9 @@ class MessageRepository:
         """
         # Build common WHERE clause for optional conversation/type filtering.
         # If the target message doesn't match filters, return an empty result.
-        where_parts: list[str] = []
+        # Reaction payload rows are hidden here like everywhere else, so a
+        # reaction row id is simply "not found".
+        where_parts: list[str] = ["is_reaction = 0"]
         base_params: list[Any] = []
         if msg_type:
             where_parts.append("type = ?")
@@ -632,6 +643,55 @@ class MessageRepository:
             ) as cursor:
                 row = await cursor.fetchone()
         return row["acked"] if row else 1
+
+    @staticmethod
+    async def increment_reaction(message_id: int, emoji: str) -> dict[str, int]:
+        """Bump one emoji's count in a message's ``reactions`` JSON, atomically.
+
+        json_set with a bound path keeps concurrent reactions from losing each
+        other's increments (no read-modify-write in Python). Returns the full
+        updated map. The path interpolates the emoji directly; reaction emojis
+        contain no quotes or backslashes, so the JSON path stays well-formed.
+        """
+        path = f'$."{emoji}"'
+        async with db.tx() as conn:
+            async with conn.execute(
+                """
+                UPDATE messages
+                   SET reactions = json_set(
+                           COALESCE(reactions, '{}'),
+                           ?,
+                           COALESCE(json_extract(reactions, ?), 0) + 1
+                       )
+                 WHERE id = ?
+                 RETURNING reactions
+                """,
+                (path, path, message_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row is None:
+            return {}
+        return parse_reactions_json(row["reactions"]) or {}
+
+    @staticmethod
+    async def get_recent_for_reaction_matching(
+        *, msg_type: str, conversation_key: str, limit: int
+    ) -> list[Message]:
+        """Newest-first window of a conversation's real messages, for reaction
+        hash matching. Reaction payload rows are excluded -- a reaction never
+        targets another reaction."""
+        clause, norm_key = MessageRepository._normalize_conversation_key(conversation_key)
+        async with db.readonly() as conn:
+            async with conn.execute(
+                f"""
+                SELECT {MessageRepository._message_select("messages")} FROM messages
+                WHERE type = ? {clause} AND is_reaction = 0
+                ORDER BY received_at DESC, id DESC LIMIT ?
+                """,
+                (msg_type, norm_key, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [MessageRepository._row_to_message(row) for row in rows]
 
     @staticmethod
     async def get_ack_and_paths(message_id: int) -> tuple[int, list[MessagePath] | None]:
@@ -861,10 +921,15 @@ class MessageRepository:
 
         # Last message times for all conversations (including read ones),
         # excluding blocked incoming traffic so refresh matches live WS behavior.
+        # Reaction payload rows never bump a conversation either.
         last_time_clause, last_time_params = MessageRepository._build_blocked_incoming_clause(
             blocked_keys=blocked_keys, blocked_names=blocked_names
         )
-        last_time_where_sql = f"WHERE {last_time_clause}" if last_time_clause else ""
+        last_time_where_sql = (
+            f"WHERE is_reaction = 0 AND {last_time_clause}"
+            if last_time_clause
+            else "WHERE is_reaction = 0"
+        )
 
         # Single readonly acquisition for all 5 queries — they form one logical
         # snapshot, and holding the lock for the batch is cheaper than acquiring
@@ -881,7 +946,7 @@ class MessageRepository:
                            END) > 0 as has_mention
                 FROM messages m
                 JOIN channels c ON m.conversation_key = c.key
-                WHERE m.type = 'CHAN' AND m.outgoing = 0
+                WHERE m.type = 'CHAN' AND m.outgoing = 0 AND m.is_reaction = 0
                   AND m.received_at > COALESCE(c.last_read_at, 0)
                   AND COALESCE(c.muted, 0) = 0
                   {blocked_sql}
@@ -907,7 +972,7 @@ class MessageRepository:
                            END) > 0 as has_mention
                 FROM messages m
                 LEFT JOIN contacts ct ON m.conversation_key = ct.public_key
-                WHERE m.type = 'PRIV' AND m.outgoing = 0
+                WHERE m.type = 'PRIV' AND m.outgoing = 0 AND m.is_reaction = 0
                   AND m.received_at > COALESCE(ct.last_read_at, 0)
                   {blocked_sql}
                 GROUP BY m.conversation_key
@@ -958,7 +1023,7 @@ class MessageRepository:
                     FROM messages m
                     LEFT JOIN channels c ON m.type = 'CHAN' AND m.conversation_key = c.key
                     LEFT JOIN contacts ct ON m.type = 'PRIV' AND m.conversation_key = ct.public_key
-                    WHERE m.outgoing = 0
+                    WHERE m.outgoing = 0 AND m.is_reaction = 0
                       AND m.received_at > COALESCE(
                               CASE WHEN m.type = 'CHAN' THEN c.last_read_at ELSE ct.last_read_at END,
                               0
