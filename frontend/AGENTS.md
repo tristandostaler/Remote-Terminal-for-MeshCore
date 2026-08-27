@@ -667,6 +667,17 @@ PYTHONPATH=. uv run pytest tests/ -v
 
 This is intentional. In the sidebar, unread direct messages for actual contact conversations are treated as mention-equivalent for badge styling. That means both the Contacts section header and contact unread badges themselves use the highlighted mention-style colors for unread DMs, including when those contacts appear in Favorites. Repeaters do not inherit this rule, and channel badges still use mention styling only for real `@[name]` mentions.
 
+### The Unread sidebar section duplicates rows on purpose
+
+`Sidebar.tsx` renders an "Unread" section above every other conversation section,
+listing non-muted channels, room servers and DMs that have unread messages. Unlike
+Favorites, it does **not** remove those rows from their own section — the same
+conversation renders twice, once under Unread and once under Channels / Contacts /
+Rooms / Favorites. It is a jump list, so sections do not visibly shrink as messages
+arrive. Repeaters are excluded (their unread counts are console/status noise) and so
+are muted channels (`buildChannelRow` already zeroes their unread count). Rows carry
+`data-sidebar-section` so tests can address a specific copy.
+
 ### RawPacketList autoscroll
 
 `RawPacketList` sticks to the latest packet on every update when its `autoScroll` prop is true (the default). `RawPacketFeedView` exposes an "Autoscroll" checkbox next to the type filters (default ticked, session-only — intentionally not persisted) so users can pause scrolling to correlate older packets. Toggling it back on jumps to the bottom immediately (`autoScroll` is an effect dependency).

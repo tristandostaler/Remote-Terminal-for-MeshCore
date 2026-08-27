@@ -14,17 +14,30 @@ const SIDEBAR_SECTION_SORT_ORDERS_KEY = 'remoteterm-sidebar-section-sort-orders'
 
 export type ConversationTimes = Record<string, number>;
 // 'type-*' orders group by contact/channel type first, then apply the sub-order.
-// They are only used by the Favorites section (every other section is single-type,
-// so type grouping is meaningless there and its toggle stays recent<->alpha).
+// They are only used by the mixed-type sections (Unread, Favorites); every other
+// section is single-type, so its toggle stays recent<->alpha.
 export type SortOrder = 'recent' | 'alpha' | 'type-recent' | 'type-alpha';
-export type SidebarSortableSection = 'favorites' | 'channels' | 'contacts' | 'rooms' | 'repeaters';
+export type SidebarSortableSection =
+  | 'unread'
+  | 'favorites'
+  | 'channels'
+  | 'contacts'
+  | 'rooms'
+  | 'repeaters';
 export type SidebarSectionSortOrders = Record<SidebarSortableSection, SortOrder>;
 
-// Full cycle for the Favorites sort toggle, in click order.
-export const FAVORITES_SORT_CYCLE: SortOrder[] = ['recent', 'alpha', 'type-recent', 'type-alpha'];
+// Sections that hold more than one item type, so type grouping is meaningful there.
+export const MIXED_TYPE_SORT_SECTIONS: SidebarSortableSection[] = ['unread', 'favorites'];
 
-function coerceFavoritesSortOrder(value: unknown): SortOrder {
-  return (FAVORITES_SORT_CYCLE as unknown[]).includes(value) ? (value as SortOrder) : 'recent';
+// Full cycle for the mixed-type sections' sort toggle, in click order.
+export const MIXED_TYPE_SORT_CYCLE: SortOrder[] = ['recent', 'alpha', 'type-recent', 'type-alpha'];
+
+export function isMixedTypeSortSection(section: SidebarSortableSection): boolean {
+  return MIXED_TYPE_SORT_SECTIONS.includes(section);
+}
+
+function coerceMixedTypeSortOrder(value: unknown): SortOrder {
+  return (MIXED_TYPE_SORT_CYCLE as unknown[]).includes(value) ? (value as SortOrder) : 'recent';
 }
 
 function coerceBasicSortOrder(value: unknown): SortOrder {
@@ -102,6 +115,7 @@ export function buildSidebarSectionSortOrders(
   defaultOrder: SortOrder = 'recent'
 ): SidebarSectionSortOrders {
   return {
+    unread: defaultOrder,
     favorites: defaultOrder,
     channels: defaultOrder,
     contacts: defaultOrder,
@@ -120,8 +134,9 @@ export function loadLocalStorageSidebarSectionSortOrders(): SidebarSectionSortOr
 
     const parsed = JSON.parse(stored) as Partial<SidebarSectionSortOrders>;
     return {
-      // Only Favorites may persist the type-grouped orders.
-      favorites: coerceFavoritesSortOrder(parsed.favorites),
+      // Only the mixed-type sections may persist the type-grouped orders.
+      unread: coerceMixedTypeSortOrder(parsed.unread),
+      favorites: coerceMixedTypeSortOrder(parsed.favorites),
       channels: coerceBasicSortOrder(parsed.channels),
       contacts: coerceBasicSortOrder(parsed.contacts),
       rooms: coerceBasicSortOrder(parsed.rooms),

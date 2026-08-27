@@ -25,10 +25,11 @@ import {
 } from '../types';
 import {
   buildSidebarSectionSortOrders,
-  FAVORITES_SORT_CYCLE,
   getStateKey,
+  isMixedTypeSortSection,
   loadLegacyLocalStorageSortOrder,
   loadLocalStorageSidebarSectionSortOrders,
+  MIXED_TYPE_SORT_CYCLE,
   saveLocalStorageSidebarSectionSortOrders,
   type ConversationTimes,
   type SidebarSectionSortOrders,
@@ -43,11 +44,13 @@ import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { cn } from '@/lib/utils';
 
-type FavoriteItem = { type: 'channel'; channel: Channel } | { type: 'contact'; contact: Contact };
+// A row in one of the mixed-type sections (Unread, Favorites), which list
+// channels and contacts side by side.
+type SidebarItem = { type: 'channel'; channel: Channel } | { type: 'contact'; contact: Contact };
 
-// Grouping order for the Favorites "by type" sorts. Mirrors the standalone sidebar
-// section order: Channels, Contacts (clients/sensors/unknown), Rooms, Repeaters.
-function favoriteTypeRank(item: FavoriteItem): number {
+// Grouping order for the mixed-type sections' "by type" sorts. Mirrors the standalone
+// sidebar section order: Channels, Contacts (clients/sensors/unknown), Rooms, Repeaters.
+function itemTypeRank(item: SidebarItem): number {
   if (item.type === 'channel') return 0;
   switch (item.contact.type) {
     case CONTACT_TYPE_ROOM:
@@ -59,12 +62,12 @@ function favoriteTypeRank(item: FavoriteItem): number {
   }
 }
 
-// The next order when the section's sort toggle is clicked. Favorites cycles
-// through all four orders; every other (single-type) section flips recent<->alpha.
+// The next order when the section's sort toggle is clicked. The mixed-type sections
+// cycle through all four orders; every other (single-type) section flips recent<->alpha.
 function nextSortOrder(section: SidebarSortableSection, current: SortOrder): SortOrder {
-  if (section === 'favorites') {
-    const idx = FAVORITES_SORT_CYCLE.indexOf(current);
-    return FAVORITES_SORT_CYCLE[(idx + 1) % FAVORITES_SORT_CYCLE.length];
+  if (isMixedTypeSortSection(section)) {
+    const idx = MIXED_TYPE_SORT_CYCLE.indexOf(current);
+    return MIXED_TYPE_SORT_CYCLE[(idx + 1) % MIXED_TYPE_SORT_CYCLE.length];
   }
   return current === 'alpha' ? 'recent' : 'alpha';
 }
@@ -99,8 +102,13 @@ function sortOrderDescription(order: SortOrder): string {
   }
 }
 
+/** Which sidebar section a row is rendered under. Rows may appear in two of them:
+ *  the Unread section mirrors rows that also live in their own type section. */
+type SidebarSection = 'unread' | 'favorites' | 'channels' | 'contacts' | 'rooms' | 'repeaters';
+
 type ConversationRow = {
   key: string;
+  section: SidebarSection;
   type: 'channel' | 'contact';
   id: string;
   name: string;
@@ -113,6 +121,7 @@ type ConversationRow = {
 
 type CollapseState = {
   tools: boolean;
+  unread: boolean;
   favorites: boolean;
   channels: boolean;
   contacts: boolean;
@@ -124,6 +133,7 @@ const SIDEBAR_COLLAPSE_STATE_KEY = 'remoteterm-sidebar-collapse-state';
 
 const DEFAULT_COLLAPSE_STATE: CollapseState = {
   tools: false,
+  unread: false,
   favorites: false,
   channels: false,
   contacts: false,
@@ -138,6 +148,7 @@ function loadCollapsedState(): CollapseState {
     const parsed = JSON.parse(raw) as Partial<CollapseState>;
     return {
       tools: parsed.tools ?? DEFAULT_COLLAPSE_STATE.tools,
+      unread: parsed.unread ?? DEFAULT_COLLAPSE_STATE.unread,
       favorites: parsed.favorites ?? DEFAULT_COLLAPSE_STATE.favorites,
       channels: parsed.channels ?? DEFAULT_COLLAPSE_STATE.channels,
       contacts: parsed.contacts ?? DEFAULT_COLLAPSE_STATE.contacts,
@@ -207,6 +218,7 @@ export function Sidebar({
   const [sectionSortOrders, setSectionSortOrders] = useState(initialSectionSortOrders);
   const initialCollapsedState = useMemo(loadCollapsedState, []);
   const [toolsCollapsed, setToolsCollapsed] = useState(initialCollapsedState.tools);
+  const [unreadCollapsed, setUnreadCollapsed] = useState(initialCollapsedState.unread);
   const [favoritesCollapsed, setFavoritesCollapsed] = useState(initialCollapsedState.favorites);
   const [channelsCollapsed, setChannelsCollapsed] = useState(initialCollapsedState.channels);
   const [contactsCollapsed, setContactsCollapsed] = useState(initialCollapsedState.contacts);
@@ -365,8 +377,8 @@ export function Sidebar({
     [getContactHeardTime]
   );
 
-  const getFavoriteItemName = useCallback(
-    (item: FavoriteItem) =>
+  const getSidebarItemName = useCallback(
+    (item: SidebarItem) =>
       item.type === 'channel'
         ? item.channel.name
         : getContactDisplayName(
@@ -377,13 +389,13 @@ export function Sidebar({
     []
   );
 
-  const sortFavoriteItemsByOrder = useCallback(
-    (items: FavoriteItem[], order: SortOrder) => {
+  const sortMixedItemsByOrder = useCallback(
+    (items: SidebarItem[], order: SortOrder) => {
       const typeGrouped = order === 'type-recent' || order === 'type-alpha';
       const byRecent = order === 'recent' || order === 'type-recent';
       return [...items].sort((a, b) => {
         if (typeGrouped) {
-          const rankDiff = favoriteTypeRank(a) - favoriteTypeRank(b);
+          const rankDiff = itemTypeRank(a) - itemTypeRank(b);
           if (rankDiff !== 0) return rankDiff;
         }
 
@@ -401,10 +413,10 @@ export function Sidebar({
           if (!timeA && timeB) return 1;
         }
 
-        return getFavoriteItemName(a).localeCompare(getFavoriteItemName(b));
+        return getSidebarItemName(a).localeCompare(getSidebarItemName(b));
       });
     },
-    [getContactRecentTime, getFavoriteItemName, getLastMessageTime]
+    [getContactRecentTime, getSidebarItemName, getLastMessageTime]
   );
 
   // Split non-repeater contacts and repeater contacts into separate sorted lists
@@ -487,6 +499,7 @@ export function Sidebar({
       if (!collapseSnapshotRef.current) {
         collapseSnapshotRef.current = {
           tools: toolsCollapsed,
+          unread: unreadCollapsed,
           favorites: favoritesCollapsed,
           channels: channelsCollapsed,
           contacts: contactsCollapsed,
@@ -497,6 +510,7 @@ export function Sidebar({
 
       if (
         toolsCollapsed ||
+        unreadCollapsed ||
         favoritesCollapsed ||
         channelsCollapsed ||
         contactsCollapsed ||
@@ -504,6 +518,7 @@ export function Sidebar({
         repeatersCollapsed
       ) {
         setToolsCollapsed(false);
+        setUnreadCollapsed(false);
         setFavoritesCollapsed(false);
         setChannelsCollapsed(false);
         setContactsCollapsed(false);
@@ -517,6 +532,7 @@ export function Sidebar({
       const prev = collapseSnapshotRef.current;
       collapseSnapshotRef.current = null;
       setToolsCollapsed(prev.tools);
+      setUnreadCollapsed(prev.unread);
       setFavoritesCollapsed(prev.favorites);
       setChannelsCollapsed(prev.channels);
       setContactsCollapsed(prev.contacts);
@@ -526,6 +542,7 @@ export function Sidebar({
   }, [
     isSearching,
     toolsCollapsed,
+    unreadCollapsed,
     favoritesCollapsed,
     channelsCollapsed,
     contactsCollapsed,
@@ -538,6 +555,7 @@ export function Sidebar({
 
     const state: CollapseState = {
       tools: toolsCollapsed,
+      unread: unreadCollapsed,
       favorites: favoritesCollapsed,
       channels: channelsCollapsed,
       contacts: contactsCollapsed,
@@ -553,11 +571,34 @@ export function Sidebar({
   }, [
     isSearching,
     toolsCollapsed,
+    unreadCollapsed,
     favoritesCollapsed,
     channelsCollapsed,
     contactsCollapsed,
     roomsCollapsed,
     repeatersCollapsed,
+  ]);
+
+  // Mirror list of everything with unread messages: non-muted channels, room servers
+  // and DMs. Repeaters are excluded — their unread counts are console/status noise.
+  // Rows here are duplicates: each one still renders under its own type section.
+  const unreadItems = useMemo(() => {
+    const items: SidebarItem[] = [
+      ...filteredChannels
+        .filter((c) => !c.muted && (unreadCounts[getStateKey('channel', c.key)] || 0) > 0)
+        .map((channel) => ({ type: 'channel' as const, channel })),
+      ...[...filteredNonRepeaterContacts, ...filteredRooms]
+        .filter((c) => (unreadCounts[getStateKey('contact', c.public_key)] || 0) > 0)
+        .map((contact) => ({ type: 'contact' as const, contact })),
+    ];
+    return sortMixedItemsByOrder(items, sectionSortOrders.unread);
+  }, [
+    filteredChannels,
+    filteredNonRepeaterContacts,
+    filteredRooms,
+    sectionSortOrders.unread,
+    sortMixedItemsByOrder,
+    unreadCounts,
   ]);
 
   // Separate favorites from regular items, and build combined favorites list
@@ -579,13 +620,13 @@ export function Sidebar({
     const nonFavRooms = filteredRooms.filter((c) => !c.favorite);
     const nonFavRepeaters = filteredRepeaters.filter((c) => !c.favorite);
 
-    const items: FavoriteItem[] = [
+    const items: SidebarItem[] = [
       ...favChannels.map((channel) => ({ type: 'channel' as const, channel })),
       ...favContacts.map((contact) => ({ type: 'contact' as const, contact })),
     ];
 
     return {
-      favoriteItems: sortFavoriteItemsByOrder(items, sectionSortOrders.favorites),
+      favoriteItems: sortMixedItemsByOrder(items, sectionSortOrders.favorites),
       nonFavoriteChannels: nonFavChannels,
       nonFavoriteContacts: nonFavContacts,
       nonFavoriteRooms: nonFavRooms,
@@ -597,11 +638,12 @@ export function Sidebar({
     filteredRooms,
     filteredRepeaters,
     sectionSortOrders.favorites,
-    sortFavoriteItemsByOrder,
+    sortMixedItemsByOrder,
   ]);
 
-  const buildChannelRow = (channel: Channel, keyPrefix: string): ConversationRow => ({
-    key: `${keyPrefix}-${channel.key}`,
+  const buildChannelRow = (channel: Channel, section: SidebarSection): ConversationRow => ({
+    key: `${section}-channel-${channel.key}`,
+    section,
     type: 'channel',
     id: channel.key,
     name: channel.name,
@@ -611,8 +653,9 @@ export function Sidebar({
     muted: channel.muted,
   });
 
-  const buildContactRow = (contact: Contact, keyPrefix: string): ConversationRow => ({
-    key: `${keyPrefix}-${contact.public_key}`,
+  const buildContactRow = (contact: Contact, section: SidebarSection): ConversationRow => ({
+    key: `${section}-contact-${contact.public_key}`,
+    section,
     type: 'contact',
     id: contact.public_key,
     name: getContactDisplayName(contact.name, contact.public_key, contact.last_advert),
@@ -633,6 +676,7 @@ export function Sidebar({
     return (
       <div
         key={row.key}
+        data-sidebar-section={row.section}
         className={cn(
           'px-3 py-2 cursor-pointer flex items-center gap-2 border-l-2 border-transparent hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
           isActive(row.type, row.id) && 'bg-accent border-l-primary',
@@ -729,21 +773,30 @@ export function Sidebar({
 
   const sectionHasMention = (rows: ConversationRow[]): boolean => rows.some((row) => row.isMention);
 
+  const unreadRows = unreadItems.map((item) =>
+    item.type === 'channel'
+      ? buildChannelRow(item.channel, 'unread')
+      : buildContactRow(item.contact, 'unread')
+  );
   const favoriteRows = favoriteItems.map((item) =>
     item.type === 'channel'
-      ? buildChannelRow(item.channel, 'fav-chan')
-      : buildContactRow(item.contact, 'fav-contact')
+      ? buildChannelRow(item.channel, 'favorites')
+      : buildContactRow(item.contact, 'favorites')
   );
-  const channelRows = nonFavoriteChannels.map((channel) => buildChannelRow(channel, 'chan'));
-  const contactRows = nonFavoriteContacts.map((contact) => buildContactRow(contact, 'contact'));
-  const roomRows = nonFavoriteRooms.map((contact) => buildContactRow(contact, 'room'));
-  const repeaterRows = nonFavoriteRepeaters.map((contact) => buildContactRow(contact, 'repeater'));
+  const channelRows = nonFavoriteChannels.map((channel) => buildChannelRow(channel, 'channels'));
+  const contactRows = nonFavoriteContacts.map((contact) => buildContactRow(contact, 'contacts'));
+  const roomRows = nonFavoriteRooms.map((contact) => buildContactRow(contact, 'rooms'));
+  const repeaterRows = nonFavoriteRepeaters.map((contact) =>
+    buildContactRow(contact, 'repeaters')
+  );
 
+  const unreadSectionCount = getSectionUnreadCount(unreadRows);
   const favoritesUnreadCount = getSectionUnreadCount(favoriteRows);
   const channelsUnreadCount = getSectionUnreadCount(channelRows);
   const contactsUnreadCount = getSectionUnreadCount(contactRows);
   const roomsUnreadCount = getSectionUnreadCount(roomRows);
   const repeatersUnreadCount = getSectionUnreadCount(repeaterRows);
+  const unreadSectionHasMention = sectionHasMention(unreadRows);
   const favoritesHasMention = sectionHasMention(favoriteRows);
   const channelsHasMention = sectionHasMention(channelRows);
   const toolRows = !query
@@ -987,6 +1040,22 @@ export function Sidebar({
             <CheckCheck className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             <span className="flex-1 truncate text-muted-foreground">Mark all as read</span>
           </div>
+        )}
+
+        {/* Unread */}
+        {unreadItems.length > 0 && (
+          <>
+            {renderSectionHeader(
+              'Unread',
+              unreadCollapsed,
+              () => setUnreadCollapsed((prev) => !prev),
+              'unread',
+              unreadSectionCount,
+              unreadSectionHasMention
+            )}
+            {(isSearching || !unreadCollapsed) &&
+              unreadRows.map((row) => renderConversationRow(row))}
+          </>
         )}
 
         {/* Favorites */}
