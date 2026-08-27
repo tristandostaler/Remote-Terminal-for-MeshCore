@@ -1,6 +1,6 @@
 name: "RemoteTerm for MeshCore Advanced"
 description: "RemoteTerm for MeshCore Advanced - MeshCore web client with bots, compression and images"
-version: "1.14.8"
+version: "1.15.0"
 slug: "remoteterm"
 init: false
 arch:

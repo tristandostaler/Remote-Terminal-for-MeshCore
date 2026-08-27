@@ -166,6 +166,16 @@ async def call_legacy(
     Reuses :func:`app.fanout.bot_exec.execute_bot_code` verbatim — same
     signature analysis, same call styles, same return coercion — so migrated
     fanout bots behave exactly as before.
+
+    A room post is handed over as its room: ``channel_key``/``channel_name``
+    carry the room contact rather than ``None``. The legacy signature has no
+    room of its own and its two kinds are "DM" and "everything else", so a bot
+    written against it reasonably reads ``not is_dm`` as "``channel_key`` is a
+    string" — passing None there turns a working bot into a silent one, since
+    the legacy executor swallows the TypeError. The reply still routes through
+    ``ctx``, which sends it into the room either way. Decorated bots keep
+    ``channel_key`` None on purpose: they have ``msg.room_key`` and a
+    ``ctx.send`` that must never mistake a room for a channel.
     """
     from app.fanout.bot_exec import execute_bot_code
 
@@ -178,8 +188,8 @@ async def call_legacy(
             msg.sender_key,
             msg.text,
             msg.is_dm,
-            msg.channel_key,
-            msg.channel_name,
+            msg.room_key or msg.channel_key,
+            msg.room_name or msg.channel_name,
             msg.sender_timestamp,
             msg.path,
             msg.is_outgoing,

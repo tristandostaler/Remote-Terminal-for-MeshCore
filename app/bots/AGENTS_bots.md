@@ -11,8 +11,9 @@ operators).
 
 - `api.py` — the authoring surface (`from remoteterm import bot` + `BotContext`).
   Decorators register handlers into a collector while `runtime.load_bot_code`
-  exec()s the source. `BotContext` carries sends (`reply`/`send`/`send_dm`),
-  image sends (`reply_image`/`send_image`/`send_dm_image`), `settings`,
+  exec()s the source. `BotContext` carries sends
+  (`reply`/`send`/`send_dm`/`send_room`), image sends
+  (`reply_image`/`send_image`/`send_dm_image`/`send_room_image`), `settings`,
   persistent `state`, `http` (httpx), `geocode`, i18n (`t`), `mesh_stats`,
   `get_enabled_bots`, logging. Test runs capture sends instead of transmitting.
   - **Image sends** take encoded bytes (anything Pillow opens — e.g. straight
@@ -26,6 +27,30 @@ operators).
 - `runtime.py` — load/validate source. Two styles: decorated handlers, or a
   legacy module-level `def bot(...)` (auto-wrapped; executed via the original
   `app/fanout/bot_exec.execute_bot_code`, so migrated bots behave identically).
+- **Rooms.** A room-server post reaches us as a DM *from the room's contact*,
+  with the author carried in the signed sender prefix (`dm_ingest` resolves it
+  into `sender_key`/`sender_name`). `_build_message` looks the conversation
+  contact up and, when it is `CONTACT_TYPE_ROOM`, hands the handler
+  `is_room=True` + `room_key`/`room_name` with **`is_dm` False and
+  `channel_key` None** — a room is its own conversation kind, so a DM-only bot
+  (`if not msg.is_dm: ...`) stays out of rooms and a channel-scoped one is not
+  silenced by its allow-list. `ctx.reply` answers **into the room** (an ordinary
+  DM send to the room contact, full 156-byte budget, no `"<name>: "` framing),
+  never to the author: the room asked, the room gets the answer, and a poster we
+  only know by key prefix would not be DM-able anyway. The gate is `scope.rooms` — the same
+  `all` / `none` / `{only|except: [keys]}` shape as `scope.channels`, over room
+  contact keys instead of channel keys, so an operator can answer in one room and
+  ignore another. It is separate from `respond_to_dms` because a room reply is
+  public to everyone logged in. A scope with **no `rooms` key means every room**
+  (scopes written before rooms existed say nothing about them), and both halves
+  go through one `_selection_allows` matcher, which compares case-insensitively:
+  channel keys are stored upper-case and room contact keys lower. Posts whose `sender_key` is *our* node are
+  dropped — a room relays every post to every member, us included, so reacting
+  to our own reply is how two bots end up answering each other forever. Room
+  posts arrive in **bursts**: the room poll logs in and drains everything posted
+  since the last sync, so a first sync with a busy room feeds the engine a
+  backlog all at once. Only the global/per-user limiters stand between that and
+  a run of stale replies.
 - `engine.py` — the singleton `bot_engine`. Fed `message` and `contact` events
   from `websocket.broadcast_event` (same tap as the fanout bus). Keyword
   triggers pass banned/hops/scope/prefix/mention/admin gates plus global,
@@ -76,8 +101,9 @@ operators).
 
 ## Data model
 
-`bots` (code, settings_schema, settings, scope, limits, ui_triggers, state,
-builtin lineage), `bot_runs` (bounded history, feeds the dashboard),
+`bots` (code, settings_schema, settings, `scope` = `{channels, rooms}` plus the
+`respond_to_dms` flag, limits, ui_triggers, state, builtin lineage),
+`bot_runs` (bounded history, feeds the dashboard),
 `bot_schedules` (standalone cron messages), `bot_feeds`, and the singleton
 `bot_engine_settings` (prefix, mention mode, rate limits, language, moderation,
 admin users). Repository: `app/repository/bots.py`.
@@ -109,7 +135,14 @@ token gate only.
 ## Invariants worth keeping
 
 - Legacy `def bot(**kwargs)` sources must keep running unchanged (migration
-  064 moved them here verbatim).
+  064 moved them here verbatim). Their signature has no room of its own and its
+  two kinds are "DM" and "everything else", so `call_legacy` hands a room post
+  over as its room: `channel_key`/`channel_name` carry the room contact rather
+  than `None`. A bot written before rooms reads `not is_dm` as "`channel_key` is
+  a string", and `execute_bot_code` swallows the TypeError — the bot would just
+  go quiet, with nothing in Bots › Logs. Decorated bots keep `channel_key` None
+  on purpose: they have `msg.room_key`, and `ctx.send` must never mistake a room
+  for a channel.
 - Seeded bots ship disabled — enabling what a node answers is an operator act.
 - New and seeded bots are scoped to `#bot` / `#bots` + DMs, never "all
   channels": a command bot on Public is noise for the whole mesh. A built-in may
@@ -117,6 +150,12 @@ token gate only.
   `{"channels": "all"}`. Migration 071 retargeted existing bots that were still
   at the old "all" default **and still disabled** — an enabled or hand-scoped
   bot is a decision and was left alone.
+- Rooms **do** default to all of them, unlike channels. There is no `#bot`
+  convention for rooms and no Public to fall onto: a room is a space the
+  operator deliberately logged this node into, and every seeded bot ships
+  disabled anyway. `default_bot_scope()` therefore omits `rooms` entirely and
+  the engine reads a missing key as `"all"`, which keeps the four-way default
+  sync (`app/bot_scope.py`) about channels alone.
 - Newly installed SMS bots are `admin_only`; existing installations retain
   their stored permission flag during version refreshes.
 - `ui_triggers` only feed handlers declared with **no-argument** decorators

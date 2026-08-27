@@ -54,11 +54,14 @@ class TestMigration071:
             async with conn.execute("SELECT id, scope FROM bots") as cursor:
                 after = {row["id"]: json.loads(row["scope"]) for row in await cursor.fetchall()}
 
+            # Only the channels half is 071's business. Later migrations add
+            # sibling keys to the same dict (080 adds `rooms`), so compare that
+            # half rather than the whole scope.
             assert is_default_bot_scope(after["untouched"])
-            assert after["in-service"] == {"channels": "all"}
-            assert after["hand-scoped"] == {"channels": {"only": ["A" * 32]}}
-            assert after["muted"] == {"channels": "none"}
-            assert after["excepting"] == {"channels": {"except": ["B" * 32]}}
+            assert after["in-service"]["channels"] == "all"
+            assert after["hand-scoped"]["channels"] == {"only": ["A" * 32]}
+            assert after["muted"]["channels"] == "none"
+            assert after["excepting"]["channels"] == {"except": ["B" * 32]}
         finally:
             await conn.close()
 
@@ -80,7 +83,7 @@ class TestMigration071:
             async with conn.execute("SELECT scope FROM bots WHERE id = 'wx'") as cursor:
                 row = await cursor.fetchone()
             assert row is not None
-            assert json.loads(row["scope"]) == default_bot_scope()
+            assert json.loads(row["scope"])["channels"] == default_bot_scope()["channels"]
         finally:
             await conn.close()
 

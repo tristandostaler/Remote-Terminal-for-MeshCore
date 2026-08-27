@@ -2,13 +2,13 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react
 import { Bot as BotIcon, Pencil, Plus, Search as SearchIcon } from 'lucide-react';
 
 import { api } from '../../api';
-import type { Bot, BotEngineStatus, Channel, Contact } from '../../types';
+import type { Bot, BotEngineStatus, BotScopeSelection, Channel, Contact } from '../../types';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Switch } from '../ui/switch';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
 import { toast } from '../ui/sonner';
-import { scopeChannelLabel } from '../../utils/botScope';
+import { scopeChannelLabel, scopeRoomLabel } from '../../utils/botScope';
 import { cn } from '@/lib/utils';
 import { BotEditor } from './BotEditor';
 import { NewBotDialogBody } from './NewBotDialog';
@@ -108,27 +108,51 @@ function botStatusDot(bot: Bot): { className: string; label: string } {
   return { className: 'bg-status-connected', label: 'Running' };
 }
 
-function describeChannelList(keys: string[], known: Channel[]): string {
-  const labels = keys.map((key) => scopeChannelLabel(key, known));
+function describeKeyList(keys: string[], label: (key: string) => string): string {
+  const labels = keys.map(label);
   if (labels.length <= 3) return labels.join(', ');
   return `${labels.slice(0, 2).join(', ')} +${labels.length - 2} more`;
 }
 
-function describeScope(bot: Bot, known: Channel[]): string {
-  const channels = bot.scope?.channels ?? 'all';
-  let channelPart = 'All channels';
-  if (channels === 'none') {
-    channelPart = 'No channels';
-  } else if (typeof channels === 'object') {
-    if (channels.only) {
-      channelPart = channels.only.length
-        ? `Only ${describeChannelList(channels.only, known)}`
+function describeChannels(selection: BotScopeSelection | undefined, known: Channel[]): string {
+  const label = (key: string) => scopeChannelLabel(key, known);
+  if (selection === 'none') return 'No channels';
+  if (typeof selection === 'object' && selection !== null) {
+    if (selection.only) {
+      return selection.only.length
+        ? `Only ${describeKeyList(selection.only, label)}`
         : 'No channels';
-    } else if (channels.except) {
-      channelPart = `All except ${describeChannelList(channels.except, known)}`;
     }
+    if (selection.except) return `All except ${describeKeyList(selection.except, label)}`;
   }
-  return bot.respond_to_dms ? `${channelPart} + DMs` : channelPart;
+  return 'All channels';
+}
+
+/**
+ * The rooms half of the summary, or null when the bot answers in none of them —
+ * that is worth leaving out rather than spelling out next to what it does do.
+ * A missing selection is every room, matching how the backend reads it.
+ */
+function describeRooms(
+  selection: BotScopeSelection | undefined,
+  contacts: Contact[]
+): string | null {
+  const label = (key: string) => scopeRoomLabel(key, contacts);
+  if (selection === 'none') return null;
+  if (typeof selection === 'object' && selection !== null) {
+    if (selection.only) {
+      return selection.only.length ? `rooms: ${describeKeyList(selection.only, label)}` : null;
+    }
+    if (selection.except) return `rooms except ${describeKeyList(selection.except, label)}`;
+  }
+  return 'rooms';
+}
+
+function describeScope(bot: Bot, known: Channel[], contacts: Contact[]): string {
+  const channelPart = describeChannels(bot.scope?.channels, known);
+  const rooms = describeRooms(bot.scope?.rooms, contacts);
+  const extras = [...(bot.respond_to_dms ? ['DMs'] : []), ...(rooms ? [rooms] : [])];
+  return extras.length ? `${channelPart} + ${extras.join(' + ')}` : channelPart;
 }
 
 function describeLimits(bot: Bot): string {
@@ -237,6 +261,7 @@ export function BotsView({ botId, channels, contacts, onOpenBot, onCloseBot }: B
       <BotEditor
         botId={botId}
         channels={channels}
+        contacts={contacts}
         onBack={() => {
           onCloseBot();
           void refresh();
@@ -495,7 +520,7 @@ export function BotsView({ botId, channels, contacts, onOpenBot, onCloseBot }: B
                   <div className="text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium mb-1">
                     Scope
                   </div>
-                  <div className="text-xs">{describeScope(selectedBot, channels)}</div>
+                  <div className="text-xs">{describeScope(selectedBot, channels, contacts)}</div>
                 </div>
                 <div className="flex gap-4">
                   <div>

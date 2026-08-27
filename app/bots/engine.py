@@ -13,6 +13,10 @@ Ordering / limits (engine settings, Bots › Engine tab):
 * catch-all ``on_message`` handlers and legacy ``def bot(...)`` bots only pass
   moderation/scope gates — they see every in-scope message, exactly like the
   historical fanout bots, and do their own filtering;
+* room-server posts are their own conversation kind (``msg.is_room``), gated by
+  the bot's ``scope.rooms`` selection — the same shape as ``scope.channels``, so
+  a bot can answer in one room and ignore another — and answered back into the
+  room rather than to whoever posted;
 * every outgoing bot send is serialized behind a TX-spacing lock.
 """
 
@@ -327,15 +331,38 @@ class BotEngine:
         channel_key: str | None = None
         channel_name: str | None = None
         sender_key: str | None = None
+        is_room = False
+        room_key: str | None = None
+        room_name: str | None = None
         if is_dm:
-            sender_key = data.get("sender_key") or conversation_key
-            if is_outgoing:
-                sender_name = None
-            elif sender_name is None:
-                from app.repository import ContactRepository
+            from app.models import CONTACT_TYPE_ROOM
+            from app.repository import ContactRepository
 
-                contact = await ContactRepository.get_by_key(conversation_key)
-                sender_name = contact.name if contact else None
+            contact = await ContactRepository.get_by_key(conversation_key)
+            if contact is not None and contact.type == CONTACT_TYPE_ROOM:
+                # A room-server post rides the DM path -- the conversation is the
+                # room, and ``sender_key``/``sender_name`` are whoever posted,
+                # resolved from the signed sender prefix at ingest. It is not a
+                # DM: answering the poster privately would leave the room without
+                # the answer it asked for.
+                is_dm = False
+                is_room = True
+                room_key = conversation_key
+                room_name = contact.name
+                # Never fall back to the conversation key the way a DM does: an
+                # unsigned post is attributed to the room itself at ingest, and
+                # carrying that as the author would let a bot DM the room
+                # believing it is the person who spoke.
+                sender_key = data.get("sender_key")
+                if is_outgoing:
+                    sender_name = None
+                    sender_key = None
+            else:
+                sender_key = data.get("sender_key") or conversation_key
+                if is_outgoing:
+                    sender_name = None
+                elif sender_name is None:
+                    sender_name = contact.name if contact else None
         else:
             channel_key = conversation_key
             sender_key = data.get("sender_key")
@@ -371,6 +398,9 @@ class BotEngine:
             is_dm=is_dm,
             channel_key=channel_key,
             channel_name=channel_name,
+            is_room=is_room,
+            room_key=room_key,
+            room_name=room_name,
             sender_timestamp=data.get("sender_timestamp"),
             path=path_value if isinstance(path_value, str) else None,
             path_bytes_per_hop=path_bytes_per_hop,
@@ -388,6 +418,19 @@ class BotEngine:
             if isinstance(info, dict):
                 name = info.get("name")
                 return str(name) if name else None
+        except Exception:
+            return None
+        return None
+
+    def _self_key(self) -> str | None:
+        """This node's own public key, lower-cased — used to ignore our echoes."""
+        try:
+            from app.services.radio_runtime import radio_runtime
+
+            info = getattr(radio_runtime.meshcore, "self_info", None)
+            if isinstance(info, dict):
+                key = info.get("public_key")
+                return str(key).lower() if key else None
         except Exception:
             return None
         return None
@@ -414,23 +457,37 @@ class BotEngine:
             had_prefix = True
         return stripped, had_prefix, had_mention
 
+    @staticmethod
+    def _selection_allows(selection: Any, key: str | None) -> bool:
+        """Does an ``all`` / ``none`` / ``{only|except: [...]}`` selection admit ``key``?
+
+        Shared by the channel and room scopes, which are the same shape over
+        different key spaces (32-hex channel keys, 64-hex room contact keys).
+        Matching is case-insensitive because the two spaces disagree on case.
+        """
+        if selection == "all":
+            return True
+        if selection == "none":
+            return False
+        if isinstance(selection, dict):
+            wanted = (key or "").upper()
+            only = selection.get("only")
+            if isinstance(only, list):
+                return wanted in {str(k).upper() for k in only}
+            except_list = selection.get("except")
+            if isinstance(except_list, list):
+                return wanted not in {str(k).upper() for k in except_list}
+        return True
+
     def _scope_allows(self, bot: Bot, msg: BotMessage) -> bool:
+        scope = bot.scope if isinstance(bot.scope, dict) else {}
+        if msg.is_room:
+            # A scope written before rooms existed says nothing about them, and
+            # the operator picks rooms from a list the same way as channels.
+            return self._selection_allows(scope.get("rooms", "all"), msg.room_key)
         if msg.is_dm:
             return bot.respond_to_dms
-        channels = bot.scope.get("channels", "all") if isinstance(bot.scope, dict) else "all"
-        if channels == "all":
-            return True
-        if channels == "none":
-            return False
-        if isinstance(channels, dict):
-            key = (msg.channel_key or "").upper()
-            only = channels.get("only")
-            if isinstance(only, list):
-                return key in {str(k).upper() for k in only}
-            except_list = channels.get("except")
-            if isinstance(except_list, list):
-                return key not in {str(k).upper() for k in except_list}
-        return True
+        return self._selection_allows(scope.get("channels", "all"), msg.channel_key)
 
     def _is_admin_sender(self, msg: BotMessage) -> bool:
         if not msg.sender_key:
@@ -452,6 +509,11 @@ class BotEngine:
             return
 
         if is_banned_sender(msg.sender_name, self.settings.banned_users):
+            return
+        if msg.is_room and msg.sender_key and msg.sender_key.lower() == self._self_key():
+            # A room server relays every post to everyone logged in, us included,
+            # so our own reply can come back as an inbound post. Reacting to it
+            # would let two bots answer each other forever.
             return
         if (
             path_hops is not None
@@ -642,6 +704,8 @@ class BotEngine:
             origin_is_dm=bool(msg.is_dm) if msg else False,
             origin_sender_key=msg.sender_key if msg else None,
             origin_channel_key=msg.channel_key if msg else None,
+            origin_is_room=bool(msg.is_room) if msg else False,
+            origin_room_key=msg.room_key if msg else None,
             locale=locale,
             is_test=is_test,
             log_fn=_log,
@@ -718,8 +782,8 @@ class BotEngine:
                 trigger=trigger,
                 sender_name=msg.sender_name if msg else None,
                 sender_key=msg.sender_key if msg else None,
-                channel_key=msg.channel_key if msg else None,
-                channel_name=msg.channel_name if msg else None,
+                channel_key=(msg.room_key or msg.channel_key) if msg else None,
+                channel_name=(msg.room_name or msg.channel_name) if msg else None,
                 is_dm=bool(msg.is_dm) if msg else False,
                 result=result,
                 replies=ctx.replies_sent,
@@ -729,7 +793,12 @@ class BotEngine:
             logger.warning("Failed to record bot run for %s", bot.name, exc_info=True)
 
         if result == "replied":
-            where = "DM" if (msg and msg.is_dm) else (msg.channel_name if msg else trigger)
+            if msg and msg.is_dm:
+                where = "DM"
+            elif msg and msg.is_room:
+                where = f"room {msg.room_name or (msg.room_key or '')[:8]}"
+            else:
+                where = msg.channel_name if msg else trigger
             self.log(
                 "INFO",
                 bot.name,
@@ -922,14 +991,28 @@ class BotEngine:
         except BotCodeError as exc:
             return BotTestResponse(matched=False, error=f"code error: {exc}")
 
+        # A room is its own conversation kind and wins over is_dm: the simulated
+        # reply target has to match what a real room post would produce, or the
+        # Test tab shows the bot answering somewhere it never would.
+        is_room = request.is_room
+        is_dm = request.is_dm and not is_room
+        conversational = is_dm or is_room
         msg = BotMessage(
             text=request.text,
             sender_name=request.sender_name,
             sender_key=request.sender_key,
-            is_dm=request.is_dm,
+            is_dm=is_dm,
             channel_key=request.channel_key
-            or ("" if request.is_dm else "TESTCHANNEL000000000000000000000"),
-            channel_name=request.channel_name or (None if request.is_dm else "#test"),
+            or ("" if conversational else "TESTCHANNEL000000000000000000000"),
+            channel_name=request.channel_name or (None if conversational else "#test"),
+            is_room=is_room,
+            room_key=(
+                request.room_key
+                or "TESTROOM00000000000000000000000000000000000000000000000000000000"
+            )
+            if is_room
+            else None,
+            room_name=(request.room_name or "#test room") if is_room else None,
         )
 
         loaded = LoadedBot(record=record, code=code)
@@ -1000,9 +1083,9 @@ class BotEngine:
                 trigger=trigger or "test",
                 sender_name=request.sender_name,
                 sender_key=request.sender_key,
-                channel_key=msg.channel_key,
-                channel_name=msg.channel_name,
-                is_dm=request.is_dm,
+                channel_key=msg.room_key or msg.channel_key,
+                channel_name=msg.room_name or msg.channel_name,
+                is_dm=msg.is_dm,
                 result="error" if error else ("replied" if ctx.captured_sends else "no_reply"),
                 replies=len(ctx.captured_sends),
                 error=error,

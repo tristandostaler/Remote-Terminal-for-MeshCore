@@ -15,7 +15,8 @@ dict (read by exec'ing the source through the normal loader):
         "settings_schema": [...],      # optional; drives the Settings tab
         "settings": {...},             # optional defaults for ctx.settings
         "respond_to_dms": True,        # optional (default True)
-        "scope": {...},                # optional; default is #bot/#bots + DMs
+        "scope": {...},                # optional; {"channels":..., "rooms":...},
+                                       # default is #bot/#bots + DMs + all rooms
         "admin_only": False,           # optional
         "cooldown_seconds": 0,         # optional
         "per_user_cooldown_seconds": 0,

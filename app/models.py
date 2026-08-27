@@ -1783,6 +1783,9 @@ class Bot(BaseModel):
     enabled: bool = False
     admin_only: bool = False
     respond_to_dms: bool = True
+    # ``{"channels": ..., "rooms": ...}``, each ``"all"`` / ``"none"`` /
+    # ``{"only"|"except": [keys]}``. A missing ``rooms`` key means every room:
+    # scopes written before rooms existed say nothing about them.
     scope: dict = Field(default_factory=default_bot_scope)
     cooldown_seconds: float = 0
     per_user_cooldown_seconds: float = 0
@@ -1837,10 +1840,13 @@ class BotUpdateRequest(BaseModel):
 class BotTestRequest(BaseModel):
     text: str
     is_dm: bool = False
+    is_room: bool = False
     sender_name: str = "TestUser"
     sender_key: str | None = None
     channel_key: str | None = None
     channel_name: str | None = None
+    room_key: str | None = None
+    room_name: str | None = None
 
 
 class BotTestResponse(BaseModel):
