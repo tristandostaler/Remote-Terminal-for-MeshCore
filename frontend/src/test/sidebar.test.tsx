@@ -93,6 +93,22 @@ function renderSidebar(overrides?: {
   return { ...view, flightChannel, opsChannel, aliceName, roomName, onSelectConversation };
 }
 
+// Rows carry data-sidebar-section, so a conversation mirrored into the Unread
+// section can still be addressed in the section under test.
+function getSectionRows(section: string): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>(`[data-sidebar-section="${section}"]`));
+}
+
+function getSectionRowNames(section: string): string[] {
+  return getSectionRows(section).map((row) => row.querySelector('.name')?.textContent ?? '');
+}
+
+function getSectionRow(section: string, name: string): HTMLElement {
+  const row = getSectionRows(section).find((el) => within(el).queryByText(name) !== null);
+  if (!row) throw new Error(`Missing "${name}" row in the ${section} section`);
+  return row;
+}
+
 function getSectionHeaderContainer(title: string): HTMLElement {
   const btn = screen.getByRole('button', { name: title });
   const container = btn.closest('div');
@@ -179,8 +195,7 @@ describe('Sidebar section summaries', () => {
       'text-badge-mention-foreground'
     );
 
-    const aliceRow = screen.getByText(aliceName).closest('div');
-    if (!aliceRow) throw new Error('Missing Alice row');
+    const aliceRow = getSectionRow('contacts', aliceName);
     expect(within(aliceRow).getByText('3')).toHaveClass(
       'bg-badge-mention',
       'text-badge-mention-foreground'
@@ -207,8 +222,7 @@ describe('Sidebar section summaries', () => {
       />
     );
 
-    const aliceRow = screen.getByText('Alice').closest('div');
-    if (!aliceRow) throw new Error('Missing Alice row');
+    const aliceRow = getSectionRow('favorites', 'Alice');
     expect(within(aliceRow).getByText('3')).toHaveClass(
       'bg-badge-mention',
       'text-badge-mention-foreground'
@@ -230,13 +244,14 @@ describe('Sidebar section summaries', () => {
     const { roomName } = renderSidebar();
 
     expect(screen.getByRole('button', { name: 'Room Servers' })).toBeInTheDocument();
-    expect(screen.getByText(roomName)).toBeInTheDocument();
+    expect(getSectionRow('rooms', roomName)).toBeInTheDocument();
   });
 
   it('expands collapsed sections during search and restores collapse state after clearing search', async () => {
     const { opsChannel, aliceName, roomName } = renderSidebar();
 
     fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Unread' }));
     fireEvent.click(screen.getByRole('button', { name: 'Channels' }));
     fireEvent.click(screen.getByRole('button', { name: 'Contacts' }));
     fireEvent.click(screen.getByRole('button', { name: 'Room Servers' }));
@@ -250,7 +265,9 @@ describe('Sidebar section summaries', () => {
     fireEvent.change(search, { target: { value: 'alice' } });
 
     await waitFor(() => {
-      expect(screen.getByText(aliceName)).toBeInTheDocument();
+      // Alice matches the query, so she shows up in Contacts and in the Unread mirror.
+      expect(getSectionRow('contacts', aliceName)).toBeInTheDocument();
+      expect(getSectionRow('unread', aliceName)).toBeInTheDocument();
     });
 
     fireEvent.change(search, { target: { value: '' } });
@@ -267,6 +284,7 @@ describe('Sidebar section summaries', () => {
     const { opsChannel, aliceName, roomName, unmount } = renderSidebar();
 
     fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Unread' }));
     fireEvent.click(screen.getByRole('button', { name: 'Channels' }));
     fireEvent.click(screen.getByRole('button', { name: 'Contacts' }));
     fireEvent.click(screen.getByRole('button', { name: 'Room Servers' }));
@@ -343,8 +361,7 @@ describe('Sidebar section summaries', () => {
         type === 'contact' && id === '11'.repeat(32),
     });
 
-    const aliceRow = screen.getByText(aliceName).closest('div');
-    if (!aliceRow) throw new Error('Missing Alice row');
+    const aliceRow = getSectionRow('contacts', aliceName);
 
     const bell = within(aliceRow).getByLabelText('Notifications enabled');
     const unread = within(aliceRow).getByText('3');
@@ -553,13 +570,8 @@ describe('Sidebar section summaries', () => {
       />
     );
 
-    const contactRows = screen
-      .getAllByText(/^(Read Recent|Unread Old)$/)
-      .map((node) => node.textContent)
-      .filter((text): text is string => Boolean(text));
-
     // Unread Old has unread DMs so it floats above Read Recent despite older recency
-    expect(contactRows).toEqual(['Unread Old', 'Read Recent']);
+    expect(getSectionRowNames('contacts')).toEqual(['Unread Old', 'Read Recent']);
   });
 
   it('sorts repeaters by heard recency even when message times disagree', () => {
@@ -816,6 +828,141 @@ describe('Sidebar section summaries', () => {
     // next order after the seeded 'alpha' is the type-grouped recency sort.
     expect(
       screen.getByRole('button', { name: 'Sort Favorites by type, then recent' })
+    ).toBeInTheDocument();
+  });
+});
+
+describe('Sidebar unread section', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  const publicChannel = () => makeChannel(PUBLIC_CHANNEL_KEY, 'Public');
+
+  function renderUnreadSidebar(overrides: { unreadCounts?: Record<string, number> } = {}) {
+    const favChannel = { ...makeChannel('BB'.repeat(16), '#flight'), favorite: true };
+    const mutedChannel = { ...makeChannel('CC'.repeat(16), '#muted'), muted: true };
+    const quietChannel = makeChannel('DD'.repeat(16), '#quiet');
+    // Zoe sorts after the room alphabetically, so type grouping is observable.
+    const zoe = makeContact('11'.repeat(32), 'Zoe');
+    const board = makeContact('33'.repeat(32), 'Ops Board', CONTACT_TYPE_ROOM);
+    const relay = makeContact('22'.repeat(32), 'Relay', CONTACT_TYPE_REPEATER);
+    const quiet = makeContact('44'.repeat(32), 'Quiet Pete');
+
+    const unreadCounts = overrides.unreadCounts ?? {
+      [getStateKey('channel', favChannel.key)]: 2,
+      [getStateKey('channel', mutedChannel.key)]: 7,
+      [getStateKey('contact', zoe.public_key)]: 3,
+      [getStateKey('contact', board.public_key)]: 5,
+      [getStateKey('contact', relay.public_key)]: 4,
+    };
+
+    const view = render(
+      <Sidebar
+        contacts={[zoe, board, relay, quiet]}
+        channels={[publicChannel(), favChannel, mutedChannel, quietChannel]}
+        activeConversation={null}
+        onSelectConversation={vi.fn()}
+        onNewMessage={vi.fn()}
+        lastMessageTimes={{}}
+        unreadCounts={unreadCounts}
+        mentions={{}}
+        showCracker={false}
+        crackerRunning={false}
+        onToggleCracker={vi.fn()}
+        onMarkAllRead={vi.fn()}
+      />
+    );
+
+    return { ...view, favChannel, mutedChannel, quietChannel, zoe, board, relay, quiet };
+  }
+
+  it('lists unread channels, rooms and DMs while skipping muted channels and repeaters', () => {
+    renderUnreadSidebar();
+
+    expect([...getSectionRowNames('unread')].sort()).toEqual(['#flight', 'Ops Board', 'Zoe']);
+  });
+
+  it('renders the unread section above every other conversation section', () => {
+    renderUnreadSidebar();
+
+    const unread = getSectionHeaderContainer('Unread');
+    for (const title of ['Favorites', 'Channels', 'Contacts', 'Repeaters', 'Room Servers']) {
+      const other = getSectionHeaderContainer(title);
+      expect(
+        unread.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+    }
+  });
+
+  it('mirrors rows rather than moving them out of their own sections', () => {
+    const { favChannel, zoe, board } = renderUnreadSidebar();
+
+    expect(getSectionRow('favorites', favChannel.name)).toBeInTheDocument();
+    expect(getSectionRow('contacts', zoe.name!)).toBeInTheDocument();
+    expect(getSectionRow('rooms', board.name!)).toBeInTheDocument();
+  });
+
+  it('rolls the unread total up into the section header and selects mirrored rows', () => {
+    const onSelectConversation = vi.fn();
+    const alice = makeContact('11'.repeat(32), 'Alice');
+
+    render(
+      <Sidebar
+        contacts={[alice]}
+        channels={[publicChannel()]}
+        activeConversation={null}
+        onSelectConversation={onSelectConversation}
+        onNewMessage={vi.fn()}
+        lastMessageTimes={{}}
+        unreadCounts={{ [getStateKey('contact', alice.public_key)]: 3 }}
+        mentions={{}}
+        showCracker={false}
+        crackerRunning={false}
+        onToggleCracker={vi.fn()}
+        onMarkAllRead={vi.fn()}
+      />
+    );
+
+    expect(within(getSectionHeaderContainer('Unread')).getByText('3')).toBeInTheDocument();
+
+    fireEvent.click(within(getSectionRow('unread', 'Alice')).getByText('Alice'));
+
+    expect(onSelectConversation).toHaveBeenCalledWith({
+      type: 'contact',
+      id: alice.public_key,
+      name: 'Alice',
+    });
+  });
+
+  it('hides the unread section when nothing is unread', () => {
+    renderUnreadSidebar({ unreadCounts: {} });
+
+    expect(screen.queryByRole('button', { name: 'Unread' })).not.toBeInTheDocument();
+  });
+
+  it('sorts unread independently of favorites and persists the preference', () => {
+    const { unmount } = renderUnreadSidebar();
+
+    // Mixed-type section: cycles recent -> alpha -> type-recent -> type-alpha.
+    fireEvent.click(screen.getByRole('button', { name: 'Sort Unread alphabetically' }));
+    // Pure name order, ignoring type.
+    expect(getSectionRowNames('unread')).toEqual(['#flight', 'Ops Board', 'Zoe']);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort Unread by type, then recent' }));
+    // Channels rank first, then clients, then rooms.
+    expect(getSectionRowNames('unread')).toEqual(['#flight', 'Zoe', 'Ops Board']);
+
+    // Favorites keeps its own order while Unread has advanced through the cycle.
+    expect(
+      screen.getByRole('button', { name: 'Sort Favorites alphabetically' })
+    ).toBeInTheDocument();
+
+    unmount();
+    renderUnreadSidebar();
+
+    expect(
+      screen.getByRole('button', { name: 'Sort Unread by type, then alphabetically' })
     ).toBeInTheDocument();
   });
 });
