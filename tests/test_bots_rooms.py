@@ -51,26 +51,67 @@ async def seed_room(name: str = "Ops Board", key: str = ROOM_KEY) -> None:
     await ContactRepository.upsert(ContactUpsert(public_key=key, name=name, type=CONTACT_TYPE_ROOM))
 
 
+OTHER_ROOM_KEY = "dd" * 32
+
+
+def scoped(rooms) -> Bot:
+    return make_bot(scope={"channels": "all", "rooms": rooms})
+
+
 class TestScopeGate:
     def setup_method(self):
         self.engine = BotEngine()
 
-    def test_rooms_have_their_own_gate(self):
-        assert self.engine._scope_allows(make_bot(respond_to_rooms=True), room_msg())
-        assert not self.engine._scope_allows(make_bot(respond_to_rooms=False), room_msg())
+    def test_all_rooms(self):
+        assert self.engine._scope_allows(scoped("all"), room_msg())
+
+    def test_no_rooms(self):
+        assert not self.engine._scope_allows(scoped("none"), room_msg())
+
+    def test_only_list_answers_some_and_ignores_others(self):
+        bot = scoped({"only": [ROOM_KEY]})
+        assert self.engine._scope_allows(bot, room_msg())
+        assert not self.engine._scope_allows(bot, room_msg(room_key=OTHER_ROOM_KEY))
+
+    def test_except_list_answers_everywhere_but_the_named_room(self):
+        bot = scoped({"except": [ROOM_KEY]})
+        assert not self.engine._scope_allows(bot, room_msg())
+        assert self.engine._scope_allows(bot, room_msg(room_key=OTHER_ROOM_KEY))
+
+    def test_an_empty_only_list_is_silence(self):
+        assert not self.engine._scope_allows(scoped({"only": []}), room_msg())
+
+    def test_room_keys_match_case_insensitively(self):
+        # Room keys are 64-hex contact keys, stored lower-case, while channel
+        # keys are upper — the shared matcher must not care which it is given.
+        bot = scoped({"only": [ROOM_KEY.upper()]})
+        assert self.engine._scope_allows(bot, room_msg(room_key=ROOM_KEY.lower()))
+
+    def test_a_scope_written_before_rooms_answers_every_room(self):
+        assert self.engine._scope_allows(make_bot(scope={"channels": "all"}), room_msg())
 
     def test_dm_gate_does_not_cover_rooms(self):
-        # A bot that answers DMs but was turned off in rooms stays out of rooms,
-        # and the other way round.
-        bot = make_bot(respond_to_dms=True, respond_to_rooms=False)
-        assert not self.engine._scope_allows(bot, room_msg())
-        bot = make_bot(respond_to_dms=False, respond_to_rooms=True)
-        assert self.engine._scope_allows(bot, room_msg())
+        # The two are separate decisions in both directions.
+        assert not self.engine._scope_allows(
+            make_bot(respond_to_dms=True, scope={"channels": "all", "rooms": "none"}),
+            room_msg(),
+        )
+        assert self.engine._scope_allows(
+            make_bot(respond_to_dms=False, scope={"channels": "all", "rooms": "all"}),
+            room_msg(),
+        )
 
     def test_channel_scope_is_not_consulted_for_rooms(self):
         # A room is not a channel: an empty channel allow-list must not silence it.
-        bot = make_bot(scope={"channels": "none"}, respond_to_rooms=True)
-        assert self.engine._scope_allows(bot, room_msg())
+        assert self.engine._scope_allows(
+            make_bot(scope={"channels": "none", "rooms": "all"}), room_msg()
+        )
+
+    def test_room_scope_is_not_consulted_for_channels(self):
+        bot = make_bot(scope={"channels": "all", "rooms": "none"})
+        assert self.engine._scope_allows(
+            bot, BotMessage(text="hi", is_dm=False, channel_key="A" * 32)
+        )
 
 
 class TestBuildMessage:
@@ -263,39 +304,71 @@ def _loaded_catch_all_bot():
     code = load_bot_code(
         "from remoteterm import bot\n\n@bot.on_message()\nasync def seen(ctx, msg):\n    pass\n"
     )
-    return LoadedBot(record=make_bot(respond_to_rooms=True), code=code)
+    return LoadedBot(record=make_bot(scope={"channels": "all", "rooms": "all"}), code=code)
 
 
 class TestRepository:
-    async def test_respond_to_rooms_roundtrip(self, test_db):
+    async def test_room_selection_roundtrip(self, test_db):
         from app.repository.bots import BotRepository
 
-        bot = await BotRepository.create(name="rooms-test")
-        assert bot.respond_to_rooms is True
-        updated = await BotRepository.update(bot.id, respond_to_rooms=False)
-        assert updated is not None and updated.respond_to_rooms is False
+        bot = await BotRepository.create(
+            name="rooms-test", scope={"channels": "all", "rooms": {"only": [ROOM_KEY]}}
+        )
+        assert bot.scope["rooms"] == {"only": [ROOM_KEY]}
+        updated = await BotRepository.update(
+            bot.id, scope={"channels": "all", "rooms": {"except": [ROOM_KEY]}}
+        )
+        assert updated is not None
+        assert updated.scope["rooms"] == {"except": [ROOM_KEY]}
 
-    async def test_migration_inherits_respond_to_dms(self, test_db):
-        # Existing bots keep the reach they had: room posts used to pass the DM
-        # gate, so that is what the new column starts from.
-        from app.migrations._080_bot_respond_to_rooms import migrate
+
+class TestMigration:
+    async def _run(self, test_db, rows):
+        from app.migrations._080_bot_room_scope import migrate
 
         async with test_db.tx() as conn:
-            await conn.execute("ALTER TABLE bots DROP COLUMN respond_to_rooms")
-            await conn.execute(
-                "INSERT INTO bots (id, name, respond_to_dms, created_at, updated_at) "
-                "VALUES ('legacy-off', 'legacy-off', 0, 0, 0)"
-            )
-            await conn.execute(
-                "INSERT INTO bots (id, name, respond_to_dms, created_at, updated_at) "
-                "VALUES ('legacy-on', 'legacy-on', 1, 0, 0)"
-            )
+            for bot_id, answers_dms, scope in rows:
+                await conn.execute(
+                    "INSERT INTO bots (id, name, respond_to_dms, scope, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 0, 0)",
+                    (bot_id, bot_id, answers_dms, scope),
+                )
         async with test_db.tx() as conn:
             await migrate(conn)
 
+    async def test_inherits_respond_to_dms(self, test_db):
+        # Existing bots keep the reach they had: room posts used to pass the DM
+        # gate, so that is what the new selection starts from.
         from app.repository.bots import BotRepository
 
+        await self._run(
+            test_db,
+            [
+                ("legacy-off", 0, '{"channels": "all"}'),
+                ("legacy-on", 1, '{"channels": "all"}'),
+            ],
+        )
         off = await BotRepository.get("legacy-off")
         on = await BotRepository.get("legacy-on")
-        assert off is not None and off.respond_to_rooms is False
-        assert on is not None and on.respond_to_rooms is True
+        assert off is not None and off.scope["rooms"] == {"only": []}
+        assert on is not None and on.scope["rooms"] == "all"
+        # The channel half is left exactly as it was.
+        assert on.scope["channels"] == "all"
+
+    async def test_leaves_a_scope_that_already_names_rooms(self, test_db):
+        from app.repository.bots import BotRepository
+
+        await self._run(test_db, [("picked", 0, '{"channels": "all", "rooms": {"only": ["ab"]}}')])
+        bot = await BotRepository.get("picked")
+        assert bot is not None and bot.scope["rooms"] == {"only": ["ab"]}
+
+    async def test_survives_an_unreadable_scope(self, test_db):
+        from app.repository.bots import BotRepository
+
+        await self._run(test_db, [("broken", 1, "not json"), ("fine", 1, '{"channels": "all"}')])
+        broken = await BotRepository.get("broken")
+        fine = await BotRepository.get("fine")
+        # An unreadable scope falls back to the default rather than crashing the
+        # migration, and its neighbour is still migrated.
+        assert broken is not None
+        assert fine is not None and fine.scope["rooms"] == "all"

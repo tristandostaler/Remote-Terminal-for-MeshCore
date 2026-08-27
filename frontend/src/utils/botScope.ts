@@ -1,4 +1,4 @@
-import type { Channel } from '../types';
+import { CONTACT_TYPE_ROOM, type Channel, type Contact } from '../types';
 
 /**
  * The channels a bot listens to out of the box: the two conventional bot
@@ -33,4 +33,29 @@ export function scopeChannelLabel(key: string, channels: Channel[]): string {
 /** True when the key is not a channel this node has joined — the bot is deaf there. */
 export function isUnjoinedChannel(key: string, channels: Channel[]): boolean {
   return !channels.some((channel) => channel.key.toUpperCase() === key.toUpperCase());
+}
+
+/** The room servers this node knows about, the order the pickers show them in. */
+export function roomContacts(contacts: Contact[]): Contact[] {
+  return contacts
+    .filter((contact) => contact.type === CONTACT_TYPE_ROOM)
+    .sort((a, b) => (a.name || a.public_key).localeCompare(b.name || b.public_key));
+}
+
+/**
+ * How to label a scoped room key: the known room's name, else a truncated key.
+ *
+ * Unlike a hashtag channel there is no name to derive — a room is a contact, so
+ * a key we have never heard an advert from can only be shown as itself.
+ */
+export function scopeRoomLabel(key: string, contacts: Contact[]): string {
+  const known = contacts.find((contact) => contact.public_key.toLowerCase() === key.toLowerCase());
+  return known?.name || `${key.slice(0, 8)}…`;
+}
+
+/** True when the key is not a room contact this node knows — the bot is deaf there. */
+export function isUnknownRoom(key: string, contacts: Contact[]): boolean {
+  return !roomContacts(contacts).some(
+    (contact) => contact.public_key.toLowerCase() === key.toLowerCase()
+  );
 }

@@ -1783,9 +1783,9 @@ class Bot(BaseModel):
     enabled: bool = False
     admin_only: bool = False
     respond_to_dms: bool = True
-    # Room-server posts. Separate from DMs: a room reply is public to everyone
-    # logged into that room, so it is its own decision.
-    respond_to_rooms: bool = True
+    # ``{"channels": ..., "rooms": ...}``, each ``"all"`` / ``"none"`` /
+    # ``{"only"|"except": [keys]}``. A missing ``rooms`` key means every room:
+    # scopes written before rooms existed say nothing about them.
     scope: dict = Field(default_factory=default_bot_scope)
     cooldown_seconds: float = 0
     per_user_cooldown_seconds: float = 0
@@ -1829,7 +1829,6 @@ class BotUpdateRequest(BaseModel):
     enabled: bool | None = None
     admin_only: bool | None = None
     respond_to_dms: bool | None = None
-    respond_to_rooms: bool | None = None
     scope: dict | None = None
     cooldown_seconds: float | None = None
     per_user_cooldown_seconds: float | None = None

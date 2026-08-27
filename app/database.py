@@ -177,7 +177,6 @@ CREATE TABLE IF NOT EXISTS bots (
     enabled INTEGER DEFAULT 0,
     admin_only INTEGER DEFAULT 0,
     respond_to_dms INTEGER DEFAULT 1,
-    respond_to_rooms INTEGER DEFAULT 1,
     -- Default bot scope: the "#bot"/"#bots" hashtag keys plus DMs. Must stay in
     -- sync with app/bot_scope.DEFAULT_BOT_SCOPE_JSON (asserted by the tests).
     scope TEXT NOT NULL DEFAULT '{"channels": {"only": ["EB50A1BCB3E4E5D7BF69A57C9DADA211", "0D24F5830B449668B8C221759B6C50D2"]}}',

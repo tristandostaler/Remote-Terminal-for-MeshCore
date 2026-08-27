@@ -43,7 +43,6 @@ def _row_to_bot(row: aiosqlite.Row) -> Bot:
         enabled=bool(row["enabled"]),
         admin_only=bool(row["admin_only"]),
         respond_to_dms=bool(row["respond_to_dms"]),
-        respond_to_rooms=bool(row["respond_to_rooms"]),
         scope=_load_json(row["scope"], default_bot_scope()),
         cooldown_seconds=row["cooldown_seconds"] or 0,
         per_user_cooldown_seconds=row["per_user_cooldown_seconds"] or 0,
@@ -63,7 +62,7 @@ def _row_to_bot(row: aiosqlite.Row) -> Bot:
 
 _BOT_COLUMNS = """
     id, name, category, description, long_description, code, enabled, admin_only,
-    respond_to_dms, respond_to_rooms,
+    respond_to_dms,
     scope, cooldown_seconds, per_user_cooldown_seconds, queue_threshold_seconds,
     settings_schema, settings, ui_triggers, builtin_key, builtin_version,
     modified, last_error, sort_order, created_at, updated_at
@@ -118,7 +117,6 @@ class BotRepository:
         enabled: bool = False,
         admin_only: bool = False,
         respond_to_dms: bool = True,
-        respond_to_rooms: bool = True,
         scope: dict[str, Any] | None = None,
         cooldown_seconds: float = 0,
         per_user_cooldown_seconds: float = 0,
@@ -138,11 +136,11 @@ class BotRepository:
                 """
                 INSERT INTO bots (
                     id, name, category, description, long_description, code, enabled,
-                    admin_only, respond_to_dms, respond_to_rooms, scope, cooldown_seconds,
+                    admin_only, respond_to_dms, scope, cooldown_seconds,
                     per_user_cooldown_seconds, queue_threshold_seconds, settings_schema,
                     settings, ui_triggers, state, builtin_key, builtin_version, modified,
                     sort_order, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, 0, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     new_id,
@@ -154,7 +152,6 @@ class BotRepository:
                     1 if enabled else 0,
                     1 if admin_only else 0,
                     1 if respond_to_dms else 0,
-                    1 if respond_to_rooms else 0,
                     json.dumps(scope if scope is not None else default_bot_scope()),
                     cooldown_seconds,
                     per_user_cooldown_seconds,
@@ -177,13 +174,7 @@ class BotRepository:
     async def update(bot_id: str, **fields: Any) -> Bot | None:
         """Update the given columns. JSON-typed fields are serialized here."""
         json_fields = {"scope", "settings_schema", "settings", "ui_triggers"}
-        bool_fields = {
-            "enabled",
-            "admin_only",
-            "respond_to_dms",
-            "respond_to_rooms",
-            "modified",
-        }
+        bool_fields = {"enabled", "admin_only", "respond_to_dms", "modified"}
         allowed = {
             "name",
             "category",
@@ -193,7 +184,6 @@ class BotRepository:
             "enabled",
             "admin_only",
             "respond_to_dms",
-            "respond_to_rooms",
             "scope",
             "cooldown_seconds",
             "per_user_cooldown_seconds",

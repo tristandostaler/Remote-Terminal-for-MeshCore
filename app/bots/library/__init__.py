@@ -15,8 +15,8 @@ dict (read by exec'ing the source through the normal loader):
         "settings_schema": [...],      # optional; drives the Settings tab
         "settings": {...},             # optional defaults for ctx.settings
         "respond_to_dms": True,        # optional (default True)
-        "respond_to_rooms": True,      # optional (default True) -- room-server posts
-        "scope": {...},                # optional; default is #bot/#bots + DMs
+        "scope": {...},                # optional; {"channels":..., "rooms":...},
+                                       # default is #bot/#bots + DMs + all rooms
         "admin_only": False,           # optional
         "cooldown_seconds": 0,         # optional
         "per_user_cooldown_seconds": 0,
@@ -232,7 +232,6 @@ async def ensure_seeded() -> int:
                 enabled=False,
                 admin_only=bool(entry.get("admin_only", False)),
                 respond_to_dms=bool(entry.get("respond_to_dms", True)),
-                respond_to_rooms=bool(entry.get("respond_to_rooms", True)),
                 scope=entry.get("scope"),
                 cooldown_seconds=float(entry.get("cooldown_seconds", 0)),
                 per_user_cooldown_seconds=float(entry.get("per_user_cooldown_seconds", 0)),

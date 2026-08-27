@@ -1093,6 +1093,9 @@ export interface BotSettingsGeneratedUrlField extends BotSettingsSchemaFieldBase
 
 export type BotSettingsSchemaField = BotSettingsValueField | BotSettingsGeneratedUrlField;
 
+/** `all` / `none` / an allow- or deny-list of conversation keys. */
+export type BotScopeSelection = 'all' | 'none' | { only?: string[]; except?: string[] };
+
 export interface Bot {
   id: string;
   name: string;
@@ -1104,9 +1107,11 @@ export interface Bot {
   enabled: boolean;
   admin_only: boolean;
   respond_to_dms: boolean;
-  /** Room-server posts. A room reply is public to everyone logged into it. */
-  respond_to_rooms: boolean;
-  scope: { channels: 'all' | 'none' | { only?: string[]; except?: string[] } };
+  /**
+   * Where the bot listens. `rooms` is absent on scopes written before rooms
+   * existed, which the backend reads as every room.
+   */
+  scope: { channels: BotScopeSelection; rooms?: BotScopeSelection };
   cooldown_seconds: number;
   per_user_cooldown_seconds: number;
   queue_threshold_seconds: number;
@@ -1138,7 +1143,6 @@ export interface BotUpdatePayload {
   enabled?: boolean;
   admin_only?: boolean;
   respond_to_dms?: boolean;
-  respond_to_rooms?: boolean;
   scope?: Bot['scope'];
   cooldown_seconds?: number;
   per_user_cooldown_seconds?: number;

@@ -37,9 +37,14 @@ operators).
   silenced by its allow-list. `ctx.reply` answers **into the room** (an ordinary
   DM send to the room contact, full 156-byte budget, no `"<name>: "` framing),
   never to the author: the room asked, the room gets the answer, and a poster we
-  only know by key prefix would not be DM-able anyway. The gate is the bot's own
-  `respond_to_rooms` flag, separate from `respond_to_dms` because a room reply is
-  public to everyone logged in. Posts whose `sender_key` is *our* node are
+  only know by key prefix would not be DM-able anyway. The gate is `scope.rooms` — the same
+  `all` / `none` / `{only|except: [keys]}` shape as `scope.channels`, over room
+  contact keys instead of channel keys, so an operator can answer in one room and
+  ignore another. It is separate from `respond_to_dms` because a room reply is
+  public to everyone logged in. A scope with **no `rooms` key means every room**
+  (scopes written before rooms existed say nothing about them), and both halves
+  go through one `_selection_allows` matcher, which compares case-insensitively:
+  channel keys are stored upper-case and room contact keys lower. Posts whose `sender_key` is *our* node are
   dropped — a room relays every post to every member, us included, so reacting
   to our own reply is how two bots end up answering each other forever. Room
   posts arrive in **bursts**: the room poll logs in and drains everything posted
@@ -96,8 +101,9 @@ operators).
 
 ## Data model
 
-`bots` (code, settings_schema, settings, scope incl. `respond_to_dms` /
-`respond_to_rooms`, limits, ui_triggers, state, builtin lineage), `bot_runs` (bounded history, feeds the dashboard),
+`bots` (code, settings_schema, settings, `scope` = `{channels, rooms}` plus the
+`respond_to_dms` flag, limits, ui_triggers, state, builtin lineage),
+`bot_runs` (bounded history, feeds the dashboard),
 `bot_schedules` (standalone cron messages), `bot_feeds`, and the singleton
 `bot_engine_settings` (prefix, mention mode, rate limits, language, moderation,
 admin users). Repository: `app/repository/bots.py`.
@@ -137,6 +143,12 @@ token gate only.
   `{"channels": "all"}`. Migration 071 retargeted existing bots that were still
   at the old "all" default **and still disabled** — an enabled or hand-scoped
   bot is a decision and was left alone.
+- Rooms **do** default to all of them, unlike channels. There is no `#bot`
+  convention for rooms and no Public to fall onto: a room is a space the
+  operator deliberately logged this node into, and every seeded bot ships
+  disabled anyway. `default_bot_scope()` therefore omits `rooms` entirely and
+  the engine reads a missing key as `"all"`, which keeps the four-way default
+  sync (`app/bot_scope.py`) about channels alone.
 - Newly installed SMS bots are `admin_only`; existing installations retain
   their stored permission flag during version refreshes.
 - `ui_triggers` only feed handlers declared with **no-argument** decorators

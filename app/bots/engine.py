@@ -14,7 +14,9 @@ Ordering / limits (engine settings, Bots › Engine tab):
   moderation/scope gates — they see every in-scope message, exactly like the
   historical fanout bots, and do their own filtering;
 * room-server posts are their own conversation kind (``msg.is_room``), gated by
-  the bot's ``respond_to_rooms`` flag and answered back into the room;
+  the bot's ``scope.rooms`` selection — the same shape as ``scope.channels``, so
+  a bot can answer in one room and ignore another — and answered back into the
+  room rather than to whoever posted;
 * every outgoing bot send is serialized behind a TX-spacing lock.
 """
 
@@ -455,25 +457,37 @@ class BotEngine:
             had_prefix = True
         return stripped, had_prefix, had_mention
 
+    @staticmethod
+    def _selection_allows(selection: Any, key: str | None) -> bool:
+        """Does an ``all`` / ``none`` / ``{only|except: [...]}`` selection admit ``key``?
+
+        Shared by the channel and room scopes, which are the same shape over
+        different key spaces (32-hex channel keys, 64-hex room contact keys).
+        Matching is case-insensitive because the two spaces disagree on case.
+        """
+        if selection == "all":
+            return True
+        if selection == "none":
+            return False
+        if isinstance(selection, dict):
+            wanted = (key or "").upper()
+            only = selection.get("only")
+            if isinstance(only, list):
+                return wanted in {str(k).upper() for k in only}
+            except_list = selection.get("except")
+            if isinstance(except_list, list):
+                return wanted not in {str(k).upper() for k in except_list}
+        return True
+
     def _scope_allows(self, bot: Bot, msg: BotMessage) -> bool:
+        scope = bot.scope if isinstance(bot.scope, dict) else {}
         if msg.is_room:
-            return bot.respond_to_rooms
+            # A scope written before rooms existed says nothing about them, and
+            # the operator picks rooms from a list the same way as channels.
+            return self._selection_allows(scope.get("rooms", "all"), msg.room_key)
         if msg.is_dm:
             return bot.respond_to_dms
-        channels = bot.scope.get("channels", "all") if isinstance(bot.scope, dict) else "all"
-        if channels == "all":
-            return True
-        if channels == "none":
-            return False
-        if isinstance(channels, dict):
-            key = (msg.channel_key or "").upper()
-            only = channels.get("only")
-            if isinstance(only, list):
-                return key in {str(k).upper() for k in only}
-            except_list = channels.get("except")
-            if isinstance(except_list, list):
-                return key not in {str(k).upper() for k in except_list}
-        return True
+        return self._selection_allows(scope.get("channels", "all"), msg.channel_key)
 
     def _is_admin_sender(self, msg: BotMessage) -> bool:
         if not msg.sender_key:

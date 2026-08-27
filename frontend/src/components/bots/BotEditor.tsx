@@ -5,16 +5,24 @@ import { api } from '../../api';
 import type {
   Bot,
   BotRun,
+  BotScopeSelection,
   BotSettingsSchemaField,
   BotTestResponse,
   BotUiTrigger,
   BotUpdatePayload,
   Channel,
+  Contact,
 } from '../../types';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { toast } from '../ui/sonner';
-import { isUnjoinedChannel, scopeChannelLabel } from '../../utils/botScope';
+import {
+  isUnjoinedChannel,
+  isUnknownRoom,
+  roomContacts,
+  scopeChannelLabel,
+  scopeRoomLabel,
+} from '../../utils/botScope';
 import { cn } from '@/lib/utils';
 import { BotTriggerChips } from './BotsView';
 
@@ -34,21 +42,31 @@ type EditorTab = (typeof EDITOR_TABS)[number]['id'];
 
 type ScopeMode = 'all' | 'only' | 'except';
 
-function scopeModeOf(bot: Bot): ScopeMode {
-  const channels = bot.scope?.channels;
-  if (typeof channels === 'object' && channels !== null) {
-    if (channels.only) return 'only';
-    if (channels.except) return 'except';
+/**
+ * Channels and rooms are the same selection over different key spaces, so the
+ * editor drives both halves of `scope` through one pair of readers and one
+ * builder. A `rooms` key absent from an older scope reads as every room, which
+ * is what the backend does with it.
+ */
+function scopeModeOf(selection: BotScopeSelection | undefined): ScopeMode {
+  if (typeof selection === 'object' && selection !== null) {
+    if (selection.only) return 'only';
+    if (selection.except) return 'except';
   }
   return 'all';
 }
 
-function scopeListOf(bot: Bot): string[] {
-  const channels = bot.scope?.channels;
-  if (typeof channels === 'object' && channels !== null) {
-    return channels.only ?? channels.except ?? [];
+function scopeListOf(selection: BotScopeSelection | undefined): string[] {
+  if (typeof selection === 'object' && selection !== null) {
+    return selection.only ?? selection.except ?? [];
   }
   return [];
+}
+
+function buildSelection(mode: ScopeMode, keys: string[]): BotScopeSelection {
+  if (mode === 'only') return { only: keys };
+  if (mode === 'except') return { except: keys };
+  return 'all';
 }
 
 /** Renders `backticked` spans as inline code — bot descriptions name commands. */
@@ -307,11 +325,12 @@ function SchemaField({
 interface BotEditorProps {
   botId: string;
   channels: Channel[];
+  contacts: Contact[];
   onBack: () => void;
   onDeleted: () => void;
 }
 
-export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps) {
+export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotEditorProps) {
   const [bot, setBot] = useState<Bot | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<EditorTab>('settings');
@@ -326,8 +345,9 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
   const [enabled, setEnabled] = useState(false);
   const [scopeMode, setScopeMode] = useState<ScopeMode>('all');
   const [scopeList, setScopeList] = useState<string[]>([]);
+  const [roomMode, setRoomMode] = useState<ScopeMode>('all');
+  const [roomList, setRoomList] = useState<string[]>([]);
   const [respondToDms, setRespondToDms] = useState(true);
-  const [respondToRooms, setRespondToRooms] = useState(true);
   const [adminOnly, setAdminOnly] = useState(false);
   const [cooldown, setCooldown] = useState('0');
   const [perUserCooldown, setPerUserCooldown] = useState('0');
@@ -352,10 +372,11 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
     setBot(loaded);
     setCode(loaded.code);
     setEnabled(loaded.enabled);
-    setScopeMode(scopeModeOf(loaded));
-    setScopeList(scopeListOf(loaded));
+    setScopeMode(scopeModeOf(loaded.scope?.channels));
+    setScopeList(scopeListOf(loaded.scope?.channels));
+    setRoomMode(scopeModeOf(loaded.scope?.rooms));
+    setRoomList(scopeListOf(loaded.scope?.rooms));
     setRespondToDms(loaded.respond_to_dms);
-    setRespondToRooms(loaded.respond_to_rooms);
     setAdminOnly(loaded.admin_only);
     setCooldown(String(loaded.cooldown_seconds));
     setPerUserCooldown(String(loaded.per_user_cooldown_seconds));
@@ -387,11 +408,10 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
 
   const markDirty = () => setDirty(true);
 
-  const buildScope = (): Bot['scope'] => {
-    if (scopeMode === 'only') return { channels: { only: scopeList } };
-    if (scopeMode === 'except') return { channels: { except: scopeList } };
-    return { channels: 'all' };
-  };
+  const buildScope = (): Bot['scope'] => ({
+    channels: buildSelection(scopeMode, scopeList),
+    rooms: buildSelection(roomMode, roomList),
+  });
 
   const handleSave = async (overrideEnabled?: boolean) => {
     if (!bot) return;
@@ -401,7 +421,6 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
       enabled: overrideEnabled ?? enabled,
       scope: buildScope(),
       respond_to_dms: respondToDms,
-      respond_to_rooms: respondToRooms,
       admin_only: adminOnly,
       cooldown_seconds: parseFloat(cooldown) || 0,
       per_user_cooldown_seconds: parseFloat(perUserCooldown) || 0,
@@ -564,6 +583,7 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
         .map((key) => scopeChannelLabel(key, channels)),
     [scopeList, channels]
   );
+  const knownRooms = useMemo(() => roomContacts(contacts), [contacts]);
 
   if (loadError) {
     return (
@@ -742,9 +762,16 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
               <div>
                 <SectionTitle
                   title="Where it runs"
-                  hint="Which conversations this bot listens to. Triggers still apply. New bots start on #bot / #bots plus DMs so they stay off Public."
+                  hint="Which conversations this bot listens to. Triggers still apply. New bots start on #bot / #bots plus DMs and every room, so they stay off Public."
                 />
-                <div className="inline-flex gap-0.5 bg-muted rounded-lg p-[3px] mb-2.5">
+                <div className="text-[0.6875rem] uppercase tracking-wider text-muted-foreground font-medium mb-1.5">
+                  Channels
+                </div>
+                <div
+                  className="inline-flex gap-0.5 bg-muted rounded-lg p-[3px] mb-2.5"
+                  role="group"
+                  aria-label="Channels"
+                >
                   {(['all', 'only', 'except'] as const).map((mode) => (
                     <button
                       key={mode}
@@ -828,7 +855,7 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
                     bot at a channel you already have.
                   </p>
                 )}
-                <label className="flex items-center gap-2.5 cursor-pointer mt-2">
+                <label className="flex items-center gap-2.5 cursor-pointer mt-3.5">
                   <input
                     type="checkbox"
                     checked={respondToDms}
@@ -840,23 +867,106 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
                   />
                   <span className="text-[0.8125rem]">Respond to direct messages</span>
                 </label>
-                <label className="flex items-start gap-2.5 cursor-pointer mt-2">
-                  <input
-                    type="checkbox"
-                    checked={respondToRooms}
-                    onChange={(e) => {
-                      setRespondToRooms(e.target.checked);
-                      markDirty();
-                    }}
-                    className="w-4 h-4 rounded border-input accent-primary mt-0.5"
-                  />
-                  <span className="text-[0.8125rem]">
-                    Respond in room servers{' '}
-                    <span className="text-[0.6875rem] text-muted-foreground">
-                      — answers post back into the room, where everyone logged in sees them
-                    </span>
-                  </span>
-                </label>
+                <div className="mt-3.5">
+                  <div className="text-[0.6875rem] uppercase tracking-wider text-muted-foreground font-medium mb-1.5">
+                    Room servers
+                  </div>
+                  <div
+                    className="inline-flex gap-0.5 bg-muted rounded-lg p-[3px] mb-2.5"
+                    role="group"
+                    aria-label="Room servers"
+                  >
+                    {(['all', 'only', 'except'] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => {
+                          setRoomMode(mode);
+                          markDirty();
+                        }}
+                        className={cn(
+                          'px-3 py-1 rounded-md text-xs transition-colors',
+                          roomMode === mode
+                            ? 'bg-background text-foreground shadow-sm'
+                            : 'text-muted-foreground hover:text-foreground'
+                        )}
+                      >
+                        {mode === 'all' ? 'All rooms' : mode === 'only' ? 'Only…' : 'All except…'}
+                      </button>
+                    ))}
+                  </div>
+                  {roomMode !== 'all' && (
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {roomList.map((key) => {
+                        const label = scopeRoomLabel(key, contacts);
+                        const unknown = isUnknownRoom(key, contacts);
+                        return (
+                          <span
+                            key={key}
+                            title={
+                              unknown
+                                ? `${label} is not a room this node knows — nothing arrives from it`
+                                : undefined
+                            }
+                            className={cn(
+                              'inline-flex items-center gap-1.5 text-xs rounded-md px-2 py-1',
+                              unknown
+                                ? 'bg-muted text-muted-foreground'
+                                : 'bg-primary/10 text-primary'
+                            )}
+                          >
+                            {label}
+                            {unknown && <span className="text-[0.625rem]">not known</span>}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRoomList((prev) => prev.filter((k) => k !== key));
+                                markDirty();
+                              }}
+                              aria-label={`Remove ${label}`}
+                            >
+                              <X className="h-3 w-3 opacity-70" />
+                            </button>
+                          </span>
+                        );
+                      })}
+                      <select
+                        value=""
+                        aria-label="Add room"
+                        onChange={(e) => {
+                          if (e.target.value && !roomList.includes(e.target.value)) {
+                            setRoomList((prev) => [...prev, e.target.value]);
+                            markDirty();
+                          }
+                        }}
+                        className="h-7 rounded-md border border-dashed border-input bg-transparent px-2 text-xs text-muted-foreground"
+                      >
+                        <option value="">+ Add room</option>
+                        {knownRooms
+                          .filter((room) => !roomList.includes(room.public_key))
+                          .map((room) => (
+                            <option key={room.public_key} value={room.public_key}>
+                              {room.name || `${room.public_key.slice(0, 8)}…`}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                  )}
+                  {roomMode === 'only' && roomList.length === 0 && (
+                    <p className="text-[0.6875rem] text-muted-foreground mb-2 leading-relaxed">
+                      No rooms picked, so this bot stays silent in every one of them.
+                    </p>
+                  )}
+                  {roomMode !== 'all' && knownRooms.length === 0 && (
+                    <p className="text-[0.6875rem] text-muted-foreground mb-2 leading-relaxed">
+                      This node knows no room servers yet. Log in to one from its contact first, and
+                      it appears here.
+                    </p>
+                  )}
+                  <p className="text-[0.6875rem] text-muted-foreground leading-relaxed">
+                    Answers post back into the room, where everyone logged in sees them.
+                  </p>
+                </div>
                 <label className="flex items-start gap-2.5 cursor-pointer mt-2">
                   <input
                     type="checkbox"

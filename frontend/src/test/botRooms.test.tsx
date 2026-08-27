@@ -1,10 +1,18 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { api } from '../api';
 import { BotEditor } from '../components/bots/BotEditor';
 import { BotsView } from '../components/bots/BotsView';
-import type { Bot, BotEngineStatus } from '../types';
+import { CONTACT_TYPE_ROOM, type Bot, type BotEngineStatus, type Contact } from '../types';
+
+const ROOM_KEY = 'aa'.repeat(32);
+
+const room = {
+  public_key: ROOM_KEY,
+  name: 'Ops Board',
+  type: CONTACT_TYPE_ROOM,
+} as Contact;
 
 function makeBot(overrides: Partial<Bot> = {}): Bot {
   return {
@@ -17,8 +25,7 @@ function makeBot(overrides: Partial<Bot> = {}): Bot {
     enabled: true,
     admin_only: false,
     respond_to_dms: true,
-    respond_to_rooms: true,
-    scope: { channels: 'all' },
+    scope: { channels: 'all', rooms: 'all' },
     cooldown_seconds: 0,
     per_user_cooldown_seconds: 0,
     queue_threshold_seconds: 0,
@@ -69,7 +76,7 @@ const engineStatus: BotEngineStatus = {
 describe('bots in rooms', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  const renderList = (bot: Bot) => {
+  const renderList = (bot: Bot, contacts: Contact[] = []) => {
     vi.spyOn(api, 'getBots').mockResolvedValue([bot]);
     vi.spyOn(api, 'getBotEngine').mockResolvedValue(engineStatus);
     vi.spyOn(api, 'getBotRuns').mockResolvedValue([]);
@@ -87,36 +94,80 @@ describe('bots in rooms', () => {
       runs_by_hour: [],
     });
     return render(
-      <BotsView botId={null} channels={[]} contacts={[]} onOpenBot={vi.fn()} onCloseBot={vi.fn()} />
+      <BotsView
+        botId={null}
+        channels={[]}
+        contacts={contacts}
+        onOpenBot={vi.fn()}
+        onCloseBot={vi.fn()}
+      />
     );
   };
 
-  it('names rooms in the scope summary when the bot answers there', async () => {
-    renderList(makeBot({ respond_to_dms: true, respond_to_rooms: true }));
+  it('names every room in the scope summary when the bot answers all of them', async () => {
+    renderList(makeBot({ scope: { channels: 'all', rooms: 'all' } }));
     expect(await screen.findByText('All channels + DMs + rooms')).toBeInTheDocument();
   });
 
-  it('leaves rooms out of the scope summary when the bot does not', async () => {
-    renderList(makeBot({ respond_to_dms: true, respond_to_rooms: false }));
+  it('names the picked rooms rather than saying rooms', async () => {
+    renderList(makeBot({ scope: { channels: 'all', rooms: { only: [ROOM_KEY] } } }), [room]);
+    expect(await screen.findByText('All channels + DMs + rooms: Ops Board')).toBeInTheDocument();
+  });
+
+  it('leaves rooms out of the scope summary when none are picked', async () => {
+    renderList(makeBot({ scope: { channels: 'all', rooms: { only: [] } } }));
     expect(await screen.findByText('All channels + DMs')).toBeInTheDocument();
   });
 
-  it('saves the rooms toggle separately from the DM one', async () => {
+  it('narrows the room scope to a picked room and saves it', async () => {
     vi.spyOn(api, 'getBot').mockResolvedValue(makeBot());
     const updateBot = vi.spyOn(api, 'updateBot').mockResolvedValue(makeBot());
 
-    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+    render(
+      <BotEditor
+        botId="bot-1"
+        channels={[]}
+        contacts={[room]}
+        onBack={vi.fn()}
+        onDeleted={vi.fn()}
+      />
+    );
 
-    const rooms = await screen.findByRole('checkbox', { name: /Respond in room servers/i });
-    expect(rooms).toBeChecked();
-    fireEvent.click(rooms);
+    const group = await screen.findByRole('group', { name: 'Room servers' });
+    fireEvent.click(within(group).getByRole('button', { name: 'Only…' }));
+    fireEvent.change(screen.getByLabelText('Add room'), { target: { value: ROOM_KEY } });
     fireEvent.click(screen.getByRole('button', { name: /Save/i }));
 
     await waitFor(() => expect(updateBot).toHaveBeenCalled());
     const payload = updateBot.mock.calls[0][1];
-    expect(payload.respond_to_rooms).toBe(false);
-    // Turning a bot off in rooms must not also silence it in DMs.
-    expect(payload.respond_to_dms).toBe(true);
+    expect(payload.scope).toEqual({ channels: 'all', rooms: { only: [ROOM_KEY] } });
+  });
+
+  it('answers no room at all when Only is left empty', async () => {
+    vi.spyOn(api, 'getBot').mockResolvedValue(makeBot());
+    const updateBot = vi.spyOn(api, 'updateBot').mockResolvedValue(makeBot());
+
+    render(
+      <BotEditor
+        botId="bot-1"
+        channels={[]}
+        contacts={[room]}
+        onBack={vi.fn()}
+        onDeleted={vi.fn()}
+      />
+    );
+
+    const group = await screen.findByRole('group', { name: 'Room servers' });
+    fireEvent.click(within(group).getByRole('button', { name: 'Only…' }));
+    expect(
+      screen.getByText('No rooms picked, so this bot stays silent in every one of them.')
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }));
+
+    await waitFor(() => expect(updateBot).toHaveBeenCalled());
+    expect(updateBot.mock.calls[0][1].scope).toEqual({ channels: 'all', rooms: { only: [] } });
+    // Rooms are their own list: silencing them leaves DMs alone.
+    expect(updateBot.mock.calls[0][1].respond_to_dms).toBe(true);
   });
 
   it('simulates a room post from the Test tab', async () => {
@@ -130,7 +181,9 @@ describe('bots in rooms', () => {
       logs: [],
     });
 
-    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+    render(
+      <BotEditor botId="bot-1" channels={[]} contacts={[]} onBack={vi.fn()} onDeleted={vi.fn()} />
+    );
 
     fireEvent.click(await screen.findByRole('button', { name: 'Test' }));
     fireEvent.change(screen.getByPlaceholderText('wx 98101'), { target: { value: 'ping' } });

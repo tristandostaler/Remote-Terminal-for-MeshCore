@@ -42,7 +42,6 @@ function makeBot(): Bot {
     enabled: false,
     admin_only: false,
     respond_to_dms: true,
-    respond_to_rooms: true,
     scope: { channels: 'all' },
     cooldown_seconds: 0,
     per_user_cooldown_seconds: 0,
@@ -82,7 +81,9 @@ describe('BotEditor settings schema URL fields', () => {
       value: { writeText },
     });
 
-    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+    render(
+      <BotEditor botId="bot-1" channels={[]} contacts={[]} onBack={vi.fn()} onDeleted={vi.fn()} />
+    );
 
     const endpoint = await screen.findByDisplayValue('https://api.example.test/incoming');
     expect(endpoint).toHaveAttribute('type', 'url');
@@ -125,7 +126,9 @@ describe('BotEditor settings schema URL fields', () => {
       configurable: true,
       value: { writeText },
     });
-    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+    render(
+      <BotEditor botId="bot-1" channels={[]} contacts={[]} onBack={vi.fn()} onDeleted={vi.fn()} />
+    );
 
     fireEvent.click(await screen.findByRole('button', { name: 'Test callback' }));
     fireEvent.click(screen.getByRole('button', { name: 'Copy callback' }));
@@ -143,7 +146,9 @@ describe('BotEditor settings schema URL fields', () => {
     const execCommand = vi.fn().mockReturnValue(true);
     Object.defineProperty(document, 'execCommand', { configurable: true, value: execCommand });
 
-    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+    render(
+      <BotEditor botId="bot-1" channels={[]} contacts={[]} onBack={vi.fn()} onDeleted={vi.fn()} />
+    );
     fireEvent.click(await screen.findByRole('button', { name: 'Copy callback' }));
 
     await waitFor(() => expect(execCommand).toHaveBeenCalledWith('copy'));
@@ -201,7 +206,9 @@ describe('BotEditor settings schema URL fields', () => {
     providerBot.settings = { provider: 'voipms' };
     vi.spyOn(api, 'getBot').mockResolvedValue(providerBot);
 
-    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+    render(
+      <BotEditor botId="bot-1" channels={[]} contacts={[]} onBack={vi.fn()} onDeleted={vi.fn()} />
+    );
 
     const provider = await screen.findByLabelText('SMS provider');
     expect(screen.getByText('VoIP username')).toBeInTheDocument();
@@ -220,7 +227,9 @@ describe('BotEditor extra keywords', () => {
     const bot = makeBot();
     bot.declared_keywords = declared;
     vi.spyOn(api, 'getBot').mockResolvedValue(bot);
-    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+    render(
+      <BotEditor botId="bot-1" channels={[]} contacts={[]} onBack={vi.fn()} onDeleted={vi.fn()} />
+    );
     fireEvent.click(await screen.findByRole('button', { name: 'Triggers' }));
     return screen.getByPlaceholderText('add keyword…');
   }
@@ -252,7 +261,9 @@ describe('BotEditor about block', () => {
 
   it('shows the short description and the long one under it on the Settings tab', async () => {
     vi.spyOn(api, 'getBot').mockResolvedValue(makeBot());
-    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+    render(
+      <BotEditor botId="bot-1" channels={[]} contacts={[]} onBack={vi.fn()} onDeleted={vi.fn()} />
+    );
 
     // Settings is the tab the editor opens on: what the bot does comes before
     // how it is configured.
@@ -267,7 +278,9 @@ describe('BotEditor about block', () => {
     bot.description = '';
     bot.long_description = '';
     vi.spyOn(api, 'getBot').mockResolvedValue(bot);
-    render(<BotEditor botId="bot-1" channels={[]} onBack={vi.fn()} onDeleted={vi.fn()} />);
+    render(
+      <BotEditor botId="bot-1" channels={[]} contacts={[]} onBack={vi.fn()} onDeleted={vi.fn()} />
+    );
 
     await screen.findByText('Where it runs');
     expect(screen.queryByText('What this bot does')).not.toBeInTheDocument();
