@@ -119,6 +119,12 @@ describe('bots in rooms', () => {
     expect(await screen.findByText('All channels + DMs')).toBeInTheDocument();
   });
 
+  it('leaves rooms out of the summary for a scope written before rooms existed', async () => {
+    // Rooms are opt-in, so a missing selection reads as none of them.
+    renderList(makeBot({ scope: { channels: 'all' } }));
+    expect(await screen.findByText('All channels + DMs')).toBeInTheDocument();
+  });
+
   it('narrows the room scope to a picked room and saves it', async () => {
     vi.spyOn(api, 'getBot').mockResolvedValue(makeBot());
     const updateBot = vi.spyOn(api, 'updateBot').mockResolvedValue(makeBot());
@@ -168,6 +174,31 @@ describe('bots in rooms', () => {
     expect(updateBot.mock.calls[0][1].scope).toEqual({ channels: 'all', rooms: { only: [] } });
     // Rooms are their own list: silencing them leaves DMs alone.
     expect(updateBot.mock.calls[0][1].respond_to_dms).toBe(true);
+  });
+
+  it('opens on an empty room pick list when the scope names no rooms', async () => {
+    // A new bot's default, and any scope predating rooms: "Only…" with nothing
+    // ticked, so the operator adds the rooms the bot may speak in.
+    vi.spyOn(api, 'getBot').mockResolvedValue(makeBot({ scope: { channels: 'all' } }));
+    const updateBot = vi.spyOn(api, 'updateBot').mockResolvedValue(makeBot());
+
+    render(
+      <BotEditor
+        botId="bot-1"
+        channels={[]}
+        contacts={[room]}
+        onBack={vi.fn()}
+        onDeleted={vi.fn()}
+      />
+    );
+
+    expect(
+      await screen.findByText('No rooms picked, so this bot stays silent in every one of them.')
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }));
+
+    await waitFor(() => expect(updateBot).toHaveBeenCalled());
+    expect(updateBot.mock.calls[0][1].scope).toEqual({ channels: 'all', rooms: { only: [] } });
   });
 
   it('simulates a room post from the Test tab', async () => {

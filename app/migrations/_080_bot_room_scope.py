@@ -3,11 +3,13 @@ import logging
 
 import aiosqlite
 
+from app.bot_scope import no_rooms
+
 logger = logging.getLogger(__name__)
 
 
 async def migrate(conn: aiosqlite.Connection) -> None:
-    """Give every bot a ``rooms`` selection inside its ``scope``.
+    """Spell out every bot's ``rooms`` selection: no rooms, until one is picked.
 
     Room-server posts arrive as direct messages from the room's own contact, so
     until now they passed the ``respond_to_dms`` gate and the bot answered by
@@ -15,11 +17,12 @@ async def migrate(conn: aiosqlite.Connection) -> None:
     their own conversation kind, picked from a list the same way channels are:
     ``scope.rooms`` is ``"all"``, ``"none"``, or ``{"only"|"except": [keys]}``.
 
-    Existing rows inherit ``respond_to_dms`` — all rooms if the bot answered
-    DMs, no rooms if it did not — so no bot gains or loses reach over the
-    upgrade; only where its answer lands changes. A scope that already names
-    rooms is left alone, and a missing key means every room, so nothing depends
-    on this having run.
+    Rooms are opt-in, because the answer is now public to everyone logged in
+    rather than a DM to one person, so existing rows get the same empty pick
+    list a new bot starts with and the operator names the rooms each bot may
+    speak in. That is what the engine already reads a missing key as, so this
+    only makes the stored scope say out loud what it means; a scope that already
+    names rooms is left alone.
     """
     table_check = await conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='bots'"
@@ -31,16 +34,12 @@ async def migrate(conn: aiosqlite.Connection) -> None:
     columns = {row[1] for row in await cursor.fetchall()}
     if "scope" not in columns:
         return
-    # A database old enough to predate the DM gate has nothing to inherit from;
-    # "all rooms" is the default either way.
-    has_dm_gate = "respond_to_dms" in columns
 
-    dm_gate = "respond_to_dms" if has_dm_gate else "1"
-    cursor = await conn.execute(f"SELECT id, scope, {dm_gate} FROM bots")
+    cursor = await conn.execute("SELECT id, scope FROM bots")
     rows = await cursor.fetchall()
 
     updated = 0
-    for bot_id, raw_scope, answers_dms in rows:
+    for bot_id, raw_scope in rows:
         try:
             scope = json.loads(raw_scope) if raw_scope else {}
         except (json.JSONDecodeError, TypeError):
@@ -50,10 +49,10 @@ async def migrate(conn: aiosqlite.Connection) -> None:
             continue
         if not isinstance(scope, dict) or "rooms" in scope:
             continue
-        scope["rooms"] = "all" if answers_dms else {"only": []}
+        scope["rooms"] = no_rooms()
         await conn.execute("UPDATE bots SET scope = ? WHERE id = ?", (json.dumps(scope), bot_id))
         updated += 1
 
     await conn.commit()
     if updated:
-        logger.info("Gave %d bot(s) a room scope inherited from respond_to_dms", updated)
+        logger.info("Gave %d bot(s) an empty room scope to pick from", updated)

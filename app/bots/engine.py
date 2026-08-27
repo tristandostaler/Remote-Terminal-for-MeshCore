@@ -16,7 +16,8 @@ Ordering / limits (engine settings, Bots › Engine tab):
 * room-server posts are their own conversation kind (``msg.is_room``), gated by
   the bot's ``scope.rooms`` selection — the same shape as ``scope.channels``, so
   a bot can answer in one room and ignore another — and answered back into the
-  room rather than to whoever posted;
+  room rather than to whoever posted; rooms are opt-in, so a bot answers in the
+  rooms it names and in no other;
 * every outgoing bot send is serialized behind a TX-spacing lock.
 """
 
@@ -33,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from app.bot_scope import no_rooms
 from app.bots.api import BotContext, BotMessage
 from app.bots.cron import CronSchedule, parse_cron
 from app.bots.moderation import apply_profanity_mode, is_banned_sender
@@ -482,9 +484,10 @@ class BotEngine:
     def _scope_allows(self, bot: Bot, msg: BotMessage) -> bool:
         scope = bot.scope if isinstance(bot.scope, dict) else {}
         if msg.is_room:
-            # A scope written before rooms existed says nothing about them, and
-            # the operator picks rooms from a list the same way as channels.
-            return self._selection_allows(scope.get("rooms", "all"), msg.room_key)
+            # Rooms are opt-in: the operator picks them from a list the same way
+            # as channels, and a scope that names none of them -- including one
+            # written before rooms existed -- keeps the bot out of every room.
+            return self._selection_allows(scope.get("rooms", no_rooms()), msg.room_key)
         if msg.is_dm:
             return bot.respond_to_dms
         return self._selection_allows(scope.get("channels", "all"), msg.channel_key)

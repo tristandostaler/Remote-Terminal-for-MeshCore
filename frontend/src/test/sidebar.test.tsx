@@ -889,9 +889,7 @@ describe('Sidebar unread section', () => {
     const unread = getSectionHeaderContainer('Unread');
     for (const title of ['Favorites', 'Channels', 'Contacts', 'Repeaters', 'Room Servers']) {
       const other = getSectionHeaderContainer(title);
-      expect(
-        unread.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING
-      ).toBeTruthy();
+      expect(unread.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     }
   });
 

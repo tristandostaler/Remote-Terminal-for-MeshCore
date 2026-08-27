@@ -1784,8 +1784,9 @@ class Bot(BaseModel):
     admin_only: bool = False
     respond_to_dms: bool = True
     # ``{"channels": ..., "rooms": ...}``, each ``"all"`` / ``"none"`` /
-    # ``{"only"|"except": [keys]}``. A missing ``rooms`` key means every room:
-    # scopes written before rooms existed say nothing about them.
+    # ``{"only"|"except": [keys]}``. Rooms are opt-in: a new bot starts with an
+    # empty pick list, and a missing ``rooms`` key means no room at all (scopes
+    # written before rooms existed say nothing about them).
     scope: dict = Field(default_factory=default_bot_scope)
     cooldown_seconds: float = 0
     per_user_cooldown_seconds: float = 0

@@ -87,8 +87,10 @@ class TestScopeGate:
         bot = scoped({"only": [ROOM_KEY.upper()]})
         assert self.engine._scope_allows(bot, room_msg(room_key=ROOM_KEY.lower()))
 
-    def test_a_scope_written_before_rooms_answers_every_room(self):
-        assert self.engine._scope_allows(make_bot(scope={"channels": "all"}), room_msg())
+    def test_a_scope_that_names_no_rooms_answers_none_of_them(self):
+        # Rooms are opt-in, so a scope written before rooms existed -- and a new
+        # bot's empty pick list -- keeps the bot out of every one of them.
+        assert not self.engine._scope_allows(make_bot(scope={"channels": "all"}), room_msg())
 
     def test_dm_gate_does_not_cover_rooms(self):
         # The two are separate decisions in both directions.
@@ -391,9 +393,9 @@ class TestMigration:
         async with test_db.tx() as conn:
             await migrate(conn)
 
-    async def test_inherits_respond_to_dms(self, test_db):
-        # Existing bots keep the reach they had: room posts used to pass the DM
-        # gate, so that is what the new selection starts from.
+    async def test_every_bot_starts_with_an_empty_pick_list(self, test_db):
+        # Rooms are opt-in, so no bot gains a public voice in a room over the
+        # upgrade -- whichever way its DM gate was set.
         from app.repository.bots import BotRepository
 
         await self._run(
@@ -406,7 +408,7 @@ class TestMigration:
         off = await BotRepository.get("legacy-off")
         on = await BotRepository.get("legacy-on")
         assert off is not None and off.scope["rooms"] == {"only": []}
-        assert on is not None and on.scope["rooms"] == "all"
+        assert on is not None and on.scope["rooms"] == {"only": []}
         # The channel half is left exactly as it was.
         assert on.scope["channels"] == "all"
 
@@ -426,4 +428,4 @@ class TestMigration:
         # An unreadable scope falls back to the default rather than crashing the
         # migration, and its neighbour is still migrated.
         assert broken is not None
-        assert fine is not None and fine.scope["rooms"] == "all"
+        assert fine is not None and fine.scope["rooms"] == {"only": []}
