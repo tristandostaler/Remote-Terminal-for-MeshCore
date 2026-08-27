@@ -461,35 +461,70 @@ describe('RepeaterDashboard', () => {
     expect(screen.getByText('Fetching (attempt 2/3)...')).toBeInTheDocument();
   });
 
+  const makeStatus = () => ({
+    battery_volts: 4.2,
+    tx_queue_len: 0,
+    noise_floor_dbm: -120,
+    last_rssi_dbm: -85,
+    last_snr_db: 7.5,
+    packets_received: 100,
+    packets_sent: 50,
+    airtime_seconds: 600,
+    rx_airtime_seconds: 1200,
+    uptime_seconds: 86400,
+    sent_flood: 10,
+    sent_direct: 40,
+    recv_flood: 30,
+    recv_direct: 70,
+    flood_dups: 1,
+    direct_dups: 0,
+    full_events: 0,
+    recv_errors: 5,
+    telemetry_history: [],
+  });
+
   it('renders telemetry data when available', () => {
     mockHook.loggedIn = true;
-    mockHook.paneData.status = {
-      battery_volts: 4.2,
-      tx_queue_len: 0,
-      noise_floor_dbm: -120,
-      last_rssi_dbm: -85,
-      last_snr_db: 7.5,
-      packets_received: 100,
-      packets_sent: 50,
-      airtime_seconds: 600,
-      rx_airtime_seconds: 1200,
-      uptime_seconds: 86400,
-      sent_flood: 10,
-      sent_direct: 40,
-      recv_flood: 30,
-      recv_direct: 70,
-      flood_dups: 1,
-      direct_dups: 0,
-      full_events: 0,
-      recv_errors: 5,
-      telemetry_history: [],
-    };
+    mockHook.paneData.status = makeStatus();
 
     render(<RepeaterDashboard {...defaultProps} />);
 
     expect(screen.getByText('4.200V')).toBeInTheDocument();
     expect(screen.getByText('-120 dBm')).toBeInTheDocument();
     expect(screen.getByText('7.5 dB')).toBeInTheDocument();
+  });
+
+  it('reports airtime in hours and as a share of uptime, keeping d/h/m on hover', () => {
+    mockHook.loggedIn = true;
+    mockHook.paneData.status = makeStatus();
+
+    render(<RepeaterDashboard {...defaultProps} />);
+
+    // 600s TX and 1200s RX against a day of uptime.
+    const txRow = screen.getByText('TX Airtime').closest('div');
+    const rxRow = screen.getByText('RX Airtime').closest('div');
+    if (!txRow || !rxRow) throw new Error('Missing airtime rows');
+
+    expect(txRow).toHaveTextContent('0.17h');
+    expect(txRow).toHaveTextContent('0.69%');
+    expect(rxRow).toHaveTextContent('0.33h');
+    expect(rxRow).toHaveTextContent('1.39%');
+
+    expect(within(txRow).getByTitle('10m')).toBeInTheDocument();
+    expect(within(rxRow).getByTitle('20m')).toBeInTheDocument();
+  });
+
+  it('omits the airtime percentage when uptime is unknown', () => {
+    mockHook.loggedIn = true;
+    mockHook.paneData.status = { ...makeStatus(), uptime_seconds: 0 };
+
+    render(<RepeaterDashboard {...defaultProps} />);
+
+    const txRow = screen.getByText('TX Airtime').closest('div');
+    if (!txRow) throw new Error('Missing TX airtime row');
+
+    expect(txRow).toHaveTextContent('0.17h');
+    expect(txRow).not.toHaveTextContent('%');
   });
 
   it('formats the radio tuple and preserves the raw tuple in a tooltip', () => {
@@ -725,6 +760,22 @@ describe('RepeaterDashboard', () => {
 
       expect(screen.getByText('Telemetry History')).toBeInTheDocument();
       expect(screen.getByText(/No history yet/)).toBeInTheDocument();
+    });
+
+    it('offers Airtime as a chart metric and selects it', () => {
+      mockHook.loggedIn = true;
+
+      render(<RepeaterDashboard {...defaultProps} />);
+
+      const airtime = screen.getByRole('button', { name: 'Airtime' });
+      expect(airtime).toBeInTheDocument();
+      expect(airtime).not.toHaveClass('bg-primary');
+
+      fireEvent.click(airtime);
+
+      expect(airtime).toHaveClass('bg-primary');
+      // The previous default deselects, so only one metric is ever active.
+      expect(screen.getByRole('button', { name: 'Voltage' })).not.toHaveClass('bg-primary');
     });
 
     it('updates history from live status fetch', async () => {

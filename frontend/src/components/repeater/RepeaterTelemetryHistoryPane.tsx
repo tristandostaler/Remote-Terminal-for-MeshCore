@@ -23,6 +23,7 @@ type BuiltinMetric =
   | 'battery_volts'
   | 'noise_floor_dbm'
   | 'packets'
+  | 'airtime'
   | 'recv_errors'
   | 'uptime_seconds';
 
@@ -32,10 +33,24 @@ interface MetricConfig {
   color: string;
 }
 
+interface ChartSeries {
+  key: string;
+  color: string;
+  axis: 'left' | 'right';
+  /** Drawn as an unfilled line rather than a filled area. */
+  line: boolean;
+  label: string;
+  /** Areas sharing an id stack into a single summed band. */
+  stack?: string;
+}
+
 const BUILTIN_METRIC_CONFIG: Record<BuiltinMetric, MetricConfig> = {
   battery_volts: { label: 'Voltage', unit: 'V', color: '#22c55e' },
   noise_floor_dbm: { label: 'Noise Floor', unit: 'dBm', color: '#8b5cf6' },
   packets: { label: 'Packets', unit: '', color: '#0ea5e9' },
+  // Unit stays empty: the airtime view carries per-axis units (% and h) of its
+  // own, so there is no single suffix for `formatSeriesValue` to append.
+  airtime: { label: 'Airtime', unit: '', color: '#f43f5e' },
   recv_errors: { label: 'RX Errors', unit: '', color: '#ef4444' },
   uptime_seconds: { label: 'Uptime', unit: 's', color: '#f59e0b' },
 };
@@ -109,6 +124,52 @@ function paddedDomain(values: number[]): [number, number] | undefined {
   // line doesn't sit on a degenerate zero-height axis.
   const pad = span === 0 ? Math.abs(lo) * 0.1 || 1 : span * 0.1;
   return [lo - pad, hi + pad];
+}
+
+/** Airtime counters are cumulative since boot, and so is uptime, so their ratio
+ *  is the repeater's lifetime duty cycle -- the same number the Telemetry pane
+ *  prints. A sample with no uptime yields nothing rather than a division by
+ *  zero, which keeps the gap distinguishable from a genuine 0%. */
+export function airtimePercent(
+  seconds: number | undefined,
+  uptimeSeconds: number | undefined
+): number | undefined {
+  if (seconds == null || uptimeSeconds == null || uptimeSeconds <= 0) return undefined;
+  return +((seconds / uptimeSeconds) * 100).toFixed(2);
+}
+
+/** Hours rather than the pane's d/h/m form: the chart needs a plain number to
+ *  plot, and hours keeps short samples off a degenerate zero axis. */
+export function airtimeHours(seconds: number | undefined): number | undefined {
+  return seconds == null ? undefined : +(seconds / 3600).toFixed(2);
+}
+
+/** Y extent for a group of areas sharing a stackId. The axis has to clear the
+ *  top of the summed band rather than the tallest single series, and a stacked
+ *  percentage band only reads correctly when it is anchored at zero. */
+export function stackedDomain(
+  data: Array<Record<string, number | undefined>>,
+  keys: string[]
+): [number, number] | undefined {
+  let max = 0;
+  let sawValue = false;
+  for (const d of data) {
+    let sum = 0;
+    let any = false;
+    for (const k of keys) {
+      const v = d[k];
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        sum += v;
+        any = true;
+      }
+    }
+    if (any) {
+      sawValue = true;
+      max = Math.max(max, sum);
+    }
+  }
+  if (!sawValue) return undefined;
+  return [0, max === 0 ? 1 : max * 1.1];
 }
 
 /** Decimal places to render axis ticks at, derived from the axis span so a
@@ -193,6 +254,12 @@ function buildCsvColumns(lppMetrics: { key: string; config: MetricConfig }[]): C
     { key: 'packets_sent', header: 'Packets Sent' },
     { key: 'packets_received_delta', header: 'Packets Received Delta' },
     { key: 'packets_sent_delta', header: 'Packets Sent Delta' },
+    { key: 'airtime_seconds', header: 'TX Airtime (s)' },
+    { key: 'rx_airtime_seconds', header: 'RX Airtime (s)' },
+    { key: 'tx_airtime_hours', header: 'TX Airtime (h)' },
+    { key: 'rx_airtime_hours', header: 'RX Airtime (h)' },
+    { key: 'tx_airtime_pct', header: 'TX Airtime (%)' },
+    { key: 'rx_airtime_pct', header: 'RX Airtime (%)' },
     { key: 'recv_errors', header: 'RX Errors' },
     { key: 'recv_error_pct', header: 'RX Error Rate (%)' },
     {
@@ -333,6 +400,10 @@ export function TelemetryHistoryPane({
           : undefined;
       if (packetsReceived != null) prevRecv = packetsReceived;
       if (packetsSent != null) prevSent = packetsSent;
+      const uptime = d.uptime_seconds;
+      const txAirtime = d.airtime_seconds;
+      const rxAirtime = d.rx_airtime_seconds;
+
       const point: Record<string, number | undefined> = {
         timestamp: e.timestamp,
         battery_volts: d.battery_volts,
@@ -346,7 +417,13 @@ export function TelemetryHistoryPane({
           recvErrors != null && packetsReceived != null && packetsReceived + recvErrors > 0
             ? +((recvErrors / (packetsReceived + recvErrors)) * 100).toFixed(2)
             : undefined,
-        uptime_seconds: d.uptime_seconds,
+        uptime_seconds: uptime,
+        airtime_seconds: txAirtime,
+        rx_airtime_seconds: rxAirtime,
+        tx_airtime_hours: airtimeHours(txAirtime),
+        rx_airtime_hours: airtimeHours(rxAirtime),
+        tx_airtime_pct: airtimePercent(txAirtime, uptime),
+        rx_airtime_pct: airtimePercent(rxAirtime, uptime),
       };
       // Flatten LPP sensors into the point, converting units as needed
       for (const { sensor: s, key } of assignLppKeys(d.lpp_sensors ?? [])) {
@@ -361,7 +438,8 @@ export function TelemetryHistoryPane({
   // Series descriptors drive axes, colors, labels, and tooltip formatting.
   // Cumulative counters render as filled areas on the left axis; derived
   // per-sample deltas render as gapped lines on a secondary right axis.
-  const series = useMemo(() => {
+  // Areas sharing a `stack` id are drawn as one summed band.
+  const series = useMemo<ChartSeries[]>(() => {
     if (activeMetric === 'packets') {
       return [
         {
@@ -391,6 +469,44 @@ export function TelemetryHistoryPane({
           axis: 'right' as const,
           line: true,
           label: 'Sent Δ',
+        },
+      ];
+    }
+    if (activeMetric === 'airtime') {
+      // Duty cycle leads: TX and RX stack into one band whose top edge is the
+      // share of uptime the radio spent on air at all. The raw hours ride a
+      // second axis, since they run three orders of magnitude larger and would
+      // flatten the percentages into the baseline if they shared one.
+      return [
+        {
+          key: 'tx_airtime_pct',
+          color: '#f43f5e',
+          axis: 'left' as const,
+          line: false,
+          label: 'TX %',
+          stack: 'airtime_pct',
+        },
+        {
+          key: 'rx_airtime_pct',
+          color: '#0ea5e9',
+          axis: 'left' as const,
+          line: false,
+          label: 'RX %',
+          stack: 'airtime_pct',
+        },
+        {
+          key: 'tx_airtime_hours',
+          color: '#f59e0b',
+          axis: 'right' as const,
+          line: true,
+          label: 'TX hours',
+        },
+        {
+          key: 'rx_airtime_hours',
+          color: '#14b8a6',
+          axis: 'right' as const,
+          line: true,
+          label: 'RX hours',
         },
       ];
     }
@@ -443,15 +559,24 @@ export function TelemetryHistoryPane({
     [chartData, brushStart, brushEnd]
   );
 
+  const leftStacked = useMemo(() => series.some((s) => s.axis === 'left' && s.stack), [series]);
+
   // Y extents bound to the visible window so zooming re-tightens the axis.
   const leftDomain = useMemo(
-    () => paddedDomain(collectValues(visibleData, leftKeys)),
-    [visibleData, leftKeys]
+    () =>
+      leftStacked
+        ? stackedDomain(visibleData, leftKeys)
+        : paddedDomain(collectValues(visibleData, leftKeys)),
+    [leftStacked, visibleData, leftKeys]
   );
-  const rightDomain = useMemo(
-    () => (rightKeys.length ? paddedDomain(collectValues(visibleData, rightKeys)) : undefined),
-    [visibleData, rightKeys]
-  );
+  const rightDomain = useMemo((): [number, number] | undefined => {
+    if (!rightKeys.length) return undefined;
+    const domain = paddedDomain(collectValues(visibleData, rightKeys));
+    // Airtime hours are non-negative counters, so the 10% pad below the minimum
+    // would otherwise put impossible values ("-0.3h") on the axis.
+    if (domain && activeMetric === 'airtime') return [Math.max(0, domain[0]), domain[1]];
+    return domain;
+  }, [visibleData, rightKeys, activeMetric]);
 
   // Tick precision tracks each axis's current span so zooming into a flat
   // series (e.g. battery voltage) keeps labels clean instead of leaking
@@ -472,7 +597,8 @@ export function TelemetryHistoryPane({
   };
 
   const formatSeriesValue = (key: string, value: number): string => {
-    if (key === 'recv_error_pct') return `${cleanNumber(value)}%`;
+    if (key === 'recv_error_pct' || key.endsWith('_airtime_pct')) return `${cleanNumber(value)}%`;
+    if (key.endsWith('_airtime_hours')) return `${cleanNumber(value)} h`;
     if (activeMetric === 'uptime_seconds') return formatUptime(value);
     const suffix =
       activeConfig.unit && activeMetric !== 'packets' && activeMetric !== 'recv_errors'
@@ -698,9 +824,11 @@ export function TelemetryHistoryPane({
                 tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
                 tickLine={false}
                 axisLine={false}
-                tickFormatter={(v) =>
-                  activeMetric === 'uptime_seconds' ? formatUptime(v) : v.toFixed(leftTickDecimals)
-                }
+                tickFormatter={(v) => {
+                  if (activeMetric === 'uptime_seconds') return formatUptime(v);
+                  if (activeMetric === 'airtime') return `${v.toFixed(leftTickDecimals)}%`;
+                  return v.toFixed(leftTickDecimals);
+                }}
               />
               {rightKeys.length > 0 && (
                 <YAxis
@@ -710,11 +838,11 @@ export function TelemetryHistoryPane({
                   tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
                   tickLine={false}
                   axisLine={false}
-                  tickFormatter={(v) =>
-                    activeMetric === 'recv_errors'
-                      ? `${v.toFixed(rightTickDecimals)}%`
-                      : v.toFixed(rightTickDecimals)
-                  }
+                  tickFormatter={(v) => {
+                    if (activeMetric === 'recv_errors') return `${v.toFixed(rightTickDecimals)}%`;
+                    if (activeMetric === 'airtime') return `${v.toFixed(rightTickDecimals)}h`;
+                    return v.toFixed(rightTickDecimals);
+                  }}
                 />
               )}
               <RechartsTooltip
@@ -731,6 +859,7 @@ export function TelemetryHistoryPane({
                   type="linear"
                   dataKey={s.key}
                   yAxisId={s.axis}
+                  stackId={s.stack}
                   connectNulls={false}
                   stroke={s.color}
                   fill={s.color}

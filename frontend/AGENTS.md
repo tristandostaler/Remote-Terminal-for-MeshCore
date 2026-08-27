@@ -678,6 +678,20 @@ arrive. Repeaters are excluded (their unread counts are console/status noise) an
 are muted channels (`buildChannelRow` already zeroes their unread count). Rows carry
 `data-sidebar-section` so tests can address a specific copy.
 
+### Airtime percentages are lifetime duty cycles, not per-interval
+
+`airtime_seconds` / `rx_airtime_seconds` and `uptime_seconds` are all cumulative
+since the repeater booted, so `airtimePercent` divides one cumulative counter by
+another: the result is the average share of uptime spent on air since boot, the
+same figure the Telemetry pane prints. It moves slowly and does not spike with a
+busy hour -- that is the metric, not a smoothing bug. A reboot resets both
+counters together, so the ratio stays meaningful across one.
+
+The Airtime chart stacks TX% and RX% into one band, so its left axis is sized by
+`stackedDomain` (the sum at each point, anchored at zero) rather than
+`paddedDomain`, which only ever sees individual series and would clip the top of
+the band. Any future stacked series needs the same treatment.
+
 ### RawPacketList autoscroll
 
 `RawPacketList` sticks to the latest packet on every update when its `autoScroll` prop is true (the default). `RawPacketFeedView` exposes an "Autoscroll" checkbox next to the type filters (default ticked, session-only — intentionally not persisted) so users can pause scrolling to correlate older packets. Toggling it back on jumps to the bottom immediately (`autoScroll` is an effect dependency).

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  airtimeHours,
+  airtimePercent,
   buildTelemetryCsv,
+  stackedDomain,
   telemetryCsvFilename,
   toLocalIsoString,
 } from '../components/repeater/RepeaterTelemetryHistoryPane';
@@ -94,5 +97,76 @@ describe('buildTelemetryCsv', () => {
     const csv = buildTelemetryCsv([{ timestamp: 1700000000 }], COLUMNS);
 
     expect(csv.split('\r\n')[1].split(',')[0]).toBe(toLocalIsoString(new Date(1700000000 * 1000)));
+  });
+});
+
+describe('airtimePercent', () => {
+  it('reports airtime as a share of uptime', () => {
+    // 10 minutes on air across a day of uptime.
+    expect(airtimePercent(600, 86400)).toBe(0.69);
+    expect(airtimePercent(1200, 86400)).toBe(1.39);
+  });
+
+  it('returns undefined instead of dividing by an absent or zero uptime', () => {
+    expect(airtimePercent(600, 0)).toBeUndefined();
+    expect(airtimePercent(600, undefined)).toBeUndefined();
+    expect(airtimePercent(undefined, 86400)).toBeUndefined();
+  });
+
+  it('keeps a genuine zero distinguishable from a missing sample', () => {
+    expect(airtimePercent(0, 86400)).toBe(0);
+  });
+});
+
+describe('airtimeHours', () => {
+  it('converts seconds to hours', () => {
+    expect(airtimeHours(3600)).toBe(1);
+    expect(airtimeHours(600)).toBe(0.17);
+  });
+
+  it('passes a missing reading through as undefined', () => {
+    expect(airtimeHours(undefined)).toBeUndefined();
+  });
+});
+
+describe('stackedDomain', () => {
+  const KEYS = ['tx_airtime_pct', 'rx_airtime_pct'];
+
+  it('clears the top of the summed band, not the tallest single series', () => {
+    const domain = stackedDomain(
+      [
+        { tx_airtime_pct: 2, rx_airtime_pct: 8 },
+        { tx_airtime_pct: 3, rx_airtime_pct: 7 },
+      ],
+      KEYS
+    );
+
+    // Tallest single value is 8; the band reaches 10, plus 10% headroom.
+    expect(domain).toEqual([0, 11]);
+  });
+
+  it('anchors at zero so a percentage band reads against a real baseline', () => {
+    expect(stackedDomain([{ tx_airtime_pct: 40, rx_airtime_pct: 50 }], KEYS)?.[0]).toBe(0);
+  });
+
+  it('treats a partially missing point as the sum of what is present', () => {
+    const domain = stackedDomain(
+      [
+        { tx_airtime_pct: 4, rx_airtime_pct: undefined },
+        { tx_airtime_pct: 1, rx_airtime_pct: 1 },
+      ],
+      KEYS
+    );
+
+    expect(domain).toEqual([0, 4.4]);
+  });
+
+  it('falls back to a unit axis when every point sums to zero', () => {
+    expect(stackedDomain([{ tx_airtime_pct: 0, rx_airtime_pct: 0 }], KEYS)).toEqual([0, 1]);
+  });
+
+  it('returns undefined when nothing is plottable, leaving recharts to auto-scale', () => {
+    expect(stackedDomain([{ tx_airtime_pct: undefined }], KEYS)).toBeUndefined();
+    expect(stackedDomain([], KEYS)).toBeUndefined();
   });
 });

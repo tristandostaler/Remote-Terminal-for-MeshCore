@@ -12,6 +12,13 @@ function formatAirtimePercent(airtimeSec: number, uptimeSec: number): string | n
   return `${((airtimeSec / uptimeSec) * 100).toFixed(2)}%`;
 }
 
+/** Airtime reads as a duty cycle, so hours is the unit that compares across
+ *  repeaters and matches the history chart's axis. The friendlier d/h/m form
+ *  stays on the row's tooltip rather than replacing it. */
+function formatHours(seconds: number): string {
+  return `${(seconds / 3600).toFixed(2)}h`;
+}
+
 function formatPerMinute(count: number, uptimeSec: number): string | null {
   if (uptimeSec <= 0) return null;
   const rate = (count * 60) / uptimeSec;
@@ -45,19 +52,19 @@ export function TelemetryPane({
           <KvRow
             label="TX Airtime"
             value={
-              <>
-                {formatDuration(data.airtime_seconds)}
+              <span title={formatDuration(data.airtime_seconds)}>
+                {formatHours(data.airtime_seconds)}
                 {txPct && <Secondary>({txPct})</Secondary>}
-              </>
+              </span>
             }
           />
           <KvRow
             label="RX Airtime"
             value={
-              <>
-                {formatDuration(data.rx_airtime_seconds)}
+              <span title={formatDuration(data.rx_airtime_seconds)}>
+                {formatHours(data.rx_airtime_seconds)}
                 {rxPct && <Secondary>({rxPct})</Secondary>}
-              </>
+              </span>
             }
           />
           <Separator className="my-1" />
