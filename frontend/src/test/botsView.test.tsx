@@ -16,6 +16,7 @@ function makeBot(overrides: Partial<Bot> = {}): Bot {
     enabled: true,
     admin_only: false,
     respond_to_dms: true,
+    respond_to_rooms: true,
     scope: { channels: 'all' },
     cooldown_seconds: 0,
     per_user_cooldown_seconds: 0,

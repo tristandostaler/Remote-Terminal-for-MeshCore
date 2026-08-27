@@ -793,10 +793,13 @@ export const api = {
     body: {
       text: string;
       is_dm?: boolean;
+      is_room?: boolean;
       sender_name?: string;
       sender_key?: string | null;
       channel_key?: string | null;
       channel_name?: string | null;
+      room_key?: string | null;
+      room_name?: string | null;
     }
   ) =>
     fetchJson<BotTestResponse>(`/bots/${id}/test`, { method: 'POST', body: JSON.stringify(body) }),

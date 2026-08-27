@@ -240,6 +240,14 @@ class BotMessage:
     is_dm: bool = False
     channel_key: str | None = None
     channel_name: str | None = None
+    # Room-server post: someone spoke in a room this node is logged into.
+    # ``sender_key``/``sender_name`` are the person who posted; ``room_key`` is
+    # the room contact, which is where ``ctx.reply`` sends. A room post is
+    # neither a DM nor a channel message -- ``is_dm`` is False and
+    # ``channel_key`` is None -- so a DM-only bot stays out of rooms.
+    is_room: bool = False
+    room_key: str | None = None
+    room_name: str | None = None
     sender_timestamp: int | None = None
     path: str | None = None
     path_bytes_per_hop: int | None = None
@@ -306,6 +314,8 @@ class BotContext:
         origin_is_dm: bool = False,
         origin_sender_key: str | None = None,
         origin_channel_key: str | None = None,
+        origin_is_room: bool = False,
+        origin_room_key: str | None = None,
         locale: str = "en",
         is_test: bool = False,
         log_fn: Callable[[str, str], None] | None = None,
@@ -327,6 +337,8 @@ class BotContext:
         self._origin_is_dm = origin_is_dm
         self._origin_sender_key = origin_sender_key
         self._origin_channel_key = origin_channel_key
+        self._origin_is_room = origin_is_room
+        self._origin_room_key = origin_room_key
         self._log_fn = log_fn
         self._send_fn = send_fn
         self._translator = translator
@@ -395,8 +407,23 @@ class BotContext:
         self.replies_sent += 1
         return sent
 
+    def _reply_target(self) -> tuple[bool, str | None, str | None]:
+        """``(is_dm, destination, channel_key)`` for the triggering conversation.
+
+        A room post answers *into the room*, not to the person who posted: the
+        room contact is the destination and the send is an ordinary DM to it,
+        exactly like the operator typing in that room. Replying to the poster
+        instead would leave the room without the answer it asked for, and would
+        silently fail whenever we only know that poster by key prefix.
+        """
+        if self._origin_is_room:
+            return True, self._origin_room_key, None
+        if self._origin_is_dm:
+            return True, self._origin_sender_key, None
+        return False, None, self._origin_channel_key
+
     async def reply(self, text: str, *, region: Any = _UNSET) -> None:
-        """Reply where the triggering message came from (DM sender or channel).
+        """Reply where the triggering message came from (DM sender, room, or channel).
 
         ``region`` (channel replies only): omit for the channel default, pass a
         region name to scope this send, or ``None``/``""`` to force unscoped.
@@ -408,22 +435,14 @@ class BotContext:
             scope = ""
         else:
             scope = str(region)
-        if self._origin_is_dm:
-            await self._dispatch_send(
-                is_dm=True,
-                destination=self._origin_sender_key,
-                channel_key=None,
-                text=text,
-                flood_scope_override=None,
-            )
-        else:
-            await self._dispatch_send(
-                is_dm=False,
-                destination=None,
-                channel_key=self._origin_channel_key,
-                text=text,
-                flood_scope_override=scope,
-            )
+        is_dm, destination, channel_key = self._reply_target()
+        await self._dispatch_send(
+            is_dm=is_dm,
+            destination=destination,
+            channel_key=channel_key,
+            text=text,
+            flood_scope_override=None if is_dm else scope,
+        )
 
     async def _resolve_channel_key(self, channel: str) -> str:
         """Channel name (``#chan`` / ``Public``) or 32-hex key -> upper-case key."""
@@ -462,6 +481,52 @@ class BotContext:
         await self._dispatch_send(
             is_dm=True,
             destination=public_key,
+            channel_key=None,
+            text=text,
+            flood_scope_override=None,
+        )
+
+    async def _resolve_room_key(self, room: str) -> str:
+        """Room name or public key (full or prefix) -> the room contact's key."""
+        from app.models import CONTACT_TYPE_ROOM
+        from app.repository import AmbiguousPublicKeyPrefixError, ContactRepository
+
+        candidate = room.strip()
+        if not candidate:
+            raise ValueError("no room given")
+
+        contact = None
+        is_hex = len(candidate) >= 8 and all(c in "0123456789abcdefABCDEF" for c in candidate)
+        if is_hex:
+            try:
+                contact = await ContactRepository.get_by_key_or_prefix(candidate.lower())
+            except AmbiguousPublicKeyPrefixError as exc:
+                raise ValueError(f"room key prefix {room!r} is ambiguous") from exc
+        if contact is None:
+            named = [
+                c
+                for c in await ContactRepository.get_by_name(candidate)
+                if c.type == CONTACT_TYPE_ROOM
+            ]
+            if len(named) > 1:
+                raise ValueError(f"more than one room is named {room!r} — use its public key")
+            contact = named[0] if named else None
+        if contact is None:
+            raise ValueError(f"unknown room {room!r}")
+        if contact.type != CONTACT_TYPE_ROOM:
+            raise ValueError(f"{room!r} is not a room server")
+        return contact.public_key
+
+    async def send_room(self, room: str, text: str) -> None:
+        """Post into a room server by name or public key.
+
+        The node has to be logged in to that room already (Contacts › the room ›
+        login, or a stored credential with polling on); this only sends.
+        """
+        key = await self._resolve_room_key(room)
+        await self._dispatch_send(
+            is_dm=True,
+            destination=key,
             channel_key=None,
             text=text,
             flood_scope_override=None,
@@ -506,9 +571,9 @@ class BotContext:
         out as numbered parts, in order, each within the budget.
 
         ``max_bytes`` defaults to what the reply target can actually carry: 156
-        bytes for a DM, and 156 minus the radio's own ``"<name>: "`` framing for
-        a channel, since the firmware prepends that outside what we hand it.
-        Pass an explicit value to override.
+        bytes for a DM or a room post, and 156 minus the radio's own
+        ``"<name>: "`` framing for a channel, since the firmware prepends that
+        outside what we hand it. Pass an explicit value to override.
 
         When the reply target has MCMP compression enabled, parts are sized by
         their *compressed* wire length, so more text fits per message (fewer,
@@ -541,27 +606,29 @@ class BotContext:
             from app.services.radio_runtime import radio_runtime
 
             radio_manager = radio_runtime
+        is_dm, _destination, _channel_key = self._reply_target()
         # resolve_message_budget swallows its own radio errors and falls back to
         # a pessimistic name length, so it always returns a usable number.
         return await resolve_message_budget(
-            "PRIV" if self._origin_is_dm else "CHAN", radio_manager=radio_manager
+            "PRIV" if is_dm else "CHAN", radio_manager=radio_manager
         )
 
     async def _origin_mcmp_version(self) -> int | None:
         """MCMP version for the reply target if compression is enabled, else None."""
+        is_dm, destination, channel_key = self._reply_target()
         try:
-            if self._origin_is_dm:
-                if not self._origin_sender_key:
+            if is_dm:
+                if not destination:
                     return None
                 from app.repository import ContactRepository
 
-                contact = await ContactRepository.get_by_key(self._origin_sender_key)
+                contact = await ContactRepository.get_by_key(destination)
                 if contact and contact.mcmp_enabled:
                     return contact.mcmp_version
-            elif self._origin_channel_key:
+            elif channel_key:
                 from app.repository import ChannelRepository
 
-                channel = await ChannelRepository.get_by_key(self._origin_channel_key)
+                channel = await ChannelRepository.get_by_key(channel_key)
                 if channel and channel.mcmp_enabled:
                     return channel.mcmp_version
         except Exception:
@@ -656,7 +723,7 @@ class BotContext:
         source_width: int | None = None,
         source_height: int | None = None,
     ) -> int:
-        """Reply with a photo where the triggering message came from.
+        """Reply with a photo where the triggering message came from (rooms included).
 
         ``data`` is either an encoded image (JPEG/PNG/WebP -- anything Pillow can
         open, e.g. straight from ``ctx.http``) or exactly 786,432 bytes of
@@ -676,22 +743,13 @@ class BotContext:
             scope = ""
         else:
             scope = str(region)
-        if self._origin_is_dm:
-            return await self._dispatch_image(
-                data,
-                is_dm=True,
-                destination=self._origin_sender_key,
-                channel_key=None,
-                flood_scope_override=None,
-                source_width=source_width,
-                source_height=source_height,
-            )
+        is_dm, destination, channel_key = self._reply_target()
         return await self._dispatch_image(
             data,
-            is_dm=False,
-            destination=None,
-            channel_key=self._origin_channel_key,
-            flood_scope_override=scope,
+            is_dm=is_dm,
+            destination=destination,
+            channel_key=channel_key,
+            flood_scope_override=None if is_dm else scope,
             source_width=source_width,
             source_height=source_height,
         )
@@ -751,6 +809,30 @@ class BotContext:
             source_height=source_height,
         )
 
+    async def send_room_image(
+        self,
+        room: str,
+        data: bytes,
+        *,
+        source_width: int | None = None,
+        source_height: int | None = None,
+    ) -> int:
+        """Post a photo into a room server by name or public key.
+
+        See :meth:`reply_image` for what ``data`` accepts and what the recipient
+        needs.
+        """
+        key = await self._resolve_room_key(room)
+        return await self._dispatch_image(
+            data,
+            is_dm=True,
+            destination=key,
+            channel_key=None,
+            flood_scope_override=None,
+            source_width=source_width,
+            source_height=source_height,
+        )
+
     # -- geocoding -----------------------------------------------------------
     async def geocode(self, query: str) -> dict[str, Any] | None:
         """Resolve a place name / postal code via Nominatim. Cached in-process."""
@@ -804,3 +886,6 @@ class BotContext:
         asyncio.run_coroutine_threadsafe(self.send_dm(public_key, text), self._loop).result(
             timeout=30
         )
+
+    def send_room_sync(self, room: str, text: str) -> None:
+        asyncio.run_coroutine_threadsafe(self.send_room(room, text), self._loop).result(timeout=30)

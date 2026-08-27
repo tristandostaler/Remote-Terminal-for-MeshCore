@@ -300,6 +300,7 @@ async def create_bot(body: BotCreateRequest) -> Bot:
         code=code,
         enabled=body.enabled,
         respond_to_dms=bool(meta_defaults.get("respond_to_dms", True)),
+        respond_to_rooms=bool(meta_defaults.get("respond_to_rooms", True)),
         admin_only=bool(meta_defaults.get("admin_only", False)),
         # None falls through to the repository default: #bot / #bots + DMs.
         scope=meta_defaults.get("scope"),

@@ -1104,6 +1104,8 @@ export interface Bot {
   enabled: boolean;
   admin_only: boolean;
   respond_to_dms: boolean;
+  /** Room-server posts. A room reply is public to everyone logged into it. */
+  respond_to_rooms: boolean;
   scope: { channels: 'all' | 'none' | { only?: string[]; except?: string[] } };
   cooldown_seconds: number;
   per_user_cooldown_seconds: number;
@@ -1136,6 +1138,7 @@ export interface BotUpdatePayload {
   enabled?: boolean;
   admin_only?: boolean;
   respond_to_dms?: boolean;
+  respond_to_rooms?: boolean;
   scope?: Bot['scope'];
   cooldown_seconds?: number;
   per_user_cooldown_seconds?: number;

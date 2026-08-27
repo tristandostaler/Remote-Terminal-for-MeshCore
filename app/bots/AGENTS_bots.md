@@ -11,8 +11,9 @@ operators).
 
 - `api.py` — the authoring surface (`from remoteterm import bot` + `BotContext`).
   Decorators register handlers into a collector while `runtime.load_bot_code`
-  exec()s the source. `BotContext` carries sends (`reply`/`send`/`send_dm`),
-  image sends (`reply_image`/`send_image`/`send_dm_image`), `settings`,
+  exec()s the source. `BotContext` carries sends
+  (`reply`/`send`/`send_dm`/`send_room`), image sends
+  (`reply_image`/`send_image`/`send_dm_image`/`send_room_image`), `settings`,
   persistent `state`, `http` (httpx), `geocode`, i18n (`t`), `mesh_stats`,
   `get_enabled_bots`, logging. Test runs capture sends instead of transmitting.
   - **Image sends** take encoded bytes (anything Pillow opens — e.g. straight
@@ -26,6 +27,25 @@ operators).
 - `runtime.py` — load/validate source. Two styles: decorated handlers, or a
   legacy module-level `def bot(...)` (auto-wrapped; executed via the original
   `app/fanout/bot_exec.execute_bot_code`, so migrated bots behave identically).
+- **Rooms.** A room-server post reaches us as a DM *from the room's contact*,
+  with the author carried in the signed sender prefix (`dm_ingest` resolves it
+  into `sender_key`/`sender_name`). `_build_message` looks the conversation
+  contact up and, when it is `CONTACT_TYPE_ROOM`, hands the handler
+  `is_room=True` + `room_key`/`room_name` with **`is_dm` False and
+  `channel_key` None** — a room is its own conversation kind, so a DM-only bot
+  (`if not msg.is_dm: ...`) stays out of rooms and a channel-scoped one is not
+  silenced by its allow-list. `ctx.reply` answers **into the room** (an ordinary
+  DM send to the room contact, full 156-byte budget, no `"<name>: "` framing),
+  never to the author: the room asked, the room gets the answer, and a poster we
+  only know by key prefix would not be DM-able anyway. The gate is the bot's own
+  `respond_to_rooms` flag, separate from `respond_to_dms` because a room reply is
+  public to everyone logged in. Posts whose `sender_key` is *our* node are
+  dropped — a room relays every post to every member, us included, so reacting
+  to our own reply is how two bots end up answering each other forever. Room
+  posts arrive in **bursts**: the room poll logs in and drains everything posted
+  since the last sync, so a first sync with a busy room feeds the engine a
+  backlog all at once. Only the global/per-user limiters stand between that and
+  a run of stale replies.
 - `engine.py` — the singleton `bot_engine`. Fed `message` and `contact` events
   from `websocket.broadcast_event` (same tap as the fanout bus). Keyword
   triggers pass banned/hops/scope/prefix/mention/admin gates plus global,
@@ -76,8 +96,8 @@ operators).
 
 ## Data model
 
-`bots` (code, settings_schema, settings, scope, limits, ui_triggers, state,
-builtin lineage), `bot_runs` (bounded history, feeds the dashboard),
+`bots` (code, settings_schema, settings, scope incl. `respond_to_dms` /
+`respond_to_rooms`, limits, ui_triggers, state, builtin lineage), `bot_runs` (bounded history, feeds the dashboard),
 `bot_schedules` (standalone cron messages), `bot_feeds`, and the singleton
 `bot_engine_settings` (prefix, mention mode, rate limits, language, moderation,
 admin users). Repository: `app/repository/bots.py`.

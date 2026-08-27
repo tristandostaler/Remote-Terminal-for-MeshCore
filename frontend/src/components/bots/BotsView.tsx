@@ -128,7 +128,11 @@ function describeScope(bot: Bot, known: Channel[]): string {
       channelPart = `All except ${describeChannelList(channels.except, known)}`;
     }
   }
-  return bot.respond_to_dms ? `${channelPart} + DMs` : channelPart;
+  const extras = [
+    ...(bot.respond_to_dms ? ['DMs'] : []),
+    ...(bot.respond_to_rooms ? ['rooms'] : []),
+  ];
+  return extras.length ? `${channelPart} + ${extras.join(' + ')}` : channelPart;
 }
 
 function describeLimits(bot: Bot): string {

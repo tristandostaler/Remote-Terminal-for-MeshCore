@@ -327,6 +327,7 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
   const [scopeMode, setScopeMode] = useState<ScopeMode>('all');
   const [scopeList, setScopeList] = useState<string[]>([]);
   const [respondToDms, setRespondToDms] = useState(true);
+  const [respondToRooms, setRespondToRooms] = useState(true);
   const [adminOnly, setAdminOnly] = useState(false);
   const [cooldown, setCooldown] = useState('0');
   const [perUserCooldown, setPerUserCooldown] = useState('0');
@@ -339,7 +340,7 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
 
   // Test tab state
   const [testText, setTestText] = useState('');
-  const [testDm, setTestDm] = useState(false);
+  const [testWhere, setTestWhere] = useState<'channel' | 'dm' | 'room'>('channel');
   const [testSender, setTestSender] = useState('TestUser');
   const [testRunning, setTestRunning] = useState(false);
   const [transcript, setTranscript] = useState<{ input: string; response: BotTestResponse }[]>([]);
@@ -354,6 +355,7 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
     setScopeMode(scopeModeOf(loaded));
     setScopeList(scopeListOf(loaded));
     setRespondToDms(loaded.respond_to_dms);
+    setRespondToRooms(loaded.respond_to_rooms);
     setAdminOnly(loaded.admin_only);
     setCooldown(String(loaded.cooldown_seconds));
     setPerUserCooldown(String(loaded.per_user_cooldown_seconds));
@@ -399,6 +401,7 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
       enabled: overrideEnabled ?? enabled,
       scope: buildScope(),
       respond_to_dms: respondToDms,
+      respond_to_rooms: respondToRooms,
       admin_only: adminOnly,
       cooldown_seconds: parseFloat(cooldown) || 0,
       per_user_cooldown_seconds: parseFloat(perUserCooldown) || 0,
@@ -472,7 +475,8 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
     try {
       const response = await api.testBot(bot.id, {
         text: testText,
-        is_dm: testDm,
+        is_dm: testWhere === 'dm',
+        is_room: testWhere === 'room',
         sender_name: testSender || 'TestUser',
       });
       setTranscript((prev) => [...prev, { input: testText, response }]);
@@ -839,6 +843,23 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
                 <label className="flex items-start gap-2.5 cursor-pointer mt-2">
                   <input
                     type="checkbox"
+                    checked={respondToRooms}
+                    onChange={(e) => {
+                      setRespondToRooms(e.target.checked);
+                      markDirty();
+                    }}
+                    className="w-4 h-4 rounded border-input accent-primary mt-0.5"
+                  />
+                  <span className="text-[0.8125rem]">
+                    Respond in room servers{' '}
+                    <span className="text-[0.6875rem] text-muted-foreground">
+                      — answers post back into the room, where everyone logged in sees them
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2.5 cursor-pointer mt-2">
+                  <input
+                    type="checkbox"
                     checked={adminOnly}
                     onChange={(e) => {
                       setAdminOnly(e.target.checked);
@@ -1136,6 +1157,10 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
               <span className="font-mono text-foreground">ctx.send_dm(key, text)</span> direct
             </span>
             <span>
+              <span className="font-mono text-foreground">ctx.send_room(name, text)</span> room
+              server
+            </span>
+            <span>
               <span className="font-mono text-foreground">ctx.state</span> persistent dict
             </span>
             <span>
@@ -1194,15 +1219,26 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
                   className="h-8 text-[0.8125rem]"
                 />
               </div>
-              <label className="flex items-end gap-2 pb-1.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={testDm}
-                  onChange={(e) => setTestDm(e.target.checked)}
-                  className="w-4 h-4 rounded border-input accent-primary"
-                />
-                <span className="text-xs">as DM</span>
-              </label>
+              <div className="flex flex-col justify-end pb-0.5">
+                <div className="text-xs text-muted-foreground mb-1">Where</div>
+                <div className="inline-flex gap-0.5 bg-muted rounded-lg p-[3px]">
+                  {(['channel', 'dm', 'room'] as const).map((where) => (
+                    <button
+                      key={where}
+                      type="button"
+                      onClick={() => setTestWhere(where)}
+                      className={cn(
+                        'px-2 py-1 rounded-md text-[0.6875rem] transition-colors',
+                        testWhere === where
+                          ? 'bg-background text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {where === 'channel' ? '#test' : where === 'dm' ? 'DM' : 'Room'}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
             <Button size="sm" onClick={() => void handleRunTest()} disabled={testRunning}>
               <Play className="h-3.5 w-3.5 mr-1.5" aria-hidden="true" />
@@ -1227,7 +1263,8 @@ export function BotEditor({ botId, channels, onBack, onDeleted }: BotEditorProps
                 <div className="self-end max-w-[75%] bg-msg-outgoing rounded-lg px-3 py-2 text-[0.8125rem]">
                   <span className="font-mono">{entry.input}</span>
                   <span className="text-[0.625rem] text-muted-foreground ml-2">
-                    as {testSender || 'TestUser'} {testDm ? '(DM)' : 'in #test'}
+                    as {testSender || 'TestUser'}{' '}
+                    {testWhere === 'dm' ? '(DM)' : testWhere === 'room' ? 'in a room' : 'in #test'}
                   </span>
                 </div>
                 {entry.response.error ? (
