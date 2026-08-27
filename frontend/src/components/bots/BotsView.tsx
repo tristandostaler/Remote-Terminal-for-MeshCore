@@ -131,7 +131,8 @@ function describeChannels(selection: BotScopeSelection | undefined, known: Chann
 /**
  * The rooms half of the summary, or null when the bot answers in none of them —
  * that is worth leaving out rather than spelling out next to what it does do.
- * A missing selection is every room, matching how the backend reads it.
+ * A missing selection is no room, matching how the backend reads it: rooms are
+ * opt-in.
  */
 function describeRooms(
   selection: BotScopeSelection | undefined,
@@ -145,7 +146,7 @@ function describeRooms(
     }
     if (selection.except) return `rooms except ${describeKeyList(selection.except, label)}`;
   }
-  return 'rooms';
+  return selection === 'all' ? 'rooms' : null;
 }
 
 function describeScope(bot: Bot, known: Channel[], contacts: Contact[]): string {

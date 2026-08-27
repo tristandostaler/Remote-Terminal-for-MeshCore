@@ -786,9 +786,7 @@ export function Sidebar({
   const channelRows = nonFavoriteChannels.map((channel) => buildChannelRow(channel, 'channels'));
   const contactRows = nonFavoriteContacts.map((contact) => buildContactRow(contact, 'contacts'));
   const roomRows = nonFavoriteRooms.map((contact) => buildContactRow(contact, 'rooms'));
-  const repeaterRows = nonFavoriteRepeaters.map((contact) =>
-    buildContactRow(contact, 'repeaters')
-  );
+  const repeaterRows = nonFavoriteRepeaters.map((contact) => buildContactRow(contact, 'repeaters'));
 
   const unreadSectionCount = getSectionUnreadCount(unreadRows);
   const favoritesUnreadCount = getSectionUnreadCount(favoriteRows);

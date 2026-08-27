@@ -16,7 +16,7 @@ dict (read by exec'ing the source through the normal loader):
         "settings": {...},             # optional defaults for ctx.settings
         "respond_to_dms": True,        # optional (default True)
         "scope": {...},                # optional; {"channels":..., "rooms":...},
-                                       # default is #bot/#bots + DMs + all rooms
+                                       # default is #bot/#bots + DMs, no rooms
         "admin_only": False,           # optional
         "cooldown_seconds": 0,         # optional
         "per_user_cooldown_seconds": 0,

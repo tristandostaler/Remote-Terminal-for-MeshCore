@@ -45,15 +45,20 @@ type ScopeMode = 'all' | 'only' | 'except';
 /**
  * Channels and rooms are the same selection over different key spaces, so the
  * editor drives both halves of `scope` through one pair of readers and one
- * builder. A `rooms` key absent from an older scope reads as every room, which
- * is what the backend does with it.
+ * builder. Only the fallback differs: a missing `channels` key is every channel,
+ * while a missing `rooms` key is no room — rooms are opt-in, which is what the
+ * backend does with it too.
  */
-function scopeModeOf(selection: BotScopeSelection | undefined): ScopeMode {
+function scopeModeOf(
+  selection: BotScopeSelection | undefined,
+  fallback: ScopeMode = 'all'
+): ScopeMode {
   if (typeof selection === 'object' && selection !== null) {
     if (selection.only) return 'only';
     if (selection.except) return 'except';
   }
-  return 'all';
+  if (selection === 'all') return 'all';
+  return fallback;
 }
 
 function scopeListOf(selection: BotScopeSelection | undefined): string[] {
@@ -345,7 +350,7 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
   const [enabled, setEnabled] = useState(false);
   const [scopeMode, setScopeMode] = useState<ScopeMode>('all');
   const [scopeList, setScopeList] = useState<string[]>([]);
-  const [roomMode, setRoomMode] = useState<ScopeMode>('all');
+  const [roomMode, setRoomMode] = useState<ScopeMode>('only');
   const [roomList, setRoomList] = useState<string[]>([]);
   const [respondToDms, setRespondToDms] = useState(true);
   const [adminOnly, setAdminOnly] = useState(false);
@@ -374,7 +379,7 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
     setEnabled(loaded.enabled);
     setScopeMode(scopeModeOf(loaded.scope?.channels));
     setScopeList(scopeListOf(loaded.scope?.channels));
-    setRoomMode(scopeModeOf(loaded.scope?.rooms));
+    setRoomMode(scopeModeOf(loaded.scope?.rooms, 'only'));
     setRoomList(scopeListOf(loaded.scope?.rooms));
     setRespondToDms(loaded.respond_to_dms);
     setAdminOnly(loaded.admin_only);
@@ -762,7 +767,7 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
               <div>
                 <SectionTitle
                   title="Where it runs"
-                  hint="Which conversations this bot listens to. Triggers still apply. New bots start on #bot / #bots plus DMs and every room, so they stay off Public."
+                  hint="Which conversations this bot listens to. Triggers still apply. New bots start on #bot / #bots plus DMs and no room server, so they stay off Public and out of rooms until you pick one."
                 />
                 <div className="text-[0.6875rem] uppercase tracking-wider text-muted-foreground font-medium mb-1.5">
                   Channels

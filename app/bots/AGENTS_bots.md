@@ -41,8 +41,9 @@ operators).
   `all` / `none` / `{only|except: [keys]}` shape as `scope.channels`, over room
   contact keys instead of channel keys, so an operator can answer in one room and
   ignore another. It is separate from `respond_to_dms` because a room reply is
-  public to everyone logged in. A scope with **no `rooms` key means every room**
-  (scopes written before rooms existed say nothing about them), and both halves
+  public to everyone logged in. A scope with **no `rooms` key means no room**
+  (rooms are opt-in; scopes written before rooms existed say nothing about
+  them, and `no_rooms()` is the fallback), and both halves
   go through one `_selection_allows` matcher, which compares case-insensitively:
   channel keys are stored upper-case and room contact keys lower. Posts whose `sender_key` is *our* node are
   dropped — a room relays every post to every member, us included, so reacting
@@ -77,7 +78,8 @@ operators).
   the derived keys, `DEFAULT_BOT_SCOPE_JSON` (the `bots.scope` column default in
   `app/database.py` — SQL cannot import Python), `default_bot_scope()`, and
   `frontend/src/utils/botScope.ts`. `tests/test_bot_default_scope.py` asserts
-  they do.
+  they do. The same module holds `no_rooms()`, the empty room pick list every
+  layer defaults to.
 - `placeholders.py` — `{total_contacts}`-style tokens for scheduled messages.
 - `library/` — built-in bots as real `.py` files under `library/code/`, each
   self-describing via a module-level `BOT_META` dict (metadata +
@@ -150,12 +152,15 @@ token gate only.
   `{"channels": "all"}`. Migration 071 retargeted existing bots that were still
   at the old "all" default **and still disabled** — an enabled or hand-scoped
   bot is a decision and was left alone.
-- Rooms **do** default to all of them, unlike channels. There is no `#bot`
-  convention for rooms and no Public to fall onto: a room is a space the
-  operator deliberately logged this node into, and every seeded bot ships
-  disabled anyway. `default_bot_scope()` therefore omits `rooms` entirely and
-  the engine reads a missing key as `"all"`, which keeps the four-way default
-  sync (`app/bot_scope.py`) about channels alone.
+- Rooms are **opt-in**, like channels but stricter: `default_bot_scope()` ships
+  `rooms: {"only": []}` and the engine reads a missing key as the same thing
+  (`no_rooms()`), so a bot answers in the rooms the operator named and in no
+  other. There is no `#bot` convention to fall back on, and unlike a DM the
+  answer is public to everyone logged into the room. `{"only": []}` rather than
+  `"none"` because the editor then opens on "Only…" with nothing ticked — a list
+  to add to, not a switch to flip. Migration 080 writes the empty list onto
+  scopes that predate rooms, which only makes the stored scope say out loud what
+  the engine already reads it as.
 - Newly installed SMS bots are `admin_only`; existing installations retain
   their stored permission flag during version refreshes.
 - `ui_triggers` only feed handlers declared with **no-argument** decorators

@@ -1,17 +1,23 @@
-"""The default channel scope for a new bot: #bot / #bots plus DMs.
+"""The default scope for a new bot: #bot / #bots plus DMs, and no room.
 
 Bots answer commands, so an unscoped bot replies on Public and on every other
 channel the node carries. A fresh bot is therefore scoped to the two
-conventional bot channels, and these tests pin that default at every layer it is
-spelled out: the derived keys, the schema column, the repository, and the engine
-gate that actually silences Public.
+conventional bot channels, and to no room server at all — a room answer is
+public to everyone logged in, so rooms are opt-in. These tests pin both defaults
+at every layer they are spelled out: the derived keys, the schema column, the
+repository, and the engine gate that actually silences Public.
 """
 
 import json
 
 import pytest
 
-from app.bot_scope import DEFAULT_BOT_SCOPE_JSON, default_bot_scope, is_default_bot_scope
+from app.bot_scope import (
+    DEFAULT_BOT_SCOPE_JSON,
+    default_bot_scope,
+    is_default_bot_scope,
+    no_rooms,
+)
 from app.bots.api import BotMessage
 from app.bots.engine import BotEngine
 from app.channel_constants import (
@@ -41,13 +47,25 @@ class TestDefaultBotChannelKeys:
 
 
 class TestDefaultScopeShape:
-    def test_default_scope_selects_exactly_the_bot_channels(self):
-        assert default_bot_scope() == {"channels": {"only": list(BOT_CHANNEL_KEYS)}}
+    def test_default_scope_selects_exactly_the_bot_channels_and_no_room(self):
+        assert default_bot_scope() == {
+            "channels": {"only": list(BOT_CHANNEL_KEYS)},
+            "rooms": {"only": []},
+        }
+
+    def test_default_room_scope_is_an_empty_pick_list_not_none(self):
+        # ``{"only": []}`` and ``"none"`` silence the bot identically, but only
+        # the pick list opens the editor on "Only…" with a list to add rooms to.
+        assert no_rooms() == {"only": []}
 
     def test_default_scope_is_a_fresh_dict_each_call(self):
         first = default_bot_scope()
         first["channels"]["only"].append("deadbeef")
-        assert default_bot_scope() == {"channels": {"only": list(BOT_CHANNEL_KEYS)}}
+        first["rooms"]["only"].append("deadbeef")
+        assert default_bot_scope() == {
+            "channels": {"only": list(BOT_CHANNEL_KEYS)},
+            "rooms": {"only": []},
+        }
 
     def test_json_literal_matches_the_builder(self):
         # The schema column default is a SQL literal and cannot import Python.
@@ -88,6 +106,13 @@ class TestSchemaAndRepositoryDefaults:
 
         bot = await BotRepository.create(name="scope-explicit", scope={"channels": "all"})
         assert bot.scope == {"channels": "all"}
+
+    @pytest.mark.asyncio
+    async def test_created_bot_answers_in_no_room(self, test_db):
+        from app.repository.bots import BotRepository
+
+        bot = await BotRepository.create(name="scope-rooms-default")
+        assert bot.scope["rooms"] == no_rooms()
 
     @pytest.mark.asyncio
     async def test_api_created_bots_get_the_default(self, test_db, client):

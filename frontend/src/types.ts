@@ -1109,7 +1109,8 @@ export interface Bot {
   respond_to_dms: boolean;
   /**
    * Where the bot listens. `rooms` is absent on scopes written before rooms
-   * existed, which the backend reads as every room.
+   * existed, which the backend reads as no room: rooms are opt-in, and a new
+   * bot starts with an empty pick list.
    */
   scope: { channels: BotScopeSelection; rooms?: BotScopeSelection };
   cooldown_seconds: number;
