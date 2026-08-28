@@ -21,7 +21,7 @@ BOT_META = {
         "cooldown keeps a flapping neighbour from repeating the warning. Set the target channel "
         "below before enabling; it answers no keywords."
     ),
-    "version": "1.0.1",
+    "version": "1.0.2",
     "respond_to_dms": False,
     "settings_schema": [
         {
@@ -84,5 +84,5 @@ async def on_new_contact(ctx, event):
     existing = ", ".join((c.name or c.public_key[:8]) for c in others[:3])
     await ctx.send(
         channel,
-        f"Prefix collision: new repeater {new_name} shares prefix {prefix} with {existing}",
+        f"New Prefix collision: new repeater {new_name} shares prefix {prefix} with {existing}",
     )
