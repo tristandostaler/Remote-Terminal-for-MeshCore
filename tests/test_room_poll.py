@@ -201,6 +201,7 @@ class TestStoredCredentialLogin:
 
 class TestPollLoopCycle:
     async def test_login_failure_disables_polling(self, test_db):
+        """An explicit LOGIN_FAILED ("rejected") means the credential is wrong."""
         from app import radio_sync
 
         await _insert_room()
@@ -218,7 +219,7 @@ class TestPollLoopCycle:
                 "app.routers.server_control.prepare_authenticated_contact_connection",
                 new=AsyncMock(
                     return_value=MagicMock(
-                        status="error", authenticated=False, message="bad password"
+                        status="rejected", authenticated=False, message="bad password"
                     )
                 ),
             ),
@@ -228,6 +229,38 @@ class TestPollLoopCycle:
         after = await RoomPollRepository.get(ROOM_KEY)
         assert after.poll_enabled is False
         assert after.last_result == "login_failed"
+
+    async def test_local_login_error_keeps_enabled_and_counts_error(self, test_db):
+        """A local send/setup failure ("error") is not the same as a bad
+        password ("rejected") and must not permanently disable polling —
+        otherwise a single transient radio hiccup would silently stop the
+        room from ever being polled again."""
+        from app import radio_sync
+
+        await _insert_room()
+        sub = await RoomPollRepository.upsert(
+            ROOM_KEY, enabled=True, credential_action="set", credential="ok"
+        )
+
+        op = MagicMock()
+        op.__aenter__ = AsyncMock(return_value=MagicMock())
+        op.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch.object(radio_sync.radio_manager, "radio_operation", return_value=op),
+            patch(
+                "app.routers.server_control.prepare_authenticated_contact_connection",
+                new=AsyncMock(
+                    return_value=MagicMock(status="error", authenticated=False, message="busy")
+                ),
+            ),
+        ):
+            await radio_sync._poll_one_room(sub)
+
+        after = await RoomPollRepository.get(ROOM_KEY)
+        assert after.poll_enabled is True
+        assert after.consecutive_errors == 1
+        assert after.last_result == "error"
 
     async def test_success_drains_and_records(self, test_db):
         from app import radio_sync
