@@ -581,11 +581,14 @@ export function RoomServerPanel({ contact, onAuthenticatedChange }: RoomServerPa
                       })}
                     </span>
                   ) : null}
-                  {pollStatus.last_error ? (
-                    <span className="text-destructive">· {pollStatus.last_error}</span>
-                  ) : null}
                 </div>
               )}
+              {/* Shown regardless of poll_enabled: a rejected login disables sync
+                  server-side, and this is otherwise the only place that says so —
+                  the checkbox above just looks unchecked either way. */}
+              {pollStatus?.last_error ? (
+                <p className="mt-1 text-xs text-destructive">{pollStatus.last_error}</p>
+              ) : null}
               {pollStatus?.has_stored_credential ? (
                 <button
                   type="button"

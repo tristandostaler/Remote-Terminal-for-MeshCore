@@ -243,9 +243,15 @@ async def _attempt_server_login(
     def _resolve_login(event_type: EventType, message: str | None = None) -> None:
         if login_future.done():
             return
+        # "rejected" is reserved for an explicit LOGIN_FAILED: the server heard
+        # us and the credential is wrong. A local send/setup problem uses
+        # "error" instead (see the early returns below and in the caller) so
+        # periodic callers (e.g. the room poller) can tell "bad password" —
+        # which should stop retrying — apart from a transient local hiccup,
+        # which should not.
         login_future.set_result(
             RepeaterLoginResponse(
-                status="ok" if event_type == EventType.LOGIN_SUCCESS else "error",
+                status="ok" if event_type == EventType.LOGIN_SUCCESS else "rejected",
                 authenticated=event_type == EventType.LOGIN_SUCCESS,
                 message=message,
             )

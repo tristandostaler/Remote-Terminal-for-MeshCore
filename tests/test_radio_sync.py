@@ -3062,3 +3062,93 @@ class TestContactSelectionDmActive:
 
         keys = [c.public_key for c in selected]
         assert repeater_key not in keys
+
+
+class TestRoomPollLoginFailureHandling:
+    """An explicit LOGIN_FAILED should disable a room's polling subscription;
+    a local send/setup error (or a timeout) is transient and must not."""
+
+    ROOM_KEY = "cc" * 32
+
+    def _mock_mc(self):
+        mc = MagicMock()
+        mc.commands = MagicMock()
+        mc.commands.add_contact = AsyncMock(return_value=MagicMock(type=EventType.OK))
+        mc.commands.get_msg = AsyncMock(return_value=MagicMock(type=EventType.NO_MORE_MSGS))
+        mc.subscribe = MagicMock(return_value=MagicMock(unsubscribe=MagicMock()))
+        return mc
+
+    @asynccontextmanager
+    async def _radio_operation(self, mc, *args, **kwargs):
+        del args, kwargs
+        yield mc
+
+    async def _setup_subscription(self, credential="hello"):
+        from app.repository.room_poll import RoomPollRepository
+
+        await _insert_contact(self.ROOM_KEY, "Room Server", contact_type=3)
+        return await RoomPollRepository.upsert(
+            self.ROOM_KEY,
+            enabled=True,
+            credential_action="set",
+            credential=credential,
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_rejection_disables_polling(self, test_db):
+        from app.repository.room_poll import RoomPollRepository
+
+        sub = await self._setup_subscription()
+        mc = self._mock_mc()
+        subscriptions: dict[EventType, tuple[object, object]] = {}
+
+        def _subscribe(event_type, callback, attribute_filters=None):
+            subscriptions[event_type] = (callback, attribute_filters)
+            return MagicMock(unsubscribe=MagicMock())
+
+        async def _send_login(*args, **kwargs):
+            callback, _filters = subscriptions[EventType.LOGIN_FAILED]
+            callback(
+                MagicMock(
+                    type=EventType.LOGIN_FAILED, payload={"pubkey_prefix": self.ROOM_KEY[:12]}
+                )
+            )
+            return MagicMock(type=EventType.MSG_SENT)
+
+        mc.subscribe = MagicMock(side_effect=_subscribe)
+        mc.commands.send_login = AsyncMock(side_effect=_send_login)
+
+        with patch.object(
+            radio_sync.radio_manager,
+            "radio_operation",
+            side_effect=lambda *a, **k: self._radio_operation(mc, *a, **k),
+        ):
+            await radio_sync._poll_one_room(sub)
+
+        after = await RoomPollRepository.get(self.ROOM_KEY)
+        assert after.poll_enabled is False
+        mc.commands.get_msg.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_local_send_error_does_not_disable_polling(self, test_db):
+        """A local radio hiccup (e.g. busy TX queue) is not the same as a bad
+        password, and must not permanently stop the room from being polled."""
+        from app.repository.room_poll import RoomPollRepository
+
+        sub = await self._setup_subscription()
+        mc = self._mock_mc()
+        mc.commands.send_login = AsyncMock(
+            return_value=MagicMock(type=EventType.ERROR, payload={"err": "busy"})
+        )
+
+        with patch.object(
+            radio_sync.radio_manager,
+            "radio_operation",
+            side_effect=lambda *a, **k: self._radio_operation(mc, *a, **k),
+        ):
+            await radio_sync._poll_one_room(sub)
+
+        after = await RoomPollRepository.get(self.ROOM_KEY)
+        assert after.poll_enabled is True
+        assert after.consecutive_errors == 1
+        mc.commands.get_msg.assert_not_awaited()

@@ -801,7 +801,9 @@ class TestPrepareRepeaterConnection:
 
         response = await prepare_repeater_connection(mc, contact, "bad")
 
-        assert response.status == "error"
+        # "rejected" (not "error") — an explicit LOGIN_FAILED means the server
+        # heard us and refused, distinct from a local send/setup failure.
+        assert response.status == "rejected"
         assert response.authenticated is False
         assert "did not confirm this login" in (response.message or "")
 
@@ -925,7 +927,7 @@ class TestRepeaterLoginFloodEscalation:
 
         response = await prepare_repeater_connection(mc, contact, "bad")
 
-        assert response.status == "error"
+        assert response.status == "rejected"
         assert mc.commands.send_login.await_count == 1
         mc.commands.reset_path.assert_not_awaited()
 

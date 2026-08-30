@@ -12,6 +12,7 @@ from app.models import (
     RoomPollConfigRequest,
     RoomPollStatus,
 )
+from app.radio_sync import poll_for_messages
 from app.repository.room_poll import (
     DEFAULT_POLL_INTERVAL_SECONDS,
     RoomPollRepository,
@@ -81,12 +82,20 @@ async def room_login(public_key: str, request: RoomLoginRequest) -> RepeaterLogi
         pause_polling=True,
         suspend_auto_fetch=True,
     ) as mc:
-        return await prepare_authenticated_contact_connection(
+        login = await prepare_authenticated_contact_connection(
             mc,
             contact,
             password,
             label="room server",
         )
+        if login.authenticated:
+            # Login is what makes the room server enqueue messages posted since
+            # our last sync; without draining here, they only surface later via
+            # the periodic room poller or the message-poll fallback. Mirrors
+            # radio_sync._poll_one_room so a manual "open room" is not slower
+            # than the background poll at picking up the delta.
+            await poll_for_messages(mc)
+        return login
 
 
 @router.get("/{public_key}/room/poll", response_model=RoomPollStatus)

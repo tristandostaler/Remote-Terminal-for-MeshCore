@@ -2298,10 +2298,11 @@ async def _poll_one_room(sub) -> None:
                 label="room server",
             )
             if not login.authenticated:
-                # An explicit rejection means the stored credential is wrong;
-                # disable so we stop hammering the room with bad auth. A timeout
-                # is transient — leave it enabled and let backoff space retries.
-                if login.status == "error":
+                # An explicit rejection ("rejected") means the stored credential
+                # is wrong; disable so we stop hammering the room with bad auth.
+                # A timeout or a local send/setup error ("error") is transient —
+                # leave it enabled and let backoff space retries.
+                if login.status == "rejected":
                     await RoomPollRepository.set_enabled(sub.room_key, False)
                     await RoomPollRepository.record_result(
                         sub.room_key,

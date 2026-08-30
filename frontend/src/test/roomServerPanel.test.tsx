@@ -242,4 +242,36 @@ describe('RoomServerPanel', () => {
       });
     });
   });
+
+  it('shows the disabled reason even though the sync toggle looks unchecked either way', async () => {
+    // The background poller auto-disables sync after a rejected login and
+    // records why in last_error. If that text only rendered while
+    // poll_enabled was true, a user would just see an unchecked box with no
+    // explanation — indistinguishable from having turned it off themselves.
+    mockApi.getRoomPoll.mockResolvedValue({
+      ...NO_STORED_CREDENTIAL,
+      has_stored_credential: true,
+      poll_enabled: false,
+      last_error: 'Room server rejected the saved credential — polling disabled',
+    });
+    mockApi.roomLogin.mockResolvedValueOnce({
+      status: 'rejected',
+      authenticated: false,
+      message: 'Room server rejected the saved credential',
+    });
+
+    render(<RoomServerPanel contact={roomContact} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Show Tools')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Show Tools'));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Keep this room synced')).not.toBeChecked();
+    });
+    expect(
+      screen.getByText('Room server rejected the saved credential — polling disabled')
+    ).toBeInTheDocument();
+  });
 });
