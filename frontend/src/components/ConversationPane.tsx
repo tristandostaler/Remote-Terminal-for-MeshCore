@@ -111,6 +111,8 @@ interface ConversationPaneProps {
   onOpenPushSettings?: () => void;
   trackedTelemetryRepeaters: string[];
   onToggleTrackedTelemetry: (publicKey: string) => Promise<void>;
+  clockSyncRepeaters: string[];
+  onToggleClockSyncRepeater: (publicKey: string) => Promise<void>;
   repeaterAutoLoginKey: string | null;
   onClearRepeaterAutoLogin: () => void;
   blockedKeys?: string[];
@@ -200,6 +202,8 @@ export function ConversationPane({
   onOpenPushSettings,
   trackedTelemetryRepeaters,
   onToggleTrackedTelemetry,
+  clockSyncRepeaters,
+  onToggleClockSyncRepeater,
   repeaterAutoLoginKey,
   onClearRepeaterAutoLogin,
   blockedKeys,
@@ -372,6 +376,8 @@ export function ConversationPane({
           onOpenContactInfo={onOpenContactInfo}
           trackedTelemetryRepeaters={trackedTelemetryRepeaters}
           onToggleTrackedTelemetry={onToggleTrackedTelemetry}
+          clockSyncRepeaters={clockSyncRepeaters}
+          onToggleClockSyncRepeater={onToggleClockSyncRepeater}
           autoLoginAndLoadAll={repeaterAutoLoginKey === activeConversation.id}
           onAutoLoginConsumed={onClearRepeaterAutoLogin}
         />

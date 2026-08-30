@@ -37,6 +37,7 @@ const baseSettings: AppSettings = {
   discovery_blocked_types: [],
   tracked_telemetry_repeaters: [],
   tracked_telemetry_contacts: [],
+  clock_sync_repeaters: [],
   auto_resend_channel: false,
   max_message_retries: 3,
   telemetry_interval_hours: 8,

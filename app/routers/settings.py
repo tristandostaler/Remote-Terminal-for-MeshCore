@@ -187,6 +187,23 @@ class TrackedTelemetryResponse(BaseModel):
         description="Map of public key to display name for tracked repeaters"
     )
     schedule: TelemetrySchedule = Field(description="Current scheduling state")
+    clock_sync_repeaters: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Current list of repeaters opted into clock sync during telemetry "
+            "collection (subset of tracked_telemetry_repeaters)"
+        ),
+    )
+
+
+class ClockSyncRepeaterRequest(BaseModel):
+    public_key: str = Field(description="Public key of the repeater to toggle clock sync for")
+
+
+class ClockSyncRepeaterResponse(BaseModel):
+    clock_sync_repeaters: list[str] = Field(
+        description="Current list of repeaters opted into clock sync during telemetry collection"
+    )
 
 
 def _build_schedule(
@@ -537,10 +554,15 @@ async def toggle_tracked_telemetry(request: TrackedTelemetryRequest) -> TrackedT
         return names
 
     if key in current:
-        # Remove
+        # Remove. Cascade-clear clock sync too -- it only makes sense piggybacked
+        # on telemetry collection, so it cannot outlive that tracking.
         new_list = [k for k in current if k != key]
+        new_clock_sync = [k for k in settings.clock_sync_repeaters if k != key]
         logger.info("Removing repeater %s from tracked telemetry", key[:12])
-        await AppSettingsRepository.update(tracked_telemetry_repeaters=new_list)
+        await AppSettingsRepository.update(
+            tracked_telemetry_repeaters=new_list,
+            clock_sync_repeaters=new_clock_sync,
+        )
         return TrackedTelemetryResponse(
             tracked_telemetry_repeaters=new_list,
             names=await _resolve_names(new_list),
@@ -549,6 +571,7 @@ async def toggle_tracked_telemetry(request: TrackedTelemetryRequest) -> TrackedT
                 settings.telemetry_interval_hours,
                 settings.telemetry_routed_hourly,
             ),
+            clock_sync_repeaters=new_clock_sync,
         )
 
     # Validate it's a repeater
@@ -580,7 +603,51 @@ async def toggle_tracked_telemetry(request: TrackedTelemetryRequest) -> TrackedT
             settings.telemetry_interval_hours,
             settings.telemetry_routed_hourly,
         ),
+        clock_sync_repeaters=settings.clock_sync_repeaters,
     )
+
+
+@router.post("/clock-sync-repeaters/toggle", response_model=ClockSyncRepeaterResponse)
+async def toggle_clock_sync_repeater(
+    request: ClockSyncRepeaterRequest,
+) -> ClockSyncRepeaterResponse:
+    """Toggle automatic clock sync for a repeater during periodic telemetry collection.
+
+    Clock sync piggybacks on the existing tracked-telemetry polling cycle rather
+    than running on its own schedule, so a repeater must already be opted into
+    ``tracked_telemetry_repeaters`` before it can be opted into this. Each cycle
+    that reaches the repeater also sends the CLI ``time <epoch>`` command --
+    identical to the manual "Sync Clock" action -- on a best-effort basis (it
+    silently no-ops if the radio isn't currently authenticated with it).
+    """
+    key = request.public_key.lower()
+    settings = await AppSettingsRepository.get()
+    current = settings.clock_sync_repeaters
+
+    if key in current:
+        new_list = [k for k in current if k != key]
+        logger.info("Disabling clock sync for repeater %s", key[:12])
+        await AppSettingsRepository.update(clock_sync_repeaters=new_list)
+        return ClockSyncRepeaterResponse(clock_sync_repeaters=new_list)
+
+    if key not in settings.tracked_telemetry_repeaters:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Repeater must be opted into telemetry tracking before clock sync can be enabled"
+            ),
+        )
+
+    contact = await ContactRepository.get_by_key(key)
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    if contact.type != CONTACT_TYPE_REPEATER:
+        raise HTTPException(status_code=400, detail="Contact is not a repeater")
+
+    new_list = current + [key]
+    logger.info("Enabling clock sync for repeater %s", key[:12])
+    await AppSettingsRepository.update(clock_sync_repeaters=new_list)
+    return ClockSyncRepeaterResponse(clock_sync_repeaters=new_list)
 
 
 @router.get("/tracked-telemetry/schedule", response_model=TelemetrySchedule)

@@ -49,6 +49,8 @@ interface RepeaterDashboardProps {
   onOpenContactInfo?: (publicKey: string) => void;
   trackedTelemetryRepeaters: string[];
   onToggleTrackedTelemetry: (publicKey: string) => Promise<void>;
+  clockSyncRepeaters: string[];
+  onToggleClockSyncRepeater: (publicKey: string) => Promise<void>;
   autoLoginAndLoadAll?: boolean;
   onAutoLoginConsumed?: () => void;
 }
@@ -70,6 +72,8 @@ export function RepeaterDashboard({
   onOpenContactInfo,
   trackedTelemetryRepeaters,
   onToggleTrackedTelemetry,
+  clockSyncRepeaters,
+  onToggleClockSyncRepeater,
   autoLoginAndLoadAll,
   onAutoLoginConsumed,
 }: RepeaterDashboardProps) {
@@ -420,6 +424,8 @@ export function RepeaterDashboard({
               contacts={contacts}
               trackedTelemetryRepeaters={trackedTelemetryRepeaters}
               onToggleTrackedTelemetry={onToggleTrackedTelemetry}
+              clockSyncRepeaters={clockSyncRepeaters}
+              onToggleClockSyncRepeater={onToggleClockSyncRepeater}
             />
           </div>
         )}

@@ -42,6 +42,7 @@ import type {
   RepeaterStatusResponse,
   TelemetryHistoryEntry,
   TelemetrySchedule,
+  ClockSyncRepeaterResponse,
   TrackedTelemetryContactsResponse,
   TrackedTelemetryResponse,
   StatisticsResponse,
@@ -583,6 +584,12 @@ export const api = {
     }),
 
   getTelemetrySchedule: () => fetchJson<TelemetrySchedule>('/settings/tracked-telemetry/schedule'),
+
+  toggleClockSyncRepeater: (publicKey: string) =>
+    fetchJson<ClockSyncRepeaterResponse>('/settings/clock-sync-repeaters/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ public_key: publicKey }),
+    }),
 
   // Tracked contact telemetry
   toggleTrackedTelemetryContact: (publicKey: string) =>

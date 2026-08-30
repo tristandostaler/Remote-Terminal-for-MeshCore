@@ -59,6 +59,8 @@ interface SettingsModalBaseProps {
   onBulkDeleteContacts?: (deletedKeys: string[]) => void;
   trackedTelemetryRepeaters?: string[];
   onToggleTrackedTelemetry?: (publicKey: string) => Promise<void>;
+  clockSyncRepeaters?: string[];
+  onToggleClockSyncRepeater?: (publicKey: string) => Promise<void>;
   trackedTelemetryContacts?: string[];
   onToggleTrackedTelemetryContact?: (publicKey: string) => Promise<void>;
 }
@@ -102,6 +104,8 @@ export function SettingsModal(props: SettingsModalProps) {
     onBulkDeleteContacts,
     trackedTelemetryRepeaters,
     onToggleTrackedTelemetry,
+    clockSyncRepeaters,
+    onToggleClockSyncRepeater,
     trackedTelemetryContacts,
     onToggleTrackedTelemetryContact,
   } = props;
@@ -271,6 +275,8 @@ export function SettingsModal(props: SettingsModalProps) {
                 onBulkDeleteContacts={onBulkDeleteContacts}
                 trackedTelemetryRepeaters={trackedTelemetryRepeaters}
                 onToggleTrackedTelemetry={onToggleTrackedTelemetry}
+                clockSyncRepeaters={clockSyncRepeaters}
+                onToggleClockSyncRepeater={onToggleClockSyncRepeater}
                 trackedTelemetryContacts={trackedTelemetryContacts}
                 onToggleTrackedTelemetryContact={onToggleTrackedTelemetryContact}
                 className={sectionContentClass}

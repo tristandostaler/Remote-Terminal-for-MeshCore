@@ -124,6 +124,8 @@ const defaultProps = {
   onDeleteContact: vi.fn(),
   trackedTelemetryRepeaters: [] as string[],
   onToggleTrackedTelemetry: vi.fn(async () => {}),
+  clockSyncRepeaters: [] as string[],
+  onToggleClockSyncRepeater: vi.fn(async () => {}),
 };
 
 function createDeferred<T>() {

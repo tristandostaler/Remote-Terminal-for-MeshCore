@@ -173,6 +173,8 @@ function chatPaneProps(): any {
     onToggleNotifications: vi.fn(),
     trackedTelemetryRepeaters: [],
     onToggleTrackedTelemetry: vi.fn(async () => {}),
+    clockSyncRepeaters: [],
+    onToggleClockSyncRepeater: vi.fn(async () => {}),
     repeaterAutoLoginKey: null,
     onClearRepeaterAutoLogin: vi.fn(),
   };

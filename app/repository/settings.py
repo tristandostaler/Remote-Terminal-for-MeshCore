@@ -51,6 +51,7 @@ class AppSettingsRepository:
                    advert_interval, last_advert_time, flood_scope, known_regions,
                    blocked_keys, blocked_names, discovery_blocked_types,
                    tracked_telemetry_repeaters, tracked_telemetry_contacts,
+                   clock_sync_repeaters,
                    auto_resend_channel, max_message_retries,
                    telemetry_interval_hours, telemetry_routed_hourly
             FROM app_settings WHERE id = 1
@@ -125,6 +126,15 @@ class AppSettingsRepository:
         except (json.JSONDecodeError, TypeError, KeyError):
             tracked_telemetry_contacts = []
 
+        # Parse clock_sync_repeaters JSON
+        clock_sync_repeaters: list[str] = []
+        try:
+            raw_clock_sync = row["clock_sync_repeaters"]
+            if raw_clock_sync:
+                clock_sync_repeaters = json.loads(raw_clock_sync)
+        except (json.JSONDecodeError, TypeError, KeyError):
+            clock_sync_repeaters = []
+
         # Parse auto_resend_channel boolean
         try:
             auto_resend_channel = bool(row["auto_resend_channel"])
@@ -167,6 +177,7 @@ class AppSettingsRepository:
             discovery_blocked_types=discovery_blocked_types,
             tracked_telemetry_repeaters=tracked_telemetry_repeaters,
             tracked_telemetry_contacts=tracked_telemetry_contacts,
+            clock_sync_repeaters=clock_sync_repeaters,
             auto_resend_channel=auto_resend_channel,
             max_message_retries=max_message_retries,
             telemetry_interval_hours=telemetry_interval_hours,
@@ -189,6 +200,7 @@ class AppSettingsRepository:
         discovery_blocked_types: list[int] | None = None,
         tracked_telemetry_repeaters: list[str] | None = None,
         tracked_telemetry_contacts: list[str] | None = None,
+        clock_sync_repeaters: list[str] | None = None,
         auto_resend_channel: bool | None = None,
         max_message_retries: int | None = None,
         telemetry_interval_hours: int | None = None,
@@ -250,6 +262,10 @@ class AppSettingsRepository:
             updates.append("tracked_telemetry_contacts = ?")
             params.append(json.dumps(tracked_telemetry_contacts))
 
+        if clock_sync_repeaters is not None:
+            updates.append("clock_sync_repeaters = ?")
+            params.append(json.dumps(clock_sync_repeaters))
+
         if auto_resend_channel is not None:
             updates.append("auto_resend_channel = ?")
             params.append(1 if auto_resend_channel else 0)
@@ -294,6 +310,7 @@ class AppSettingsRepository:
         discovery_blocked_types: list[int] | None = None,
         tracked_telemetry_repeaters: list[str] | None = None,
         tracked_telemetry_contacts: list[str] | None = None,
+        clock_sync_repeaters: list[str] | None = None,
         auto_resend_channel: bool | None = None,
         max_message_retries: int | None = None,
         telemetry_interval_hours: int | None = None,
@@ -315,6 +332,7 @@ class AppSettingsRepository:
                 discovery_blocked_types=discovery_blocked_types,
                 tracked_telemetry_repeaters=tracked_telemetry_repeaters,
                 tracked_telemetry_contacts=tracked_telemetry_contacts,
+                clock_sync_repeaters=clock_sync_repeaters,
                 auto_resend_channel=auto_resend_channel,
                 max_message_retries=max_message_retries,
                 telemetry_interval_hours=telemetry_interval_hours,

@@ -1814,8 +1814,16 @@ async def sync_recent_contacts_to_radio(force: bool = False, mc: MeshCore | None
 # ---------------------------------------------------------------------------
 
 
-async def _collect_repeater_telemetry(mc: MeshCore, contact: Contact) -> bool:
+async def _collect_repeater_telemetry(
+    mc: MeshCore, contact: Contact, *, sync_clock: bool = False
+) -> bool:
     """Fetch status telemetry from a single repeater and record it.
+
+    When *sync_clock* is True, also sends the CLI ``time <epoch>`` command to
+    the repeater -- identical to the manual "Sync Clock" action in the
+    repeater dashboard. This is best-effort: it silently no-ops if the radio
+    isn't currently authenticated with the repeater, and never fails the
+    overall telemetry collection.
 
     Returns True on success, False on failure (logged, not raised).
     """
@@ -1884,6 +1892,27 @@ async def _collect_repeater_telemetry(mc: MeshCore, contact: Contact) -> bool:
             contact.public_key[:12],
             e,
         )
+
+    # Best-effort clock sync, opt-in per repeater. Same CLI command as the
+    # manual "Sync Clock" button; failure (e.g. not currently authenticated
+    # with the repeater) is non-fatal and does not affect telemetry recording.
+    if sync_clock:
+        try:
+            sync_result = await mc.commands.send_cmd(contact.public_key, f"time {int(time.time())}")
+            if sync_result.type == EventType.ERROR:
+                logger.debug(
+                    "Telemetry collect: clock sync send error for %s: %s",
+                    contact.public_key[:12],
+                    sync_result.payload,
+                )
+            else:
+                logger.info("Telemetry collect: sent clock sync to %s", contact.public_key[:12])
+        except Exception as e:
+            logger.debug(
+                "Telemetry collect: clock sync failed for %s (non-fatal): %s",
+                contact.public_key[:12],
+                e,
+            )
 
     try:
         timestamp = int(time.time())
@@ -2021,11 +2050,14 @@ async def _run_telemetry_cycle(
     app_settings = await AppSettingsRepository.get()
     tracked_repeaters = app_settings.tracked_telemetry_repeaters if collect_repeaters else []
     tracked_contacts = app_settings.tracked_telemetry_contacts if collect_contacts else []
+    clock_sync_repeaters = set(app_settings.clock_sync_repeaters)
     if not tracked_repeaters and not tracked_contacts:
         return
 
     # Build repeater candidates
-    candidates: list[tuple[str, Contact, bool]] = []  # (key, contact, is_repeater)
+    candidates: list[
+        tuple[str, Contact, bool, bool]
+    ] = []  # (key, contact, is_repeater, sync_clock)
     for pub_key in tracked_repeaters:
         contact = await ContactRepository.get_by_key(pub_key)
         if not contact or contact.type != 2:
@@ -2036,7 +2068,7 @@ async def _run_telemetry_cycle(
             continue
         if routed_only and (not contact.effective_route or contact.effective_route.path_len < 0):
             continue
-        candidates.append((pub_key, contact, True))
+        candidates.append((pub_key, contact, True, pub_key in clock_sync_repeaters))
 
     # Build contact (non-repeater) candidates
     for pub_key in tracked_contacts:
@@ -2049,7 +2081,7 @@ async def _run_telemetry_cycle(
             continue
         if routed_only and (not contact.effective_route or contact.effective_route.path_len < 0):
             continue
-        candidates.append((pub_key, contact, False))
+        candidates.append((pub_key, contact, False, False))
 
     if not candidates:
         if routed_only:
@@ -2064,7 +2096,7 @@ async def _run_telemetry_cycle(
     )
     collected = 0
 
-    for _pub_key, contact, is_repeater in candidates:
+    for _pub_key, contact, is_repeater, sync_clock in candidates:
         try:
             async with radio_manager.radio_operation(
                 "telemetry_collect",
@@ -2072,7 +2104,7 @@ async def _run_telemetry_cycle(
                 suspend_auto_fetch=True,
             ) as mc:
                 if is_repeater:
-                    success = await _collect_repeater_telemetry(mc, contact)
+                    success = await _collect_repeater_telemetry(mc, contact, sync_clock=sync_clock)
                 else:
                     success = await _collect_contact_telemetry(mc, contact)
                 if success:

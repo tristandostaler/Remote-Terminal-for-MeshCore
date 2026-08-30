@@ -27,6 +27,8 @@ export function SettingsRadioAppSection({
   onBulkDeleteContacts,
   trackedTelemetryRepeaters = [],
   onToggleTrackedTelemetry,
+  clockSyncRepeaters = [],
+  onToggleClockSyncRepeater,
   trackedTelemetryContacts = [],
   onToggleTrackedTelemetryContact,
   className,
@@ -41,6 +43,8 @@ export function SettingsRadioAppSection({
   onBulkDeleteContacts?: (deletedKeys: string[]) => void;
   trackedTelemetryRepeaters?: string[];
   onToggleTrackedTelemetry?: (publicKey: string) => Promise<void>;
+  clockSyncRepeaters?: string[];
+  onToggleClockSyncRepeater?: (publicKey: string) => Promise<void>;
   trackedTelemetryContacts?: string[];
   onToggleTrackedTelemetryContact?: (publicKey: string) => Promise<void>;
   className?: string;
@@ -309,6 +313,19 @@ export function SettingsRadioAppSection({
                       No telemetry recorded yet
                     </div>
                   ) : null}
+                  {onToggleClockSyncRepeater && (
+                    <label className="mt-1.5 flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={clockSyncRepeaters.includes(key)}
+                        onChange={() => onToggleClockSyncRepeater(key)}
+                        className="w-3.5 h-3.5 rounded border-input accent-primary"
+                      />
+                      <span className="text-[0.6875rem] text-muted-foreground">
+                        Sync clock on each collection
+                      </span>
+                    </label>
+                  )}
                 </div>
               );
             })}

@@ -304,6 +304,8 @@ interface TelemetryHistoryPaneProps {
   contacts: Contact[];
   trackedTelemetryRepeaters: string[];
   onToggleTrackedTelemetry: (publicKey: string) => Promise<void>;
+  clockSyncRepeaters: string[];
+  onToggleClockSyncRepeater: (publicKey: string) => Promise<void>;
 }
 
 export function TelemetryHistoryPane({
@@ -312,10 +314,13 @@ export function TelemetryHistoryPane({
   contacts,
   trackedTelemetryRepeaters,
   onToggleTrackedTelemetry,
+  clockSyncRepeaters,
+  onToggleClockSyncRepeater,
 }: TelemetryHistoryPaneProps) {
   const { distanceUnit } = useDistanceUnit();
   const [metric, setMetric] = useState<string>('battery_volts');
   const [toggling, setToggling] = useState(false);
+  const [clockSyncToggling, setClockSyncToggling] = useState(false);
   const [brushRange, setBrushRange] = useState<{ start: number; end: number } | null>(null);
 
   // Reset the zoom window when switching to a different repeater.
@@ -325,6 +330,7 @@ export function TelemetryHistoryPane({
 
   const isTracked = trackedTelemetryRepeaters.includes(publicKey);
   const slotsFull = trackedTelemetryRepeaters.length >= MAX_TRACKED && !isTracked;
+  const isClockSyncEnabled = clockSyncRepeaters.includes(publicKey);
 
   // Discover unique LPP sensors across all history entries
   const lppMetrics = useMemo(() => {
@@ -656,6 +662,15 @@ export function TelemetryHistoryPane({
     }
   };
 
+  const handleToggleClockSync = async () => {
+    setClockSyncToggling(true);
+    try {
+      await onToggleClockSyncRepeater(publicKey);
+    } finally {
+      setClockSyncToggling(false);
+    }
+  };
+
   const repeaterName = useMemo(
     () => contacts.find((c) => c.public_key === publicKey)?.name ?? publicKey.slice(0, 12),
     [contacts, publicKey]
@@ -727,14 +742,30 @@ export function TelemetryHistoryPane({
           </p>
 
           {isTracked ? (
-            <Button
-              variant="outline"
-              onClick={handleToggle}
-              disabled={toggling}
-              className="border-destructive/50 text-destructive hover:bg-destructive/10"
-            >
-              {toggling ? 'Updating...' : 'Remove Repeater from Interval Metrics Tracking'}
-            </Button>
+            <div className="space-y-2">
+              <Button
+                variant="outline"
+                onClick={handleToggle}
+                disabled={toggling}
+                className="border-destructive/50 text-destructive hover:bg-destructive/10"
+              >
+                {toggling ? 'Updating...' : 'Remove Repeater from Interval Metrics Tracking'}
+              </Button>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isClockSyncEnabled}
+                  disabled={clockSyncToggling}
+                  onChange={handleToggleClockSync}
+                  className="w-4 h-4 rounded border-input accent-primary mt-0.5"
+                />
+                <span className="text-xs text-muted-foreground leading-relaxed">
+                  Also sync this repeater&apos;s clock (CLI <code>time</code> command) each time
+                  telemetry is collected. Requires the radio to already be authenticated with the
+                  repeater; if not, the sync silently no-ops until the next successful login.
+                </span>
+              </label>
+            </div>
           ) : slotsFull ? (
             <div className="space-y-2">
               <Button variant="outline" disabled>
