@@ -535,6 +535,7 @@ export interface AppSettings {
   discovery_blocked_types: number[];
   tracked_telemetry_repeaters: string[];
   tracked_telemetry_contacts: string[];
+  clock_sync_repeaters: string[];
   auto_resend_channel: boolean;
   max_message_retries: number;
   telemetry_interval_hours: number;
@@ -576,6 +577,11 @@ export interface TrackedTelemetryResponse {
   tracked_telemetry_repeaters: string[];
   names: Record<string, string>;
   schedule: TelemetrySchedule;
+  clock_sync_repeaters: string[];
+}
+
+export interface ClockSyncRepeaterResponse {
+  clock_sync_repeaters: string[];
 }
 
 /** Contact type constants */

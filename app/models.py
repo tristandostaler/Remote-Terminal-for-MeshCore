@@ -1421,6 +1421,14 @@ class AppSettings(BaseModel):
         default_factory=list,
         description="Public keys of contacts opted into periodic LPP telemetry collection (max 8)",
     )
+    clock_sync_repeaters: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Public keys of tracked repeaters that also have their clock synced "
+            "(CLI 'time' command) during periodic telemetry collection. A repeater "
+            "must be in tracked_telemetry_repeaters to appear here."
+        ),
+    )
     telemetry_interval_hours: int = Field(
         default=8,
         description=(

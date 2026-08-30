@@ -93,7 +93,13 @@ export function useAppSettings() {
     try {
       const result = await api.toggleTrackedTelemetry(publicKey);
       setAppSettings((prev) =>
-        prev ? { ...prev, tracked_telemetry_repeaters: result.tracked_telemetry_repeaters } : prev
+        prev
+          ? {
+              ...prev,
+              tracked_telemetry_repeaters: result.tracked_telemetry_repeaters,
+              clock_sync_repeaters: result.clock_sync_repeaters,
+            }
+          : prev
       );
     } catch (err) {
       console.error('Failed to toggle tracked telemetry:', err);
@@ -110,6 +116,35 @@ export function useAppSettings() {
       } else {
         toast.error('Failed to update tracked telemetry');
       }
+    }
+  }, []);
+
+  const handleToggleClockSyncRepeater = useCallback(async (publicKey: string) => {
+    const key = publicKey.toLowerCase();
+    setAppSettings((prev) => {
+      if (!prev) return prev;
+      const current = prev.clock_sync_repeaters ?? [];
+      const wasEnabled = current.includes(key);
+      const optimistic = wasEnabled ? current.filter((k) => k !== key) : [...current, key];
+      return { ...prev, clock_sync_repeaters: optimistic };
+    });
+
+    try {
+      const result = await api.toggleClockSyncRepeater(publicKey);
+      setAppSettings((prev) =>
+        prev ? { ...prev, clock_sync_repeaters: result.clock_sync_repeaters } : prev
+      );
+    } catch (err) {
+      console.error('Failed to toggle repeater clock sync:', err);
+      try {
+        const settings = await api.getSettings();
+        setAppSettings(settings);
+      } catch {
+        // If refetch also fails, leave optimistic state
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const detail = (err as any)?.body?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Failed to update repeater clock sync');
     }
   }, []);
 
@@ -186,6 +221,7 @@ export function useAppSettings() {
     handleToggleBlockedKey,
     handleToggleBlockedName,
     handleToggleTrackedTelemetry,
+    handleToggleClockSyncRepeater,
     handleToggleTrackedTelemetryContact,
   };
 }

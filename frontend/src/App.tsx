@@ -158,6 +158,7 @@ export function App() {
     handleToggleBlockedKey,
     handleToggleBlockedName,
     handleToggleTrackedTelemetry,
+    handleToggleClockSyncRepeater,
     handleToggleTrackedTelemetryContact,
   } = useAppSettings();
 
@@ -775,6 +776,8 @@ export function App() {
     },
     trackedTelemetryRepeaters: appSettings?.tracked_telemetry_repeaters ?? [],
     onToggleTrackedTelemetry: handleToggleTrackedTelemetry,
+    clockSyncRepeaters: appSettings?.clock_sync_repeaters ?? [],
+    onToggleClockSyncRepeater: handleToggleClockSyncRepeater,
     repeaterAutoLoginKey,
     onClearRepeaterAutoLogin: () => setRepeaterAutoLoginKey(null),
     blockedKeys: appSettings?.blocked_keys,
@@ -818,6 +821,8 @@ export function App() {
     },
     trackedTelemetryRepeaters: appSettings?.tracked_telemetry_repeaters ?? [],
     onToggleTrackedTelemetry: handleToggleTrackedTelemetry,
+    clockSyncRepeaters: appSettings?.clock_sync_repeaters ?? [],
+    onToggleClockSyncRepeater: handleToggleClockSyncRepeater,
     trackedTelemetryContacts: appSettings?.tracked_telemetry_contacts ?? [],
     onToggleTrackedTelemetryContact: handleToggleTrackedTelemetryContact,
   };

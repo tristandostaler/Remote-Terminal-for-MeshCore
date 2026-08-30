@@ -2219,6 +2219,90 @@ class TestCollectRepeaterTelemetryLpp:
         assert "lpp_sensors" not in recorded_data
 
 
+# ---------------------------------------------------------------------------
+# _collect_repeater_telemetry — opt-in clock sync
+# ---------------------------------------------------------------------------
+
+
+class TestCollectRepeaterTelemetryClockSync:
+    """Verify opt-in clock sync during telemetry collection."""
+
+    def _make_mc(self):
+        mc = MagicMock()
+        mc.commands.add_contact = AsyncMock()
+        mc.commands.req_status_sync = AsyncMock(return_value={"bat": 4000})
+        mc.commands.req_telemetry_sync = AsyncMock(return_value=None)
+        mc.commands.send_cmd = AsyncMock()
+        return mc
+
+    def _make_contact(self):
+        contact = MagicMock()
+        contact.public_key = "aabbccddeeff11223344"
+        contact.name = "TestRepeater"
+        contact.to_radio_dict.return_value = {}
+        return contact
+
+    async def _collect(self, mc, contact, *, sync_clock):
+        from app.radio_sync import _collect_repeater_telemetry
+
+        mock_fanout = MagicMock()
+        mock_fanout.broadcast_telemetry = AsyncMock()
+        with (
+            patch(
+                "app.radio_sync.RepeaterTelemetryRepository.record",
+                new_callable=AsyncMock,
+            ),
+            patch("app.fanout.manager.fanout_manager", mock_fanout),
+        ):
+            return await _collect_repeater_telemetry(mc, contact, sync_clock=sync_clock)
+
+    @pytest.mark.asyncio
+    async def test_sends_time_command_when_enabled(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+
+        result = await self._collect(mc, contact, sync_clock=True)
+
+        assert result is True
+        mc.commands.send_cmd.assert_awaited_once()
+        args = mc.commands.send_cmd.call_args.args
+        assert args[0] == contact.public_key
+        assert args[1].startswith("time ")
+
+    @pytest.mark.asyncio
+    async def test_does_not_send_time_command_when_disabled(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+
+        result = await self._collect(mc, contact, sync_clock=False)
+
+        assert result is True
+        mc.commands.send_cmd.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_clock_sync_failure_does_not_fail_collection(self):
+        mc = self._make_mc()
+        mc.commands.send_cmd = AsyncMock(side_effect=Exception("not logged in"))
+        contact = self._make_contact()
+
+        result = await self._collect(mc, contact, sync_clock=True)
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_clock_sync_error_ack_does_not_fail_collection(self):
+        mc = self._make_mc()
+        error_result = MagicMock()
+        error_result.type = EventType.ERROR
+        error_result.payload = {"error": "not authenticated"}
+        mc.commands.send_cmd = AsyncMock(return_value=error_result)
+        contact = self._make_contact()
+
+        result = await self._collect(mc, contact, sync_clock=True)
+
+        assert result is True
+
+
 class TestRunTelemetryCycleRoutedOnly:
     """Verify that _run_telemetry_cycle(routed_only=True) skips flood repeaters."""
 
@@ -2275,7 +2359,7 @@ class TestRunTelemetryCycleRoutedOnly:
         async def fake_get_by_key(key):
             return contact_map.get(key)
 
-        async def fake_collect(mc, contact):
+        async def fake_collect(mc, contact, **kwargs):
             collected_keys.append(contact.public_key)
             return True
 
@@ -2361,7 +2445,7 @@ class TestRunTelemetryCycleRoutedOnly:
         async def fake_get_by_key(key):
             return contact_map.get(key)
 
-        async def fake_collect(mc, contact):
+        async def fake_collect(mc, contact, **kwargs):
             collected_keys.append(contact.public_key)
             return True
 
@@ -2436,7 +2520,7 @@ class TestRunTelemetryCycleRoutedOnly:
         async def fake_get_by_key(key):
             return contact_map.get(key)
 
-        async def fake_collect(mc, contact):
+        async def fake_collect(mc, contact, **kwargs):
             collected_keys.append(contact.public_key)
             return True
 

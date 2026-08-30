@@ -324,6 +324,7 @@ Both traffic buckets come from one raw-packet scan (`_packet_shape`) shared with
 - `on_message` and `on_raw` are scope-gated. `on_contact`, `on_telemetry`, and `on_health` are dispatched to all modules unconditionally (modules filter internally).
 - Repeater telemetry broadcasts are emitted after `RepeaterTelemetryRepository.record()` in both `radio_sync.py` (auto-collect) and `routers/repeaters.py` (manual fetch). Contact LPP telemetry is similarly recorded to `ContactTelemetryRepository` and dispatched to fanout.
 - The telemetry collection loop in `radio_sync.py` is unified: it iterates over both `tracked_telemetry_repeaters` and `tracked_telemetry_contacts`, dispatching to `_collect_repeater_telemetry` (type 2) or `_collect_contact_telemetry` (others). The daily check ceiling uses the combined count.
+- A tracked repeater may also opt into `app_settings.clock_sync_repeaters`. When set, each telemetry cycle that reaches the repeater also sends the CLI `time <epoch>` command (same as the manual "Sync Clock" action) via `mc.commands.send_cmd`, best-effort — failure (e.g. the radio isn't currently authenticated with the repeater) is logged and does not fail telemetry collection or recording. This list is a subset of `tracked_telemetry_repeaters`; removing a repeater from telemetry tracking cascade-clears its clock-sync flag too (`routers/settings.py`).
 - The 60-second radio stats sampling loop in `radio_stats.py` dispatches an enriched health snapshot (radio identity + full stats) to all fanout modules after each sample.
 - Community MQTT publishes raw packets only, but its derived `path` field for direct packets is emitted as comma-separated hop identifiers, not flat path bytes.
 - See `app/fanout/AGENTS_fanout.md` for full architecture details and event payload shapes.
@@ -437,6 +438,7 @@ The background room poller (`app/radio_sync.py` `_room_poll_loop`, started post-
 - `POST /settings/blocked-names/toggle`
 - `POST /settings/tracked-telemetry/toggle`
 - `GET /settings/tracked-telemetry/schedule` — current telemetry scheduling derivation, interval options, and next-run-at timestamp
+- `POST /settings/clock-sync-repeaters/toggle` — toggle automatic clock sync (CLI `time <epoch>`) for a repeater during its telemetry collection cycle; requires the repeater to already be in `tracked_telemetry_repeaters`, and is cascade-cleared when telemetry tracking is removed
 - `POST /settings/tracked-telemetry-contacts/toggle` — toggle tracked LPP telemetry for any contact (max 8)
 - `GET /settings/tracked-telemetry-contacts/schedule` — contact telemetry scheduling (shared ceiling with repeaters)
 - `POST /settings/muted-channels/toggle`
