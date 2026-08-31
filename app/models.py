@@ -916,6 +916,14 @@ class RoomLoginRequest(BaseModel):
         default=False,
         description="Log in with the room's server-side stored credential",
     )
+    resync_history: bool = Field(
+        default=False,
+        description="Reset the radio-side room sync cursor before logging in, so the "
+        "room server re-pushes its whole retained post history (deduplicated on "
+        "ingest). Recovers posts lost after the radio ACKed them (offline-queue "
+        "overflow, radio reboot before drain) or stranded behind a stale cursor "
+        "(room-server clock reset).",
+    )
 
 
 class RoomPollConfigRequest(BaseModel):

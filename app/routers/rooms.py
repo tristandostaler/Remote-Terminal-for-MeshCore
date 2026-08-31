@@ -1,4 +1,7 @@
+import logging
+
 from fastapi import APIRouter, HTTPException
+from meshcore import EventType
 
 from app.models import (
     CONTACT_TYPE_ROOM,
@@ -23,6 +26,8 @@ from app.routers.server_control import (
     require_server_capable_contact,
 )
 from app.services.radio_runtime import radio_runtime as radio_manager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/contacts", tags=["rooms"])
 
@@ -82,6 +87,27 @@ async def room_login(public_key: str, request: RoomLoginRequest) -> RepeaterLogi
         pause_polling=True,
         suspend_auto_fetch=True,
     ) as mc:
+        if request.resync_history:
+            # The companion radio keeps a per-contact `sync_since` cursor and
+            # sends it inside every room login; the room server then only
+            # pushes posts newer than it. That cursor advances the moment the
+            # radio ACKs a push — before the app ever drains the message — so
+            # posts lost after the ACK (radio offline-queue overflow, radio
+            # reboot before drain) or stranded behind a cursor from a room
+            # whose clock jumped backward are never re-pushed on their own.
+            # CMD_ADD_UPDATE_CONTACT cannot write sync_since, but removing the
+            # contact and re-adding it makes the firmware treat it as new and
+            # zero the cursor, so this login asks for the room's whole
+            # retained history. Ingest dedup keeps only what is missing.
+            remove_result = await mc.commands.remove_contact(contact.public_key)
+            if remove_result is not None and remove_result.type == EventType.ERROR:
+                # Not fatal: the contact may simply not be on the radio right
+                # now, in which case the re-add below is already a fresh add.
+                logger.debug(
+                    "Room resync: remove_contact for %s returned %s",
+                    contact.public_key[:12],
+                    remove_result.payload,
+                )
         login = await prepare_authenticated_contact_connection(
             mc,
             contact,

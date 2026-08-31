@@ -388,7 +388,7 @@ Web Push is a standalone subsystem in `app/push/`, separate from the fanout modu
 - `POST /contacts/{public_key}/telemetry` — on-demand CayenneLPP telemetry from any contact (persists in `contact_telemetry_history`)
 - `GET /contacts/{public_key}/telemetry-history` — stored LPP telemetry history for a contact (read-only)
 - `GET /contacts/{public_key}/stats` — the node stats page in one request; `?window=` (default `1M`) drives every section, and sections are independent optional fields
-- `POST /contacts/{public_key}/room/login` — one attempt on the effective route, then one flood retry on timeout. Body `{password?, use_stored_credential?}`: `password` is three-state (`null`/absent = guest unless `use_stored_credential`, `""` = guest, else the password); `use_stored_credential=true` logs in with the room's server-side stored credential and never returns it.
+- `POST /contacts/{public_key}/room/login` — one attempt on the effective route, then one flood retry on timeout. Body `{password?, use_stored_credential?, resync_history?}`: `password` is three-state (`null`/absent = guest unless `use_stored_credential`, `""` = guest, else the password); `use_stored_credential=true` logs in with the room's server-side stored credential and never returns it. `resync_history=true` removes the room contact from the radio before the login re-adds it, zeroing the firmware's per-contact `sync_since` cursor so the room re-pushes its whole retained post history (see "Room message sync cursor" below).
 - `POST /contacts/{public_key}/room/status`
 - `POST /contacts/{public_key}/room/lpp-telemetry`
 - `POST /contacts/{public_key}/room/acl`
@@ -396,7 +396,18 @@ Web Push is a standalone subsystem in `app/push/`, separate from the fanout modu
 - `PUT /contacts/{public_key}/room/poll` — set stored credential (`credential_action` keep/set/clear; `credential=""` stores a guest login) and/or the background poll schedule; enabling polling requires a stored credential
 - `DELETE /contacts/{public_key}/room/poll` — remove the stored credential and disable polling
 
-The background room poller (`app/radio_sync.py` `_room_poll_loop`, started post-connect) periodically logs in to each subscribed room with its stored credential so the server enqueues its message delta; the existing drain/dedup pipeline captures it. Reliability rests on the incoming-message dedup (re-pulling an overlapping delta is a no-op), a durable per-room subscription (`room_poll_subscriptions`), the shared radio lock (`radio_operation(blocking=False, suspend_auto_fetch=True)` — busy = skip), and exponential backoff; an explicit `LOGIN_FAILED` disables the subscription. MeshCore has no message cursor, so this is "keep the session current + drain," never "fetch since N".
+The background room poller (`app/radio_sync.py` `_room_poll_loop`, started post-connect) periodically logs in to each subscribed room with its stored credential so the server enqueues its message delta; the existing drain/dedup pipeline captures it. Reliability rests on the incoming-message dedup (re-pulling an overlapping delta is a no-op), a durable per-room subscription (`room_poll_subscriptions`), the shared radio lock (`radio_operation(blocking=False, suspend_auto_fetch=True)` — busy = skip), and exponential backoff; an explicit `LOGIN_FAILED` disables the subscription. The host has no message cursor to fetch by, so this is "keep the session current + drain," never "fetch since N" — but the *radio* does keep a cursor, below.
+
+#### Room message sync cursor (firmware behavior this app depends on)
+
+Verified against the meshcore firmware (`examples/simple_room_server/MyMesh.cpp`, `examples/companion_radio/MyMesh.cpp`, `src/helpers/BaseChatMesh.cpp`):
+
+- The companion radio keeps a per-contact `sync_since` (room-clock domain) and puts it in every room login packet. The room server sets its per-client cursor from that value **on every login** and pushes only posts with `post_timestamp > sync_since`, oldest first, one at a time, each gated on an RF ACK; the retained history is a 32-post ring (`MAX_UNSYNCED_POSTS`).
+- The radio ACKs a pushed post and advances its own `sync_since` **the moment it receives the RF packet** — before the host ever drains the message. `CMD_ADD_UPDATE_CONTACT` cannot write `sync_since`; only a *fresh* contact add zeroes it.
+- Permanent-loss windows follow directly: the companion's host-bound offline queue is 16 frames and, when full of non-channel frames, **drops new DM/room frames after they were already ACKed**; a radio power-cycle loses the RAM queue the same way. A room-server clock jump backward strands every client cursor in the future (new posts compare below `sync_since`, so nothing pushes, and re-login doesn't help because our radio supplies the stale cursor). None of these are recoverable by another login alone — the room believes we are synced.
+- The room also stops pushing to a client after **3 consecutive ACK timeouts** until that client's next login — e.g. while the room contact is offloaded from our radio (the radio can't decrypt, so it never ACKs). Posts are *not* lost in that case (the cursor didn't advance), but they only arrive after the next login (background poll or manual open), and only if still inside the 32-post ring.
+
+`resync_history` on the login endpoint is the recovery lever: remove + re-add the room contact on the radio (fresh add → `sync_since = 0`), then log in, so the room re-pushes everything it still holds. Ingest dedup makes the replay a no-op for posts already stored. It costs the airtime of up to 32 pushed posts, which is why it is a manual action and the periodic poller never does it.
 
 ### Channels
 - `GET /channels`

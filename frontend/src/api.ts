@@ -732,7 +732,10 @@ export const api = {
     }),
   contactTelemetryHistory: (publicKey: string) =>
     fetchJson<TelemetryHistoryEntry[]>(`/contacts/${publicKey}/telemetry-history`),
-  roomLogin: (publicKey: string, opts: { password?: string; useStoredCredential?: boolean } = {}) =>
+  roomLogin: (
+    publicKey: string,
+    opts: { password?: string; useStoredCredential?: boolean; resyncHistory?: boolean } = {}
+  ) =>
     fetchJson<RepeaterLoginResponse>(`/contacts/${publicKey}/room/login`, {
       method: 'POST',
       // password may legitimately be "" (guest); only omit it when unset so the
@@ -740,6 +743,7 @@ export const api = {
       body: JSON.stringify({
         ...(opts.password !== undefined ? { password: opts.password } : {}),
         use_stored_credential: opts.useStoredCredential ?? false,
+        resync_history: opts.resyncHistory ?? false,
       }),
     }),
   getRoomPoll: (publicKey: string) => fetchJson<RoomPollStatus>(`/contacts/${publicKey}/room/poll`),

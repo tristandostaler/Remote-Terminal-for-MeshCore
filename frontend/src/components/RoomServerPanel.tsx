@@ -373,6 +373,43 @@ export function RoomServerPanel({ contact, onAuthenticatedChange }: RoomServerPa
     [contact.public_key]
   );
 
+  const [resyncing, setResyncing] = useState(false);
+
+  const handleResyncHistory = useCallback(async () => {
+    // Prefer the server-side stored credential; fall back to the credential
+    // from this session's login. "" is a valid guest credential — test for
+    // null, not falsiness.
+    const opts = pollStatus?.has_stored_credential
+      ? { useStoredCredential: true, resyncHistory: true }
+      : sessionCredential !== null
+        ? { password: sessionCredential, resyncHistory: true }
+        : null;
+    if (!opts) {
+      toast.error('Log in to this room first so the resync can reuse its credential.');
+      return;
+    }
+    setResyncing(true);
+    try {
+      const result = await api.roomLogin(contact.public_key, opts);
+      if (result.authenticated) {
+        toast.success('Room history resync requested.', {
+          description:
+            'The room server will re-push its retained posts over the next minute or two. Messages you already have are deduplicated; missing ones appear as they arrive.',
+        });
+      } else {
+        toast.warning("Couldn't confirm the resync login", {
+          description: result.message ?? undefined,
+        });
+      }
+    } catch (err) {
+      toast.error('Room history resync failed', {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setResyncing(false);
+    }
+  }, [contact.public_key, pollStatus, sessionCredential]);
+
   const handleForgetCredential = useCallback(async () => {
     setSyncSaving(true);
     try {
@@ -599,6 +636,26 @@ export function RoomServerPanel({ contact, onAuthenticatedChange }: RoomServerPa
                   Forget saved credential
                 </button>
               ) : null}
+            </div>
+            <div className="mb-3 rounded-md border border-border bg-background/40 px-3 py-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[0.8125rem] font-medium">Missing room messages?</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleResyncHistory()}
+                  disabled={resyncing}
+                >
+                  {resyncing ? 'Resyncing…' : 'Resync history'}
+                </Button>
+              </div>
+              <p className="mt-1 text-[0.8125rem] text-muted-foreground">
+                Resets this radio&apos;s sync position with the room and logs in again, asking the
+                room server to re-push everything it still holds. Use this when posts from other
+                members never arrived — for example after the radio was power-cycled or offline for
+                a while. Duplicates are filtered automatically.
+              </p>
             </div>
             <div className="grid gap-3 xl:grid-cols-2">
               <TelemetryPane

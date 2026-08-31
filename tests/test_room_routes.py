@@ -41,6 +41,7 @@ def _mock_mc():
     mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
     mc.commands.get_msg = AsyncMock()
     mc.commands.add_contact = AsyncMock(return_value=_radio_result(EventType.OK))
+    mc.commands.remove_contact = AsyncMock(return_value=_radio_result(EventType.OK))
     mc.subscribe = MagicMock(return_value=MagicMock(unsubscribe=MagicMock()))
     mc.stop_auto_message_fetching = AsyncMock()
     mc.start_auto_message_fetching = AsyncMock()
@@ -154,6 +155,115 @@ class TestRoomLogin:
 
         assert response.authenticated is False
         mc.commands.get_msg.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_room_login_resync_removes_contact_before_readding(self, test_db):
+        """resync_history must remove the room contact from the radio BEFORE the
+        login re-adds it: a fresh add is what zeroes the firmware's per-contact
+        sync_since cursor, making the room re-push its retained history."""
+        mc = _mock_mc()
+        await _insert_contact(ROOM_KEY, name="Room Server", contact_type=3)
+        subscriptions: dict[EventType, tuple[object, object]] = {}
+        call_order: list[str] = []
+
+        def _subscribe(event_type, callback, attribute_filters=None):
+            subscriptions[event_type] = (callback, attribute_filters)
+            return MagicMock(unsubscribe=MagicMock())
+
+        async def _send_login(*args, **kwargs):
+            callback, _filters = subscriptions[EventType.LOGIN_SUCCESS]
+            callback(_radio_result(EventType.LOGIN_SUCCESS, {"pubkey_prefix": ROOM_KEY[:12]}))
+            return _radio_result(EventType.MSG_SENT)
+
+        async def _remove_contact(*args, **kwargs):
+            call_order.append("remove")
+            return _radio_result(EventType.OK)
+
+        async def _add_contact(*args, **kwargs):
+            call_order.append("add")
+            return _radio_result(EventType.OK)
+
+        mc.subscribe = MagicMock(side_effect=_subscribe)
+        mc.commands.send_login = AsyncMock(side_effect=_send_login)
+        mc.commands.remove_contact = AsyncMock(side_effect=_remove_contact)
+        mc.commands.add_contact = AsyncMock(side_effect=_add_contact)
+        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+
+        with (
+            patch("app.routers.rooms.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+        ):
+            response = await room_login(
+                ROOM_KEY, RoomLoginRequest(password="hello", resync_history=True)
+            )
+
+        assert response.authenticated is True
+        mc.commands.remove_contact.assert_awaited_once_with(ROOM_KEY)
+        assert call_order == ["remove", "add"]
+
+    @pytest.mark.asyncio
+    async def test_room_login_resync_tolerates_remove_error(self, test_db):
+        """remove_contact failing (e.g. contact not on the radio) must not block
+        the resync login — the re-add is already a fresh add in that case."""
+        mc = _mock_mc()
+        await _insert_contact(ROOM_KEY, name="Room Server", contact_type=3)
+        subscriptions: dict[EventType, tuple[object, object]] = {}
+
+        def _subscribe(event_type, callback, attribute_filters=None):
+            subscriptions[event_type] = (callback, attribute_filters)
+            return MagicMock(unsubscribe=MagicMock())
+
+        async def _send_login(*args, **kwargs):
+            callback, _filters = subscriptions[EventType.LOGIN_SUCCESS]
+            callback(_radio_result(EventType.LOGIN_SUCCESS, {"pubkey_prefix": ROOM_KEY[:12]}))
+            return _radio_result(EventType.MSG_SENT)
+
+        mc.subscribe = MagicMock(side_effect=_subscribe)
+        mc.commands.send_login = AsyncMock(side_effect=_send_login)
+        mc.commands.remove_contact = AsyncMock(
+            return_value=_radio_result(EventType.ERROR, {"reason": "not found"})
+        )
+        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+
+        with (
+            patch("app.routers.rooms.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+        ):
+            response = await room_login(
+                ROOM_KEY, RoomLoginRequest(password="hello", resync_history=True)
+            )
+
+        assert response.authenticated is True
+
+    @pytest.mark.asyncio
+    async def test_room_login_default_does_not_remove_contact(self, test_db):
+        """A plain login must never reset the sync cursor: zeroing it makes the
+        room re-push its whole retained history, which costs real airtime."""
+        mc = _mock_mc()
+        await _insert_contact(ROOM_KEY, name="Room Server", contact_type=3)
+        subscriptions: dict[EventType, tuple[object, object]] = {}
+
+        def _subscribe(event_type, callback, attribute_filters=None):
+            subscriptions[event_type] = (callback, attribute_filters)
+            return MagicMock(unsubscribe=MagicMock())
+
+        async def _send_login(*args, **kwargs):
+            callback, _filters = subscriptions[EventType.LOGIN_SUCCESS]
+            callback(_radio_result(EventType.LOGIN_SUCCESS, {"pubkey_prefix": ROOM_KEY[:12]}))
+            return _radio_result(EventType.MSG_SENT)
+
+        mc.subscribe = MagicMock(side_effect=_subscribe)
+        mc.commands.send_login = AsyncMock(side_effect=_send_login)
+        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+
+        with (
+            patch("app.routers.rooms.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+        ):
+            response = await room_login(ROOM_KEY, RoomLoginRequest(password="hello"))
+
+        assert response.authenticated is True
+        mc.commands.remove_contact.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_room_login_rejects_non_room(self, test_db):
