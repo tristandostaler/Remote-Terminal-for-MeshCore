@@ -243,6 +243,68 @@ describe('RoomServerPanel', () => {
     });
   });
 
+  it('resyncs history with the stored credential when one is saved', async () => {
+    mockApi.getRoomPoll.mockResolvedValue({
+      ...NO_STORED_CREDENTIAL,
+      has_stored_credential: true,
+    });
+    // Auto-open login, then the resync login.
+    mockApi.roomLogin
+      .mockResolvedValueOnce({ status: 'ok', authenticated: true, message: null })
+      .mockResolvedValueOnce({ status: 'ok', authenticated: true, message: null });
+
+    render(<RoomServerPanel contact={roomContact} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Show Tools')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Show Tools'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Resync history')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Resync history'));
+
+    await waitFor(() => {
+      expect(mockApi.roomLogin).toHaveBeenLastCalledWith(roomContact.public_key, {
+        useStoredCredential: true,
+        resyncHistory: true,
+      });
+    });
+    expect(mockToast.success).toHaveBeenCalledWith(
+      'Room history resync requested.',
+      expect.anything()
+    );
+  });
+
+  it('resyncs history with the session credential when none is stored', async () => {
+    // Guest login this session, no server-side credential saved.
+    mockApi.roomLogin
+      .mockResolvedValueOnce({ status: 'ok', authenticated: true, message: null })
+      .mockResolvedValueOnce({ status: 'ok', authenticated: true, message: null });
+
+    render(<RoomServerPanel contact={roomContact} />);
+    fireEvent.click(screen.getByText('Login with Existing Access / Guest'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Show Tools')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Show Tools'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Resync history')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Resync history'));
+
+    await waitFor(() => {
+      // "" is the valid guest credential from this session's login.
+      expect(mockApi.roomLogin).toHaveBeenLastCalledWith(roomContact.public_key, {
+        password: '',
+        resyncHistory: true,
+      });
+    });
+  });
+
   it('shows the disabled reason even though the sync toggle looks unchecked either way', async () => {
     // The background poller auto-disables sync after a rejected login and
     // records why in last_error. If that text only rendered while

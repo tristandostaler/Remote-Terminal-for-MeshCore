@@ -375,7 +375,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | GET | `/api/contacts/{public_key}/repeater/telemetry-history` | Stored telemetry history for a repeater (read-only, no radio access) |
 | POST | `/api/contacts/{public_key}/telemetry` | Fetch CayenneLPP telemetry from any contact (single attempt, 10s timeout) |
 | GET | `/api/contacts/{public_key}/telemetry-history` | Stored LPP telemetry history for a contact (read-only, no radio access) |
-| POST | `/api/contacts/{public_key}/room/login` | Log in to a room server (escalates to one flood retry if the first attempt draws no reply) |
+| POST | `/api/contacts/{public_key}/room/login` | Log in to a room server (escalates to one flood retry if the first attempt draws no reply); `resync_history` resets the radio-side room sync cursor so the room re-pushes its retained post history |
 | POST | `/api/contacts/{public_key}/room/status` | Fetch room-server status telemetry |
 | POST | `/api/contacts/{public_key}/room/lpp-telemetry` | Fetch room-server CayenneLPP sensor data |
 | POST | `/api/contacts/{public_key}/room/acl` | Fetch room-server ACL entries |
