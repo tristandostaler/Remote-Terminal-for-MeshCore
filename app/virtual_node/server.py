@@ -481,11 +481,10 @@ class VirtualNodeServer:
                 else None
             ),
             refresh_identity=code in IDENTITY_CHANGING_COMMANDS,
+            cacheable=code in CACHED_QUERY_COMMANDS,
         )
         if code in ADMIN_COMMANDS:
             self._response_cache.clear()
-        elif code in CACHED_QUERY_COMMANDS and response[0] != ERR:
-            self._response_cache[command] = (time.time() + RESPONSE_CACHE_TTL_SECONDS, response)
         return [response]
 
     # ------------------------------------------------------------------ identity
@@ -852,6 +851,7 @@ class VirtualNodeServer:
         refresh_identity: bool = False,
         expected: frozenset[int] | None = None,
         timeout: float | None = None,
+        cacheable: bool = False,
     ) -> bytes:
         """Send a raw command to the radio and return the radio's answer frame.
 
@@ -859,13 +859,17 @@ class VirtualNodeServer:
         with RemoteTerm's own commands. The answer is matched by response code
         via the frame tap (:meth:`on_radio_frame`); a timeout is reported to
         the app as ``ERR_CODE_BAD_STATE``.
+
+        ``cacheable`` queries are re-checked against the response cache once
+        the lock is held and stored before it is released, so several apps
+        asking the same thing at the same moment cost one radio round trip:
+        the first fills the cache and the rest, queued on the lock, read it.
         """
         code = command[0]
         if expected is None:
             expected = _EXPECTED_RESPONSES.get(code)
         if timeout is None:
             timeout = FORWARD_TIMEOUT_SECONDS
-        self.forwarded_commands += 1
         try:
             return await asyncio.wait_for(
                 self._forward_under_lock(
@@ -874,6 +878,7 @@ class VirtualNodeServer:
                     refresh_identity=refresh_identity,
                     expected=expected,
                     timeout=timeout,
+                    cacheable=cacheable,
                 ),
                 timeout=FORWARD_TOTAL_TIMEOUT_SECONDS,
             )
@@ -895,13 +900,25 @@ class VirtualNodeServer:
         refresh_identity: bool,
         expected: frozenset[int] | None,
         timeout: float,
+        cacheable: bool = False,
     ) -> bytes:
         async with self._radio().radio_operation(f"virtual_node:{command[0]}") as mc:
+            if cacheable:
+                cached = self._cached_response(command)
+                if cached is not None:
+                    self.cached_commands += 1
+                    return cached
+            self.forwarded_commands += 1
             if stage_contact_key:
                 await self._stage_contact(mc, stage_contact_key)
             response = await self._exchange(mc, command, expected, timeout)
             if refresh_identity and response[0] != ERR:
                 await self._refresh_identity(mc)
+            if cacheable and response[0] != ERR:
+                self._response_cache[command] = (
+                    time.time() + RESPONSE_CACHE_TTL_SECONDS,
+                    response,
+                )
             return response
 
     async def _exchange(

@@ -314,11 +314,14 @@ class FakeRadio:
         self.path_hash_mode = 0
         self.repeat_enabled = False
         self.operations: list[str] = []
+        # The real RadioManager serializes every operation; the proxy relies on that.
+        self._lock = asyncio.Lock()
 
     @asynccontextmanager
     async def radio_operation(self, name: str, **_kwargs):
-        self.operations.append(name)
-        yield self.meshcore
+        async with self._lock:
+            self.operations.append(name)
+            yield self.meshcore
 
 
 async def read_frame(reader: asyncio.StreamReader) -> bytes:
@@ -609,6 +612,62 @@ class TestMessageQueue:
         assert events[0].payload["text"] == "Alice: hello"
         assert events[0].payload["channel_idx"] == await server._slot_for_channel(CHANNEL_KEY)
         assert await client.command(b"\x0a") == protocol.encode_no_more_messages()
+
+    @pytest.mark.asyncio
+    async def test_several_clients_each_get_their_own_copy(self, proxy):
+        server, radio, connect = proxy
+        first = await connect()
+        second = await connect()
+        third = await connect()
+        assert server.client_count == 3
+
+        # One client drains its inbox ahead of the others; that must not
+        # consume anything another client has yet to fetch.
+        server.on_app_event(
+            "message",
+            {
+                "type": "PRIV",
+                "conversation_key": KEY_A,
+                "text": "for everyone",
+                "sender_timestamp": 1_700_000_000,
+                "received_at": 1_700_000_001,
+                "outgoing": False,
+            },
+        )
+        for client in (first, second, third):
+            assert await client.read() == protocol.encode_push_msg_waiting()
+        frame_first = await first.command(b"\x0a")
+        assert await first.command(b"\x0a") == protocol.encode_no_more_messages()
+        frame_second = await second.command(b"\x0a")
+        frame_third = await third.command(b"\x0a")
+        assert frame_first == frame_second == frame_third
+        assert (await parse_with_library(frame_first))[0].payload["text"] == "for everyone"
+
+        # Pushes fan out to every client too.
+        ack = bytes([RESP.ACK.value, 9, 9, 9, 9])
+        server.on_radio_frame(ack)
+        for client in (first, second, third):
+            assert await client.read() == ack
+
+        # Forwarded commands from concurrent clients are serialized through the
+        # radio lock and each gets its own answer; the cache then serves the rest.
+        radio.meshcore.responses[CMD.GET_CUSTOM_VARS.value] = (
+            bytes([RESP.CUSTOM_VARS.value]) + b"k:v"
+        )
+        answers = await asyncio.gather(
+            first.command(b"\x28"), second.command(b"\x28"), third.command(b"\x28")
+        )
+        assert answers == [bytes([RESP.CUSTOM_VARS.value]) + b"k:v"] * 3
+        assert len(radio.meshcore.sent) == 1, "three clients, one radio round trip"
+
+        # A client leaving does not disturb the others.
+        await second.close()
+        for _ in range(50):
+            if server.client_count == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert server.client_count == 2
+        assert (await first.command(b"\x05"))[0] == RESP.CURRENT_TIME.value
 
     @pytest.mark.asyncio
     async def test_outgoing_and_reaction_messages_are_not_queued(self, proxy):
