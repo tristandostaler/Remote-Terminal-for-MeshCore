@@ -106,6 +106,14 @@ def broadcast_event(event_type: str, data: dict, *, realtime: bool = True) -> No
     if realtime:
         from app.bots.engine import bot_engine
         from app.fanout.manager import fanout_manager
+        from app.virtual_node.server import virtual_node
+
+        # Apps connected to the virtual companion node get their copy of every
+        # realtime message/contact/channel event through the companion protocol.
+        try:
+            virtual_node.on_app_event(event_type, data)
+        except Exception:
+            logger.debug("Virtual node event mirror failed", exc_info=True)
 
         if event_type == "message":
             asyncio.create_task(fanout_manager.broadcast_message(data))

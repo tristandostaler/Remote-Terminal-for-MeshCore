@@ -132,6 +132,20 @@ export interface HealthStatus {
   bots_disabled: boolean;
   bots_disabled_source?: 'env' | 'until_restart' | null;
   basic_auth_enabled?: boolean;
+  virtual_node?: VirtualNodeStatus | null;
+}
+
+/** State of the virtual companion node other MeshCore apps can connect to over TCP. */
+export interface VirtualNodeStatus {
+  enabled: boolean;
+  listening: boolean;
+  host: string | null;
+  port: number | null;
+  read_only: boolean;
+  client_count: number;
+  local_commands: number;
+  cached_commands: number;
+  forwarded_commands: number;
 }
 
 export interface FanoutConfig {

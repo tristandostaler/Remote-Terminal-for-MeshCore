@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     basic_auth_username: str = ""
     basic_auth_password: str = ""
     vapid_subject: str = "mailto:noreply@meshcore.local"
+    # Virtual companion node: a TCP server speaking the MeshCore companion
+    # protocol so other apps (mobile app over WiFi, meshcore-cli, meshcore.js,
+    # Home Assistant) can use this server as their "radio". Off by default: it
+    # has no authentication of its own, exactly like a real WiFi companion.
+    virtual_node_enabled: bool = False
+    virtual_node_host: str = "0.0.0.0"
+    virtual_node_port: int = 5000
+    # Refuse every command that transmits or changes radio/contact/channel
+    # state; apps can still read contacts, channels and messages.
+    virtual_node_read_only: bool = False
 
     @model_validator(mode="after")
     def validate_transport_exclusivity(self) -> "Settings":
@@ -84,6 +94,17 @@ class Settings(BaseSettings):
             raise ValueError(
                 "MESHCORE_BASIC_AUTH_USERNAME and MESHCORE_BASIC_AUTH_PASSWORD "
                 "must be set together."
+            )
+        if not 1 <= self.virtual_node_port <= 65535:
+            raise ValueError("MESHCORE_VIRTUAL_NODE_PORT must be between 1 and 65535.")
+        if (
+            self.virtual_node_enabled
+            and self.tcp_host in ("127.0.0.1", "localhost", "::1")
+            and self.tcp_port == self.virtual_node_port
+        ):
+            raise ValueError(
+                "MESHCORE_VIRTUAL_NODE_PORT collides with the local TCP radio port; "
+                "the virtual node would be proxying itself."
             )
         return self
 

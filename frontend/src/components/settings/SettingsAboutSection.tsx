@@ -12,6 +12,7 @@ export function SettingsAboutSection({
 }) {
   const version = health?.app_info?.version ?? 'unknown';
   const commit = health?.app_info?.commit_hash;
+  const virtualNode = health?.virtual_node;
 
   return (
     <div className={className}>
@@ -30,6 +31,44 @@ export function SettingsAboutSection({
               </>
             ) : null}
           </div>
+        </div>
+
+        <Separator />
+
+        {/* Virtual companion node */}
+        <div className="text-sm text-center space-y-1" data-testid="virtual-node-status">
+          <div className="font-medium">Virtual companion node</div>
+          {virtualNode?.enabled ? (
+            <>
+              <p className="text-muted-foreground">
+                {virtualNode.listening ? 'Listening on' : 'Not listening (failed to bind)'}{' '}
+                {virtualNode.listening ? (
+                  <span className="font-mono text-xs">
+                    {virtualNode.host}:{virtualNode.port}
+                  </span>
+                ) : null}
+                {virtualNode.read_only ? <span className="ml-1">(read-only)</span> : null}
+              </p>
+              <p className="text-muted-foreground">
+                {virtualNode.client_count} connected app
+                {virtualNode.client_count === 1 ? '' : 's'}
+                <span className="mx-1.5">·</span>
+                {virtualNode.local_commands + virtualNode.cached_commands} answered locally
+                <span className="mx-1.5">·</span>
+                {virtualNode.forwarded_commands} forwarded to the radio
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Point the MeshCore app (TCP/WiFi), meshcore-cli or Home Assistant at this
+                server&apos;s address and port to use this radio through RemoteTerm.
+              </p>
+            </>
+          ) : (
+            <p className="text-muted-foreground">
+              Disabled. Set{' '}
+              <span className="font-mono text-xs">MESHCORE_VIRTUAL_NODE_ENABLED=true</span> to let
+              other MeshCore apps connect through this server.
+            </p>
+          )}
         </div>
 
         <Separator />

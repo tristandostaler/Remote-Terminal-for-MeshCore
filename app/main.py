@@ -161,12 +161,30 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Could not start the AEIC send-half download", exc_info=True)
 
+    # Virtual companion node (TCP, MeshCore companion protocol) for other apps.
+    # Independent of the radio: it serves cached state while the radio is down.
+    from app.virtual_node import virtual_node
+
+    if server_settings.virtual_node_enabled:
+        try:
+            await virtual_node.start()
+        except Exception:
+            logger.exception(
+                "Failed to start the virtual MeshCore node on %s:%d",
+                server_settings.virtual_node_host,
+                server_settings.virtual_node_port,
+            )
+
     startup_radio_task = asyncio.create_task(_startup_radio_connect_and_setup())
     app.state.startup_radio_task = startup_radio_task
 
     yield
 
     logger.info("Shutting down")
+    try:
+        await virtual_node.stop()
+    except Exception:
+        logger.warning("Failed to stop the virtual MeshCore node cleanly", exc_info=True)
     if startup_radio_task and not startup_radio_task.done():
         startup_radio_task.cancel()
         try:

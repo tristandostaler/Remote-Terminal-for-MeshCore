@@ -32,6 +32,7 @@ Ancillary AGENTS.md files which should generally not be reviewed unless specific
 - `app/bots/AGENTS_bots.md` - Bots workspace (DB-stored Python bots, triggers, scheduler, feeds, engine)
 - `app/fanout/AGENTS_fanout.md` - Fanout bus architecture (MQTT, bots, webhooks, Apprise, SQS)
 - `app/imaging/aeic/AGENTS_aeic.md` - AEIC neural image codec (the AI-reconstruction photo option; read before touching it, it fails silently)
+- `app/virtual_node/AGENTS_virtual_node.md` - Virtual companion node (TCP server speaking the MeshCore companion protocol so other apps can use the radio through this server; command policy, caching, frame tap)
 - `frontend/src/components/visualizer/AGENTS_packet_visualizer.md` - Packet visualizer (force-directed graph, advert-path identity, layout engine)
 
 ## Architecture Overview
@@ -222,6 +223,7 @@ This message-layer echo/path handling is independent of raw-packet storage dedup
 │   ├── push/               # Web Push notification subsystem (VAPID keys, dispatch, send)
 │   └── fanout/             # Fanout bus: MQTT, bots, webhooks, Apprise, SQS (see fanout/AGENTS_fanout.md)
 │   └── imaging/aeic/       # AEIC neural image codec (see imaging/aeic/AGENTS_aeic.md)
+│   └── virtual_node/       # Virtual companion node: TCP proxy for other MeshCore apps (see virtual_node/AGENTS_virtual_node.md)
 ├── frontend/               # React frontend
 │   ├── AGENTS.md           # Frontend documentation
 │   ├── src/
@@ -338,7 +340,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Connection status, fanout statuses, bots_disabled flag |
+| GET | `/api/health` | Connection status, fanout statuses, bots_disabled flag, `virtual_node` listener/client/command counters |
 | GET | `/api/debug` | Support snapshot: recent logs, live radio probe, contact/channel drift audit, and running version/git info |
 | GET | `/api/radio/config` | Radio configuration, including `path_hash_mode`, `path_hash_mode_supported`, advert-location on/off, and `multi_acks_enabled` |
 | PATCH | `/api/radio/config` | Update name, location, advert-location on/off, `multi_acks_enabled`, radio params, and `path_hash_mode` when supported |
@@ -540,6 +542,10 @@ mc.subscribe(EventType.ACK, handler)
 | `MESHCORE_SKIP_POST_CONNECT_SYNC` | `false` | Debug/diagnostic escape hatch: skip the contact/channel sync-and-offload, startup advertisement, and pending-message drain during post-connect setup, and do not start the periodic sync/advert/message-poll/telemetry background loops. Handler registration, key export, time sync, flood-scope apply, and auto message fetching still run. Useful when the radio's contact/channel state must be left untouched; not for normal operation. |
 | `MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT` | `false` | Enable `GET /api/radio/private-key` to return the in-memory private key as hex. Disabled by default; only enable on a trusted network where you need to retrieve the key (e.g. for backup or migration). |
 | `MESHCORE_VAPID_SUBJECT` | `mailto:noreply@meshcore.local` | Subject (`sub`) claim for Web Push VAPID tokens; must be a `mailto:` or `https:` contact. Apple's push service (APNs) rejects the default `.local` domain with `403 BadJwtToken`, so iOS/Safari operators must set this to a real address. Google FCM (Chrome/Android) accepts the default. |
+| `MESHCORE_VIRTUAL_NODE_ENABLED` | `false` | Start the virtual companion node: a TCP server speaking the MeshCore companion protocol so other apps (mobile app over WiFi, meshcore-cli, Home Assistant) use this server as their radio. Contacts, channels, identity, clock, battery and inbound messages are served from server state; read-only device queries are cached 30 s; sends and config writes are forwarded under the radio lock. See `app/virtual_node/AGENTS_virtual_node.md`. |
+| `MESHCORE_VIRTUAL_NODE_HOST` | `0.0.0.0` | Interface the virtual node listens on |
+| `MESHCORE_VIRTUAL_NODE_PORT` | `5000` | Port the virtual node listens on |
+| `MESHCORE_VIRTUAL_NODE_READ_ONLY` | `false` | Refuse every transmit, radio-config and contact/channel write from connected apps; they can still read |
 
 **Note:** Runtime app settings are stored in the database (`app_settings` table), not environment variables. These include `max_radio_contacts`, `auto_decrypt_dm_on_advert`, `advert_interval`, `last_advert_time`, `last_message_times`, `flood_scope`, `known_regions`, `blocked_keys`, `blocked_names`, `discovery_blocked_types`, `tracked_telemetry_repeaters`, `tracked_telemetry_contacts`, `clock_sync_repeaters`, `auto_resend_channel`, and `telemetry_interval_hours`. `max_radio_contacts` is the configured radio contact capacity baseline used by background maintenance: favorites reload first, non-favorite fill targets about 80% of that value, and full offload/reload triggers around 95% occupancy. They are configured via `GET/PATCH /api/settings`. MQTT, bot, webhook, Apprise, and SQS configs are stored in the `fanout_configs` table, managed via `/api/fanout`. If the radio's channel slots appear unstable or another client is mutating them underneath this app, operators can force the old always-reconfigure send path with `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true`.
 
