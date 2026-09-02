@@ -79,12 +79,13 @@ refuses every transmit and local-write command; apps become viewers.
   socket (`VirtualNodeServer.disconnect_peer`); its cursor is persisted on the
   way out like any disconnect.
 
-The overview also carries the **channel slot map** and the **last 20 refusals**
-(`_note_refusal`: command name, `ERR_CODE_*`, reason, app, timestamp). A
-companion app reports "could not send" and nothing else, so without these the
-reason existed only in the server log — the wrong place to look when the phone
-in your hand will not send. Every error answer is recorded, including the ones
-a handler returns rather than raises.
+The overview also carries the **channel slot map** and a trace of the **last 60
+commands** (`_note_command`: command name, the response frame or `ERR_CODE_*`
+it was answered with, reason on failure, app, duration). The app is the one
+piece of this we cannot see into, and it reports "could not send" and nothing
+more — so the questions are whether it sent the command at all and what came
+back, and that answer used to exist only in the server log. Successful commands
+are traced too for exactly that reason; the settings page filters to failures.
 
 The switch itself is `PATCH /api/settings` with
 `virtual_node_allow_admin_commands`. The frontend section is

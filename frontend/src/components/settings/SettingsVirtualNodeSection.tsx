@@ -25,6 +25,7 @@ export function SettingsVirtualNodeSection({
   const [overview, setOverview] = useState<VirtualNodeOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [failuresOnly, setFailuresOnly] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -260,36 +261,55 @@ export function SettingsVirtualNodeSection({
         </div>
       ) : null}
 
-      {/* Recent refusals */}
-      {overview && (overview.recent_refusals?.length ?? 0) > 0 ? (
+      {/* Command trace */}
+      {overview && (overview.recent_commands?.length ?? 0) > 0 ? (
         <div className="space-y-2">
-          <h4 className="font-medium">Recent refusals</h4>
+          <div className="flex items-center justify-between">
+            <h4 className="font-medium">Recent activity</h4>
+            <label className="flex items-center gap-2 text-[0.8125rem] text-muted-foreground">
+              <Checkbox
+                id="virtual-node-failures-only"
+                checked={failuresOnly}
+                onCheckedChange={(checked) => setFailuresOnly(checked === true)}
+              />
+              Failures only
+            </label>
+          </div>
           <p className="text-[0.8125rem] text-muted-foreground">
-            Commands the node answered with an error. An app usually just says the message could not
-            be sent, so this is where the reason shows up.
+            Every command a connected app sent and what it was answered with. An app that will not
+            send usually says only that — this shows whether it sent the command at all, and what it
+            got back.
           </p>
           <div className="overflow-x-auto rounded-md border border-input">
-            <table className="w-full text-sm" data-testid="virtual-node-refusals">
+            <table className="w-full text-sm" data-testid="virtual-node-activity">
               <thead className="text-left text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 font-medium">When</th>
                   <th className="px-3 py-2 font-medium">App</th>
                   <th className="px-3 py-2 font-medium">Command</th>
-                  <th className="px-3 py-2 font-medium">Error</th>
+                  <th className="px-3 py-2 font-medium">Answer</th>
                   <th className="px-3 py-2 font-medium">Detail</th>
                 </tr>
               </thead>
               <tbody>
-                {overview.recent_refusals
-                  ?.slice()
+                {overview.recent_commands
+                  ?.filter((entry) => !failuresOnly || entry.failed)
+                  .slice()
                   .reverse()
-                  .map((refusal, index) => (
-                    <tr key={`${refusal.at}-${index}`} className="border-t border-border/60">
-                      <td className="px-3 py-2 whitespace-nowrap">{formatTime(refusal.at)}</td>
-                      <td className="px-3 py-2">{refusal.app_name || refusal.peer}</td>
-                      <td className="px-3 py-2 font-mono text-xs">{refusal.command}</td>
-                      <td className="px-3 py-2 font-mono text-xs">{refusal.error}</td>
-                      <td className="px-3 py-2 text-muted-foreground">{refusal.detail}</td>
+                  .map((entry, index) => (
+                    <tr key={`${entry.at}-${index}`} className="border-t border-border/60">
+                      <td className="px-3 py-2 whitespace-nowrap">{formatTime(entry.at)}</td>
+                      <td className="px-3 py-2">{entry.app_name || entry.peer}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{entry.command}</td>
+                      <td
+                        className={cn(
+                          'px-3 py-2 font-mono text-xs',
+                          entry.failed ? 'text-destructive' : null
+                        )}
+                      >
+                        {entry.result}
+                      </td>
+                      <td className="px-3 py-2 text-muted-foreground">{entry.detail}</td>
                     </tr>
                   ))}
               </tbody>

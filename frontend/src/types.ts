@@ -603,14 +603,16 @@ export interface VirtualNodeKnownClient {
   connected: boolean;
 }
 
-/** A command the virtual node answered with an error, shown for diagnosis. */
-export interface VirtualNodeRefusal {
+/** One command an app sent to the virtual node, and what it was answered with. */
+export interface VirtualNodeCommand {
   at: number;
   peer: string;
   app_name: string;
   command: string;
-  error: string;
+  result: string;
+  failed: boolean;
   detail: string;
+  duration_ms: number;
 }
 
 /** Which channel an app finds at a slot index. Slot 0 is always the public channel. */
@@ -635,7 +637,7 @@ export interface VirtualNodeOverview {
   connected: VirtualNodeConnectedClient[];
   known_clients: VirtualNodeKnownClient[];
   channel_slots?: VirtualNodeChannelSlot[];
-  recent_refusals?: VirtualNodeRefusal[];
+  recent_commands?: VirtualNodeCommand[];
 }
 
 export interface TelemetrySchedule {

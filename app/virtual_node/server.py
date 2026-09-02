@@ -56,8 +56,8 @@ RESPONSE_CACHE_TTL_SECONDS = 30.0
 BATTERY_CACHE_MAX_AGE_SECONDS = 180.0
 # Per-client inbound message backlog. A client that never drains loses the oldest.
 MAX_QUEUED_MESSAGES = 500
-# Recent refusals kept for the settings page (see _note_refusal).
-MAX_RECENT_REFUSALS = 20
+# Commands kept for the settings page's activity trace (see _note_command).
+MAX_RECENT_COMMANDS = 60
 # 1-byte channel index on the wire.
 MAX_VIRTUAL_CHANNEL_SLOTS = 255
 # Hard floor for the slot count we advertise so apps keep probing new slots.
@@ -235,6 +235,13 @@ def error_name(code: int) -> str:
         return f"ERR_{code}"
 
 
+def response_name(code: int) -> str:
+    try:
+        return PacketType(code).name
+    except ValueError:
+        return f"RESP_{code}"
+
+
 class VirtualNodeError(Exception):
     """A command could not be served; carries the ``ERR_CODE`` to answer with."""
 
@@ -298,7 +305,7 @@ class VirtualNodeServer:
         # Newest RESP_CODE_SENT the radio produced, with the monotonic time it
         # arrived, so an app's send can be answered with the radio's own frame.
         self._last_msg_sent: tuple[float, bytes] | None = None
-        self._recent_refusals: deque[dict[str, Any]] = deque(maxlen=MAX_RECENT_REFUSALS)
+        self._recent_commands: deque[dict[str, Any]] = deque(maxlen=MAX_RECENT_COMMANDS)
         self.host = settings.virtual_node_host
         self.port = settings.virtual_node_port
         self.read_only = settings.virtual_node_read_only
@@ -341,7 +348,7 @@ class VirtualNodeServer:
             "local_commands": self.local_commands,
             "cached_commands": self.cached_commands,
             "forwarded_commands": self.forwarded_commands,
-            "recent_refusals": list(self._recent_refusals),
+            "recent_commands": list(self._recent_commands),
             "channel_slots": [
                 {"index": index, "key": key}
                 for index, key in enumerate(self._channel_slots)
@@ -462,65 +469,73 @@ class VirtualNodeServer:
             return
         code = command[0]
         session.commands_served += 1
+        started = time.monotonic()
+        detail = ""
         try:
             responses = await self.handle_command(session, code, command[1:])
         except VirtualNodeError as exc:
             logger.warning(
                 "Virtual node refused %s from %s: %s", command_name(code), session.peer, exc
             )
-            self._note_refusal(session, code, exc.code, str(exc))
+            detail = str(exc)
             responses = [protocol.encode_error(exc.code)]
         except Exception as exc:
             logger.exception(
                 "Virtual node failed to serve %s from %s", command_name(code), session.peer
             )
-            self._note_refusal(
-                session, code, ErrorCode.BAD_STATE, f"{type(exc).__name__}: {exc}"[:200]
-            )
+            detail = f"{type(exc).__name__}: {exc}"[:200]
             responses = [protocol.encode_error(ErrorCode.BAD_STATE)]
         else:
             # A handler can answer with an error frame of its own (a forwarded
-            # command the radio rejected, a malformed payload). Those are the
-            # ones an operator has no other way to see, so record them too.
+            # command the radio rejected, a malformed payload); say so.
             first = responses[0] if responses else b""
             if len(first) >= 2 and first[0] == ERR:
-                self._note_refusal(
-                    session, code, first[1], "refused by the radio or the node", logged=False
+                detail = "refused by the radio or the node"
+                logger.info(
+                    "Virtual node answered %s from %s with %s",
+                    command_name(code),
+                    session.peer,
+                    error_name(first[1]),
                 )
+        self._note_command(session, code, responses, detail, started)
         for frame in responses:
             await session.send(frame)
 
-    def _note_refusal(
+    def _note_command(
         self,
         session: ClientSession,
         command_code: int,
-        error_code: int,
+        responses: list[bytes],
         detail: str,
-        *,
-        logged: bool = True,
+        started: float,
     ) -> None:
-        """Remember why a command was refused, for the Virtual Node settings page.
+        """Record one command and what it was answered with, for the settings page.
 
-        A companion app shows "could not send" and nothing else -- the reason
-        only ever existed in the server log, which is the wrong place to look
-        when the app on your phone will not send. Keep the last few here so the
-        UI can show them.
+        A companion app reports "could not send" and nothing more, and the app
+        is the one piece of this we cannot see into: the question is usually
+        whether it even sent the command, and what it got back. That answer
+        used to exist only in the server log -- the wrong place to look when
+        the phone in your hand will not send -- so the last commands are kept
+        here and shown in Settings > Virtual Node.
         """
-        if not logged:
-            logger.info(
-                "Virtual node answered %s from %s with error %d",
-                command_name(command_code),
-                session.peer,
-                error_code,
-            )
-        self._recent_refusals.append(
+        first = responses[0] if responses else b""
+        code = first[0] if first else None
+        if code is None:
+            result = "no reply"
+        elif code == ERR:
+            result = error_name(first[1]) if len(first) >= 2 else "ERROR"
+        else:
+            result = response_name(code)
+        self._recent_commands.append(
             {
                 "at": int(time.time()),
                 "peer": session.peer,
                 "app_name": session.app_name,
                 "command": command_name(command_code),
-                "error": error_name(error_code),
+                "result": result,
+                "failed": code == ERR,
                 "detail": detail,
+                "duration_ms": int((time.monotonic() - started) * 1000),
             }
         )
 

@@ -1384,7 +1384,7 @@ class TestRefusalDiagnostics:
     """An app only says "could not send"; the node has to say why."""
 
     @pytest.mark.asyncio
-    async def test_a_refused_send_is_recorded_with_command_and_reason(self, proxy):
+    async def test_every_command_is_traced_with_what_it_was_answered(self, proxy):
         from app.routers.virtual_node import get_virtual_node_overview
 
         server, radio, connect = proxy
@@ -1396,12 +1396,31 @@ class TestRefusalDiagnostics:
 
         with patch("app.routers.virtual_node.virtual_node", server):
             overview = await get_virtual_node_overview()
-        assert len(overview.recent_refusals) == 1
-        refusal = overview.recent_refusals[0]
-        assert refusal.command == "SEND_CHANNEL_TXT_MSG"
-        assert refusal.error == "NOT_FOUND"
-        assert "no channel in that slot" in refusal.detail
-        assert refusal.app_name == "MeshCore"
+
+        traced = {entry.command: entry for entry in overview.recent_commands}
+        # The successful command is traced too: the first question is always
+        # whether the app sent anything at all.
+        assert traced["APP_START"].result == "SELF_INFO"
+        assert traced["APP_START"].failed is False
+        send = traced["SEND_CHANNEL_TXT_MSG"]
+        assert send.failed is True
+        assert send.result == "NOT_FOUND"
+        assert "no channel in that slot" in send.detail
+        assert send.app_name == "MeshCore"
+
+    @pytest.mark.asyncio
+    async def test_a_crashing_handler_is_traced_with_the_exception(self, proxy):
+        from app.routers.virtual_node import get_virtual_node_overview
+
+        server, radio, connect = proxy
+        client = await connect()
+        with patch.object(VirtualNodeServer, "_contacts", side_effect=RuntimeError("boom")):
+            assert await client.command(b"\x04") == protocol.encode_error(ErrorCode.BAD_STATE)
+        with patch("app.routers.virtual_node.virtual_node", server):
+            overview = await get_virtual_node_overview()
+        entry = next(e for e in overview.recent_commands if e.command == "GET_CONTACTS")
+        assert entry.failed is True
+        assert "RuntimeError: boom" in entry.detail
 
     @pytest.mark.asyncio
     async def test_overview_reports_the_channel_slot_map(self, proxy):

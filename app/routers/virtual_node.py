@@ -41,15 +41,17 @@ class KnownVirtualNodeClient(BaseModel):
     connected: bool = Field(description="Whether a connection with this identity is open now")
 
 
-class VirtualNodeRefusal(BaseModel):
-    """A command the node answered with an error, for operator diagnosis."""
+class VirtualNodeCommand(BaseModel):
+    """One command an app sent and what it was answered with."""
 
     at: int
     peer: str
     app_name: str = ""
     command: str = Field(description="Host command name, e.g. SEND_CHANNEL_TXT_MSG")
-    error: str = Field(description="ERR_CODE_* returned to the app")
+    result: str = Field(description="Response frame name, or the ERR_CODE_* returned")
+    failed: bool = False
     detail: str = ""
+    duration_ms: int = 0
 
 
 class VirtualNodeChannelSlot(BaseModel):
@@ -77,7 +79,7 @@ class VirtualNodeOverview(BaseModel):
     connected: list[ConnectedVirtualNodeClient]
     known_clients: list[KnownVirtualNodeClient]
     channel_slots: list[VirtualNodeChannelSlot] = Field(default_factory=list)
-    recent_refusals: list[VirtualNodeRefusal] = Field(default_factory=list)
+    recent_commands: list[VirtualNodeCommand] = Field(default_factory=list)
 
 
 @router.get("", response_model=VirtualNodeOverview)
@@ -122,7 +124,7 @@ async def get_virtual_node_overview() -> VirtualNodeOverview:
         connected=connected,
         known_clients=known,
         channel_slots=channel_slots,
-        recent_refusals=[VirtualNodeRefusal(**entry) for entry in status["recent_refusals"]],
+        recent_commands=[VirtualNodeCommand(**entry) for entry in status["recent_commands"]],
     )
 
 

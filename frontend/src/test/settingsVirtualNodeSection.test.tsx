@@ -141,6 +141,60 @@ describe('SettingsVirtualNodeSection', () => {
     );
   });
 
+  it('traces recent commands and can filter down to failures', async () => {
+    mockApi.getVirtualNode.mockResolvedValue(
+      overview({
+        recent_commands: [
+          {
+            at: 1_700_000_000,
+            peer: '192.168.1.20:51234',
+            app_name: 'MeshCore',
+            command: 'APP_START',
+            result: 'SELF_INFO',
+            failed: false,
+            detail: '',
+            duration_ms: 1,
+          },
+          {
+            at: 1_700_000_050,
+            peer: '192.168.1.20:51234',
+            app_name: 'MeshCore',
+            command: 'SEND_CHANNEL_TXT_MSG',
+            result: 'NOT_FOUND',
+            failed: true,
+            detail: 'no channel in that slot',
+            duration_ms: 2,
+          },
+        ],
+      })
+    );
+    render(<SettingsVirtualNodeSection appSettings={appSettings} onSaveAppSettings={vi.fn()} />);
+
+    const activity = await screen.findByTestId('virtual-node-activity');
+    expect(activity).toHaveTextContent('SEND_CHANNEL_TXT_MSG');
+    expect(activity).toHaveTextContent('no channel in that slot');
+    expect(activity).toHaveTextContent('APP_START');
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /Failures only/i }));
+    await waitFor(() => expect(activity).not.toHaveTextContent('APP_START'));
+    expect(activity).toHaveTextContent('SEND_CHANNEL_TXT_MSG');
+  });
+
+  it('shows the channel slot map so a mismatch with the app is visible', async () => {
+    mockApi.getVirtualNode.mockResolvedValue(
+      overview({
+        channel_slots: [
+          { index: 0, key: '8B3387E9C5CDEA6AC9E5EDBAA115CD72', name: 'Public' },
+          { index: 1, key: '8959AE053F2201801342A1DBDDA184F6', name: '#remoteterm' },
+        ],
+      })
+    );
+    render(<SettingsVirtualNodeSection appSettings={appSettings} onSaveAppSettings={vi.fn()} />);
+    const slots = await screen.findByTestId('virtual-node-slots');
+    expect(slots).toHaveTextContent('Public');
+    expect(slots).toHaveTextContent('#remoteterm');
+  });
+
   it('explains how to enable the node when it is off', async () => {
     mockApi.getVirtualNode.mockResolvedValue(
       overview({
