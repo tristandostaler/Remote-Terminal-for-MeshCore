@@ -53,7 +53,8 @@ class AppSettingsRepository:
                    tracked_telemetry_repeaters, tracked_telemetry_contacts,
                    clock_sync_repeaters,
                    auto_resend_channel, max_message_retries,
-                   telemetry_interval_hours, telemetry_routed_hourly
+                   telemetry_interval_hours, telemetry_routed_hourly,
+                   virtual_node_allow_admin_commands
             FROM app_settings WHERE id = 1
             """
         ) as cursor:
@@ -164,6 +165,11 @@ class AppSettingsRepository:
         except (KeyError, TypeError):
             telemetry_routed_hourly = False
 
+        try:
+            virtual_node_allow_admin_commands = bool(row["virtual_node_allow_admin_commands"])
+        except (KeyError, TypeError, IndexError):
+            virtual_node_allow_admin_commands = False
+
         return AppSettings(
             max_radio_contacts=row["max_radio_contacts"],
             auto_decrypt_dm_on_advert=bool(row["auto_decrypt_dm_on_advert"]),
@@ -182,6 +188,7 @@ class AppSettingsRepository:
             max_message_retries=max_message_retries,
             telemetry_interval_hours=telemetry_interval_hours,
             telemetry_routed_hourly=telemetry_routed_hourly,
+            virtual_node_allow_admin_commands=virtual_node_allow_admin_commands,
         )
 
     @staticmethod
@@ -205,6 +212,7 @@ class AppSettingsRepository:
         max_message_retries: int | None = None,
         telemetry_interval_hours: int | None = None,
         telemetry_routed_hourly: bool | None = None,
+        virtual_node_allow_admin_commands: bool | None = None,
     ) -> None:
         """Apply field updates using an already-acquired connection.
 
@@ -282,6 +290,10 @@ class AppSettingsRepository:
             updates.append("telemetry_routed_hourly = ?")
             params.append(1 if telemetry_routed_hourly else 0)
 
+        if virtual_node_allow_admin_commands is not None:
+            updates.append("virtual_node_allow_admin_commands = ?")
+            params.append(1 if virtual_node_allow_admin_commands else 0)
+
         if updates:
             query = f"UPDATE app_settings SET {', '.join(updates)} WHERE id = 1"
             async with conn.execute(query, params):
@@ -315,6 +327,7 @@ class AppSettingsRepository:
         max_message_retries: int | None = None,
         telemetry_interval_hours: int | None = None,
         telemetry_routed_hourly: bool | None = None,
+        virtual_node_allow_admin_commands: bool | None = None,
     ) -> AppSettings:
         """Update app settings. Only provided fields are updated."""
         async with db.tx() as conn:
@@ -337,6 +350,7 @@ class AppSettingsRepository:
                 max_message_retries=max_message_retries,
                 telemetry_interval_hours=telemetry_interval_hours,
                 telemetry_routed_hourly=telemetry_routed_hourly,
+                virtual_node_allow_admin_commands=virtual_node_allow_admin_commands,
             )
             return await AppSettingsRepository._get_in_conn(conn)
 

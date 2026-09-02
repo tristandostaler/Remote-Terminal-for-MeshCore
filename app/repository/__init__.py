@@ -25,6 +25,7 @@ from app.repository.unsupported_media import (
     UnsupportedMediaArrival,
     UnsupportedMediaRepository,
 )
+from app.repository.virtual_node_clients import VirtualNodeClient, VirtualNodeClientRepository
 from app.repository.voice import VoiceRepository
 
 __all__ = [
@@ -50,5 +51,7 @@ __all__ = [
     "StatisticsRepository",
     "UnsupportedMediaArrival",
     "UnsupportedMediaRepository",
+    "VirtualNodeClient",
+    "VirtualNodeClientRepository",
     "VoiceRepository",
 ]

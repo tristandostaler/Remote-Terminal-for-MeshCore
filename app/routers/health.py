@@ -57,6 +57,21 @@ class RadioStatsSnapshot(BaseModel):
     direct_rx: int | None = None
 
 
+class VirtualNodeStatusResponse(BaseModel):
+    """State of the virtual companion node other MeshCore apps connect to."""
+
+    enabled: bool = False
+    listening: bool = False
+    host: str | None = None
+    port: int | None = None
+    read_only: bool = False
+    replay_limit: int = 0
+    client_count: int = 0
+    local_commands: int = 0
+    cached_commands: int = 0
+    forwarded_commands: int = 0
+
+
 class HealthResponse(BaseModel):
     status: str
     radio_connected: bool
@@ -72,6 +87,7 @@ class HealthResponse(BaseModel):
     bots_disabled: bool = False
     bots_disabled_source: Literal["env", "until_restart"] | None = None
     basic_auth_enabled: bool = False
+    virtual_node: VirtualNodeStatusResponse | None = None
 
 
 def _clean_optional_str(value: object) -> str | None:
@@ -172,6 +188,16 @@ async def build_health_data(radio_connected: bool, connection_info: str | None) 
             "direct_rx": packets.get("direct_rx"),
         }
 
+    virtual_node_status: dict[str, Any] | None = None
+    try:
+        from app.virtual_node import virtual_node
+
+        virtual_node_status = {
+            key: value for key, value in virtual_node.status().items() if key != "clients"
+        }
+    except Exception:
+        pass
+
     return {
         "status": "ok" if radio_connected and not radio_initializing else "degraded",
         "radio_connected": radio_connected,
@@ -190,6 +216,7 @@ async def build_health_data(radio_connected: bool, connection_info: str | None) 
         "bots_disabled": bots_disabled_source is not None,
         "bots_disabled_source": bots_disabled_source,
         "basic_auth_enabled": _read_optional_bool_setting("basic_auth_enabled"),
+        "virtual_node": virtual_node_status,
     }
 
 

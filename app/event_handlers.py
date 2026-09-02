@@ -512,4 +512,9 @@ def register_event_handlers(meshcore) -> None:
     _active_subscriptions.append(meshcore.subscribe(EventType.RAW_DATA, on_raw_data))
     install_full_raw_data_adapter(meshcore)
     install_channel_data_adapter(meshcore)
+    # The virtual companion node sees every inbound frame: it caches identity
+    # frames, completes the commands it forwarded for apps, and relays pushes.
+    from app.virtual_node.server import install_frame_tap
+
+    install_frame_tap(meshcore)
     logger.info("Event handlers registered")

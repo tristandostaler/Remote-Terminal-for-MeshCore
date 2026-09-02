@@ -60,6 +60,7 @@ import type {
   BotStats,
   BotTestResponse,
   BotUpdatePayload,
+  VirtualNodeOverview,
 } from './types';
 
 const API_BASE = './api';
@@ -555,6 +556,19 @@ export const api = {
     fetchJson<{ status: string; timestamp: number }>('/read-state/mark-all-read', {
       method: 'POST',
     }),
+
+  // Virtual companion node (other MeshCore apps using this radio through the server)
+  getVirtualNode: () => fetchJson<VirtualNodeOverview>('/virtual-node'),
+  forgetVirtualNodeClient: (clientId: string) =>
+    fetchJson<{ status: string; client_id: string }>(
+      `/virtual-node/clients/${encodeURIComponent(clientId)}`,
+      { method: 'DELETE' }
+    ),
+  disconnectVirtualNodeClient: (peer: string) =>
+    fetchJson<{ status: string; peer: string }>(
+      `/virtual-node/connections/${encodeURIComponent(peer)}/disconnect`,
+      { method: 'POST' }
+    ),
 
   // App Settings
   getSettings: () => fetchJson<AppSettings>('/settings'),

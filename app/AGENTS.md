@@ -59,6 +59,9 @@ app/
 │   └── manager.py               # Push dispatch: filter, build payload, concurrent send
 ├── bots/                # Bots workspace engine: triggers, cron, feeds, i18n (see bots/AGENTS_bots.md)
 ├── fanout/              # Fanout bus: MQTT, bots, webhooks, Apprise, SQS (see fanout/AGENTS_fanout.md)
+├── virtual_node/        # Virtual companion node: TCP proxy speaking the companion protocol for other apps (see virtual_node/AGENTS_virtual_node.md)
+│   ├── protocol.py              # Frame codecs (pure functions; round-tripped through meshcore's reader in tests)
+│   └── server.py                # VirtualNodeServer: sessions, command policy, cache, forwarding, frame tap
 ├── stats_windows.py     # Statistics time-window keys and chart bucket sizing
 ├── send_attempts.py     # Bounds + clamp for the configurable direct-message attempt cap
 ├── telemetry_interval.py # Shared telemetry interval math for tracked-repeater scheduler
@@ -83,6 +86,7 @@ app/
     ├── repeaters.py
     ├── statistics.py
     ├── push.py
+    ├── virtual_node.py     # Operator view/actions for the virtual companion node
     └── ws.py
 ```
 
@@ -111,6 +115,11 @@ app/
 - Shared reconnect/setup helpers in `services/radio_lifecycle.py` are used by startup, the monitor, and manual reconnect/reboot flows before broadcasting healthy state.
 - Setup still includes handler registration, key export, time sync, contact/channel sync, and advertisement tasks. The message-poll task always starts: by default it runs as a low-frequency hourly audit, and `MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK=true` switches it to aggressive 10-second polling. That audit checks both missed-radio-message drift and channel-slot cache drift; cache mismatches are logged, toasted, and the send-slot cache is reset.
 - Post-connect setup is timeout-bounded. If initial radio offload/setup hangs too long, the backend logs the failure and broadcasts an `error` toast telling the operator to reboot the radio and restart the server.
+- `register_event_handlers` also installs the virtual node's frame tap (`app/virtual_node/server.py` `install_frame_tap`), so every inbound radio frame is seen by the virtual companion node before the library parses it.
+
+### Virtual companion node
+
+`app/virtual_node/` is an optional TCP server (`MESHCORE_VIRTUAL_NODE_ENABLED`, default port 5000) that speaks the MeshCore companion protocol so other apps use this server as their radio. It answers identity, contacts, channels, clock, battery and the inbound message queue from server state, caches read-only device queries for 30 s, and forwards everything else to the radio under `radio_operation`. App sends go through `services/message_send.py` like web sends, so they are stored, broadcast and ACK-tracked. `websocket.broadcast_event` mirrors realtime `message`/`contact`/`channel` events into it. Returning apps (identified by APP_START name + peer address, cursor in `virtual_node_clients`, migration 084) are replayed the incoming messages they missed up to `MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT`. Read `app/virtual_node/AGENTS_virtual_node.md` before changing the command policy.
 
 ## Important Behaviors
 
@@ -475,6 +484,13 @@ Verified against the meshcore firmware (`examples/simple_room_server/MyMesh.cpp`
 - `GET /push/conversations` — global list of push-enabled conversation state keys
 - `POST /push/conversations/toggle` — add or remove a conversation from the global push list
 
+### Virtual node
+- `GET /virtual-node` — listener state, counters, `admin_commands_allowed`, connected apps, remembered apps with `connected` flag
+- `DELETE /virtual-node/clients/{client_id}` — forget a remembered app (history cursor)
+- `POST /virtual-node/connections/{peer}/disconnect` — close one connected app's socket
+
+The admin switch is `PATCH /settings` `virtual_node_allow_admin_commands` (default off; read per command by the node; read-only mode overrides it).
+
 ### WebSocket
 - `WS /ws`
 
@@ -508,6 +524,7 @@ Main tables:
 - `repeater_telemetry_history` (time-series telemetry snapshots for tracked repeaters)
 - `contact_telemetry_history` (time-series LPP telemetry snapshots for tracked contacts; same schema as repeater table)
 - `fanout_configs` (MQTT, bot, webhook, Apprise, SQS integration configs)
+- `virtual_node_clients` (history cursor per app connected to the virtual companion node, keyed by APP_START name + peer address)
 - `push_subscriptions` (Web Push browser subscriptions with delivery metadata; UNIQUE on endpoint)
 - `app_settings` (includes `vapid_private_key` and `vapid_public_key` for Web Push VAPID signing)
 
@@ -619,6 +636,7 @@ tests/
 ├── test_stats_windows.py       # Statistics window keys and chart bucketing
 ├── test_telemetry_interval.py  # Telemetry interval scheduling math
 ├── test_version_info.py        # Version/build metadata resolution
+├── test_virtual_node.py        # Virtual companion node: frame codecs (round-tripped through meshcore's reader) and the TCP proxy server
 ├── test_websocket.py           # WS manager broadcast/cleanup
 └── test_websocket_route.py     # WS endpoint lifecycle
 ```

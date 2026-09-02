@@ -212,6 +212,11 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_BASIC_AUTH_USERNAME` | | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
 | `MESHCORE_BASIC_AUTH_PASSWORD` | | Optional app-wide HTTP Basic auth password; must be set together with `MESHCORE_BASIC_AUTH_USERNAME` |
 | `MESHCORE_VAPID_SUBJECT` | `mailto:noreply@meshcore.local` | Subject (`sub`) claim for Web Push VAPID tokens; must be a `mailto:` or `https:` contact. Apple's push service rejects the default `.local` domain, so iOS/Safari users must set this to a real address (e.g. `mailto:you@example.com`). |
+| `MESHCORE_VIRTUAL_NODE_ENABLED` | false | Start the [virtual companion node](#virtual-companion-node-share-the-radio-with-other-meshcore-apps): a TCP server other MeshCore apps connect to as if it were the radio |
+| `MESHCORE_VIRTUAL_NODE_HOST` | `0.0.0.0` | Interface the virtual node listens on |
+| `MESHCORE_VIRTUAL_NODE_PORT` | 5000 | Port the virtual node listens on (the same port a WiFi companion uses) |
+| `MESHCORE_VIRTUAL_NODE_READ_ONLY` | false | Refuse every command that transmits or changes radio/contact/channel state; connected apps can still read contacts, channels and live messages |
+| `MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT` | 1000 | How many missed messages a returning app is handed when it reconnects to the virtual node (newest first when more were missed); `0` disables replay |
 
 Common launch patterns:
 
@@ -341,6 +346,74 @@ missing, and `POST /api/aeic/model/download` starts the fetch.
   [app/bots/AGENTS_bots.md](app/bots/AGENTS_bots.md).
 - Without the dependencies or the model, the AI option is visible but disabled and
   explains which piece is missing. Nothing else changes.
+
+## Virtual Companion Node: Share The Radio With Other MeshCore Apps
+
+A companion radio only talks to one host at a time, and RemoteTerm is that
+host. The virtual companion node lets other MeshCore apps use the radio anyway:
+RemoteTerm opens a TCP server that speaks the companion wire protocol (the same
+one a WiFi companion speaks on port 5000), and apps connect to *RemoteTerm* as if
+it were the radio. It is the same idea as MeshMonitor's Virtual Node.
+
+```bash
+MESHCORE_VIRTUAL_NODE_ENABLED=true uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Then, in the MeshCore mobile app pick the TCP/WiFi connection and enter the
+server's IP with port `5000`; with meshcore-cli use `meshcore-cli -t <server-ip>`;
+the Home Assistant MeshCore integration takes the same host and port. Several
+apps can be connected at once. Docker users need to publish the port
+(`-p 5000:5000`), and the port can be changed with `MESHCORE_VIRTUAL_NODE_PORT`.
+In the Home Assistant add-on, switch on `MESHCORE_VIRTUAL_NODE_ENABLED` in the
+add-on options and pick the host port for "Virtual MeshCore companion node"
+under the add-on's **Network** section (default 5000; clear it to keep the port
+closed).
+
+An app that reconnects picks up where it left off. The node remembers each app
+(by the name it announces plus the address it connects from) and, on its next
+connection, replays the incoming messages it missed, oldest first, up to
+`MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT` (1000 by default; when more were missed the
+newest ones win so the app lands on the present). An app connecting for the
+first time starts at the present rather than being flooded with history. This
+identity is a heuristic: two devices running the same app from the same address
+share a cursor, and a device that changes address starts over.
+
+What it does for the radio:
+
+- **Answers from RemoteTerm's own state** — identity, the *whole* contact list
+  (the server keeps far more contacts than the radio can hold), channels, the
+  clock, battery, every incoming message and the history a reconnecting app
+  missed — so the traffic apps generate on connect and while browsing never
+  reaches the radio.
+- **Caches read-only device queries** for 30 seconds, so several apps polling the
+  same thing cost one radio round trip.
+- **Forwards the rest** (sends, repeater logins, telemetry requests, radio
+  settings) under the same lock RemoteTerm uses for its own commands, so app
+  traffic never interleaves with a sync or a send in progress.
+- **Keeps the web UI in sync**: messages sent from an app are stored, shown,
+  ACK-tracked and retried exactly like messages typed in the browser; contacts
+  and channels added in an app appear in RemoteTerm too.
+
+Some things are deliberately not proxied: rebooting, factory reset and private
+key import are refused, and private key export follows
+`MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT`. Changing the radio's own settings
+from an app (name, location, frequency, TX power, tuning, flood scope, path hash
+mode, signing) is **off by default** and refused until you switch on "Allow
+connected apps to change radio settings" in **Settings → Virtual Node**; it
+applies to every connected app at once. Set
+`MESHCORE_VIRTUAL_NODE_READ_ONLY=true` to turn connected apps into viewers that
+can read but never transmit or change anything, whatever that switch says.
+
+**Settings → Virtual Node** also shows whether the node is listening and on
+which address, every app connected right now (with a Disconnect button), and
+every app the node remembers with how far into the history it has caught up
+(with a Forget button, which makes that app's next connection start at the
+present).
+
+> [!WARNING]
+> The companion protocol has no authentication, and neither does the virtual
+> node — anyone who can reach the port can use the radio. Keep it on a trusted
+> network (it is off by default). Basic Auth protects the web app only.
 
 ## Where To Go Next
 

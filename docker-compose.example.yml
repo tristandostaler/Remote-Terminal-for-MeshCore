@@ -9,6 +9,9 @@ services:
     # user: "${UID:-1000}:${GID:-1000}"
     ports:
       - "8000:8000"
+      # Virtual companion node (MESHCORE_VIRTUAL_NODE_ENABLED below): the port
+      # other MeshCore apps connect to as if this server were the radio.
+      # - "5000:5000"
     volumes:
       - ./data:/app/data
 
@@ -57,6 +60,15 @@ services:
       # Web Push
       # Set a real mailto for iOS/Safari push; Apple's APNs rejects the default .local domain.
       # MESHCORE_VAPID_SUBJECT: "mailto:you@example.com"
+
+      # Virtual companion node: let the MeshCore app (TCP/WiFi), meshcore-cli or
+      # Home Assistant use this radio through RemoteTerm. No authentication, so
+      # trusted networks only. Publish the port above as well.
+      # MESHCORE_VIRTUAL_NODE_ENABLED: "true"
+      # MESHCORE_VIRTUAL_NODE_PORT: 5000
+      # MESHCORE_VIRTUAL_NODE_READ_ONLY: "false"
+      # Missed messages replayed to a returning app on reconnect (0 disables).
+      # MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT: 1000
 
       # Logging
       # MESHCORE_LOG_LEVEL: INFO

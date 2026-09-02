@@ -1470,6 +1470,15 @@ class AppSettings(BaseModel):
             "Channel messages are unaffected -- they keep the one-shot echo resend."
         ),
     )
+    virtual_node_allow_admin_commands: bool = Field(
+        default=False,
+        description=(
+            "Let apps connected to the virtual companion node change radio settings "
+            "(name, location, frequency, TX power, tuning, flood scope, path hash mode, "
+            "signing...). Off by default: those commands are refused with "
+            "ERR_CODE_UNSUPPORTED_CMD. Read-only mode overrides this."
+        ),
+    )
 
 
 class BusyChannel(BaseModel):
