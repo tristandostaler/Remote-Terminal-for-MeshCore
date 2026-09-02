@@ -68,7 +68,8 @@ cannot be mistaken for the answer. Pushes (`>= 0x80`) never match.
 
 ## Inbound messages: per-client queues
 
-Each client has a bounded inbox (500 frames). An incoming `message` broadcast
+Each client has a bounded inbox (500 live frames; a history replay may fill it
+further up to the replay limit). An incoming `message` broadcast
 (not outgoing, not a reaction) becomes a `CONTACT_MSG_RECV_V3` or
 `CHANNEL_MSG_RECV_V3` frame appended to every inbox, followed by a
 `PUSH_CODE_MSG_WAITING`; `SYNC_NEXT_MESSAGE` pops one or answers
@@ -106,10 +107,44 @@ client is not something a blank frame should do.
 connect, browse contacts/channels and read history while the radio is
 disconnected. Forwarded commands then answer `ERR_CODE_BAD_STATE`.
 
+## History replay and client identity
+
+The protocol has no client identity. `CMD_APP_START` carries only the app's
+*name* (`[ver][6 reserved][name...]`, e.g. `MeshCore`, `mccli`), so the most
+stable handle available is that name plus the address the connection came
+from: `client_id = "<app_name>@<peer_host>"`. It is a heuristic and is
+documented as one — two phones on the same app *and* the same IP share a
+cursor, and a phone that changes IP starts over.
+
+Cursors live in `virtual_node_clients` (migration 084, repository
+`VirtualNodeClientRepository`): one row per client id with
+`last_message_id`, first/last seen and a connection counter. On the first
+`APP_START` of a TCP session:
+
+1. The client is looked up or created. A **first-time** client starts at the
+   present: its cursor is set to the newest message id and nothing is
+   replayed — a brand-new app should not receive a thousand old messages as
+   if they had just arrived.
+2. A **returning** client gets the incoming, non-reaction messages with
+   `id > cursor`, oldest first, as regular inbox frames followed by one
+   `MSG_WAITING` push. `MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT` (default 1000, 0
+   disables) caps it; when more were missed, the *newest* `limit` are
+   delivered so the app lands on the present, and the cursor jumps past the
+   skipped ones (`MessageRepository.get_incoming_after_id`).
+3. The inbox is cleared before replay: whatever was queued before the app
+   identified itself is either inside the replay window or predates this
+   client.
+
+Each inbox entry is `(message_id | None, frame)`. When the client pulls one
+with `SYNC_NEXT_MESSAGE` the cursor advances to that id (`_note_delivered`)
+and is written back after a 1 s debounce, on disconnect, and on server
+stop — so a full replay costs one write, and a client that disconnects
+mid-drain resumes from what it actually pulled. Raw relayed frames (CLI
+replies) carry `None` and never move the cursor. Outgoing messages are never
+replayed, matching the firmware, which never hands the host its own sends.
+
 ## Not done / known gaps
 
-- No per-client message replay on connect: an app only receives messages
-  that arrive while it is connected (the web UI remains the history surface).
 - `SET_FLOOD_SCOPE` from an app is forwarded verbatim; RemoteTerm re-applies
   its own configured scope around scoped channel sends, so the two can
   disagree until the next send.

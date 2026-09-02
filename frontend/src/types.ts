@@ -142,6 +142,7 @@ export interface VirtualNodeStatus {
   host: string | null;
   port: number | null;
   read_only: boolean;
+  replay_limit?: number;
   client_count: number;
   local_commands: number;
   cached_commands: number;

@@ -65,6 +65,7 @@ class VirtualNodeStatusResponse(BaseModel):
     host: str | None = None
     port: int | None = None
     read_only: bool = False
+    replay_limit: int = 0
     client_count: int = 0
     local_commands: int = 0
     cached_commands: int = 0

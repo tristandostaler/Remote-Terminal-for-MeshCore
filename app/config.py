@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Refuse every command that transmits or changes radio/contact/channel
     # state; apps can still read contacts, channels and messages.
     virtual_node_read_only: bool = False
+    # How many missed messages a returning app is handed on reconnect. Apps are
+    # told apart by the name they send in APP_START plus their address; 0
+    # disables replay entirely (apps only see what arrives while connected).
+    virtual_node_replay_limit: int = 1000
 
     @model_validator(mode="after")
     def validate_transport_exclusivity(self) -> "Settings":
@@ -97,6 +101,8 @@ class Settings(BaseSettings):
             )
         if not 1 <= self.virtual_node_port <= 65535:
             raise ValueError("MESHCORE_VIRTUAL_NODE_PORT must be between 1 and 65535.")
+        if self.virtual_node_replay_limit < 0:
+            raise ValueError("MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT must be 0 or more.")
         if (
             self.virtual_node_enabled
             and self.tcp_host in ("127.0.0.1", "localhost", "::1")

@@ -118,7 +118,7 @@ app/
 
 ### Virtual companion node
 
-`app/virtual_node/` is an optional TCP server (`MESHCORE_VIRTUAL_NODE_ENABLED`, default port 5000) that speaks the MeshCore companion protocol so other apps use this server as their radio. It answers identity, contacts, channels, clock, battery and the inbound message queue from server state, caches read-only device queries for 30 s, and forwards everything else to the radio under `radio_operation`. App sends go through `services/message_send.py` like web sends, so they are stored, broadcast and ACK-tracked. `websocket.broadcast_event` mirrors realtime `message`/`contact`/`channel` events into it. Read `app/virtual_node/AGENTS_virtual_node.md` before changing the command policy.
+`app/virtual_node/` is an optional TCP server (`MESHCORE_VIRTUAL_NODE_ENABLED`, default port 5000) that speaks the MeshCore companion protocol so other apps use this server as their radio. It answers identity, contacts, channels, clock, battery and the inbound message queue from server state, caches read-only device queries for 30 s, and forwards everything else to the radio under `radio_operation`. App sends go through `services/message_send.py` like web sends, so they are stored, broadcast and ACK-tracked. `websocket.broadcast_event` mirrors realtime `message`/`contact`/`channel` events into it. Returning apps (identified by APP_START name + peer address, cursor in `virtual_node_clients`, migration 084) are replayed the incoming messages they missed up to `MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT`. Read `app/virtual_node/AGENTS_virtual_node.md` before changing the command policy.
 
 ## Important Behaviors
 
@@ -516,6 +516,7 @@ Main tables:
 - `repeater_telemetry_history` (time-series telemetry snapshots for tracked repeaters)
 - `contact_telemetry_history` (time-series LPP telemetry snapshots for tracked contacts; same schema as repeater table)
 - `fanout_configs` (MQTT, bot, webhook, Apprise, SQS integration configs)
+- `virtual_node_clients` (history cursor per app connected to the virtual companion node, keyed by APP_START name + peer address)
 - `push_subscriptions` (Web Push browser subscriptions with delivery metadata; UNIQUE on endpoint)
 - `app_settings` (includes `vapid_private_key` and `vapid_public_key` for Web Push VAPID signing)
 

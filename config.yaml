@@ -20,13 +20,28 @@ options:
   # and decoding a photo wants ~2.4 GB of free RAM. Leave off on small hardware;
   # the add-on logs a warning and runs normally if it cannot be installed.
   MESHCORE_ENABLE_AEIC: false
+  # Virtual companion node: lets the MeshCore app (TCP/WiFi), meshcore-cli or
+  # the Home Assistant MeshCore integration use this radio through RemoteTerm.
+  # The node listens on container port 5000; pick the host port under
+  # "Network" in the add-on configuration. No authentication of its own.
+  MESHCORE_VIRTUAL_NODE_ENABLED: false
+  MESHCORE_VIRTUAL_NODE_READ_ONLY: false
+  # Missed messages replayed to a returning app on reconnect (0 disables).
+  MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT: 1000
 schema:
   MESHCORE_TCP_HOST: str
   MESHCORE_TCP_PORT: port
   MESHCORE_DATABASE_PATH: str
   MESHCORE_ENABLE_AEIC: bool
+  MESHCORE_VIRTUAL_NODE_ENABLED: bool
+  MESHCORE_VIRTUAL_NODE_READ_ONLY: bool
+  MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT: int(0,10000)
 ports:
   8000/tcp: null
+  5000/tcp: 5000
+ports_description:
+  8000/tcp: "Web UI"
+  5000/tcp: "Virtual MeshCore companion node: other MeshCore apps connect here as if it were the radio (needs MESHCORE_VIRTUAL_NODE_ENABLED)"
 map:
 - type: addon_config
   read_only: false

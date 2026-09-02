@@ -40,6 +40,7 @@ async def test_db():
         room_poll,
         settings,
         unsupported_media,
+        virtual_node_clients,
     )
     from app.repository import bots as bots_repo
     from app.repository import fanout as fanout_repo
@@ -61,6 +62,7 @@ async def test_db():
         room_poll,
         aeic_image,
         unsupported_media,
+        virtual_node_clients,
     ]
     originals = [(mod, mod.db) for mod in submodules]
 

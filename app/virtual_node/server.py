@@ -62,6 +62,11 @@ MIN_ADVERTISED_CHANNEL_SLOTS = 40
 # App-side DM retries reuse the same (dest, timestamp, text); remember what we
 # already sent for them so a retry does not create a second message row.
 RECENT_DM_SEND_TTL_SECONDS = 120.0
+# A client's history cursor is written back this long after it last pulled a
+# message, so a 1000-message replay is one write rather than a thousand.
+CURSOR_PERSIST_DELAY_SECONDS = 1.0
+# ``CMD_APP_START`` layout: [ver][6 reserved][app name...]; name starts here.
+APP_START_NAME_OFFSET = 7
 
 _CMD = CommandType
 _RESP = PacketType
@@ -225,12 +230,23 @@ class ClientSession:
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
     peer: str
+    peer_host: str = ""
     parser: protocol.HostFrameParser = field(default_factory=protocol.HostFrameParser)
-    inbox: deque[bytes] = field(default_factory=lambda: deque(maxlen=MAX_QUEUED_MESSAGES))
+    # (message row id or None for frames that are not stored messages, frame)
+    inbox: deque[tuple[int | None, bytes]] = field(
+        default_factory=lambda: deque(maxlen=MAX_QUEUED_MESSAGES)
+    )
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     connected_at: float = field(default_factory=time.time)
     commands_served: int = 0
     app_started: bool = False
+    # Identity and history cursor, known once the app has sent APP_START.
+    app_name: str = ""
+    client_id: str | None = None
+    cursor: int = 0
+    cursor_dirty: bool = False
+    persist_task: asyncio.Task | None = None
+    replayed: int = 0
 
     async def send(self, payload: bytes) -> None:
         async with self.write_lock:
@@ -264,6 +280,7 @@ class VirtualNodeServer:
         self.host = settings.virtual_node_host
         self.port = settings.virtual_node_port
         self.read_only = settings.virtual_node_read_only
+        self.replay_limit = settings.virtual_node_replay_limit
         self.forwarded_commands = 0
         self.local_commands = 0
         self.cached_commands = 0
@@ -285,13 +302,16 @@ class VirtualNodeServer:
             "host": self.host,
             "port": self.port,
             "read_only": self.read_only,
+            "replay_limit": self.replay_limit,
             "client_count": self.client_count,
             "clients": [
                 {
                     "peer": c.peer,
+                    "client_id": c.client_id,
                     "connected_at": int(c.connected_at),
                     "commands": c.commands_served,
                     "queued_messages": len(c.inbox),
+                    "replayed_messages": c.replayed,
                 }
                 for c in self._clients
             ],
@@ -327,6 +347,8 @@ class VirtualNodeServer:
             task.cancel()
         if self._client_tasks:
             await asyncio.gather(*self._client_tasks, return_exceptions=True)
+        for session in list(self._clients):
+            await self._persist_cursor(session)
         for task in list(self._background):
             task.cancel()
         if self._background:
@@ -354,7 +376,9 @@ class VirtualNodeServer:
     ) -> None:
         peername = writer.get_extra_info("peername")
         peer = f"{peername[0]}:{peername[1]}" if peername else "unknown"
-        session = ClientSession(reader=reader, writer=writer, peer=peer)
+        session = ClientSession(
+            reader=reader, writer=writer, peer=peer, peer_host=peername[0] if peername else ""
+        )
         self._clients.add(session)
         task = asyncio.current_task()
         if task is not None:
@@ -375,6 +399,7 @@ class VirtualNodeServer:
             self._clients.discard(session)
             if task is not None:
                 self._client_tasks.discard(task)
+            await self._persist_cursor(session)
             writer.close()
             try:
                 await writer.wait_closed()
@@ -414,9 +439,8 @@ class VirtualNodeServer:
             raise VirtualNodeError(ErrorCode.UNSUPPORTED_CMD, "virtual node is read-only")
 
         if code == _CMD.APP_START.value:
-            session.app_started = True
             self.local_commands += 1
-            return [self._self_info()]
+            return await self._start_app_session(session, payload)
         if code == _CMD.DEVICE_QEURY.value:
             return [await self._device_info()]
         if code == _CMD.GET_CONTACTS.value:
@@ -436,7 +460,9 @@ class VirtualNodeServer:
         if code == _CMD.SYNC_NEXT_MESSAGE.value:
             self.local_commands += 1
             if session.inbox:
-                return [session.inbox.popleft()]
+                message_id, frame = session.inbox.popleft()
+                self._note_delivered(session, message_id)
+                return [frame]
             return [protocol.encode_no_more_messages()]
         if code == _CMD.GET_CHANNEL.value:
             self.local_commands += 1
@@ -488,6 +514,96 @@ class VirtualNodeServer:
         return [response]
 
     # ------------------------------------------------------------------ identity
+
+    async def _start_app_session(self, session: ClientSession, payload: bytes) -> list[bytes]:
+        """Answer ``APP_START`` and, for a returning app, queue what it missed.
+
+        The protocol carries no client identity, only the app's name; combined
+        with the connecting address it is the most stable handle available, so
+        ``client_id`` is ``"<app name>@<host>"``. A first-time client starts
+        at the present (no replay); a returning one gets the incoming messages
+        newer than its cursor, capped at ``replay_limit`` (newest wins), and
+        the cursor advances as it pulls them.
+        """
+        from app.repository import MessageRepository, VirtualNodeClientRepository
+
+        frames = [self._self_info()]
+        if session.app_started:
+            # A second APP_START on the same connection is a session reset on a
+            # real radio; identity and inbox are already established here.
+            return frames
+        session.app_started = True
+
+        name = payload[APP_START_NAME_OFFSET:] if len(payload) > APP_START_NAME_OFFSET else b""
+        session.app_name = name.decode("utf-8", "ignore").strip("\x00 \t\r\n")[:64]
+        session.client_id = f"{session.app_name or 'unknown'}@{session.peer_host or 'unknown'}"
+
+        try:
+            now = int(time.time())
+            latest = await MessageRepository.get_latest_id()
+            record = await VirtualNodeClientRepository.record_connection(
+                session.client_id,
+                app_name=session.app_name,
+                peer_host=session.peer_host,
+                now=now,
+                initial_message_id=latest,
+            )
+        except Exception:
+            logger.exception("Virtual node could not load history cursor for %s", session.client_id)
+            return frames
+
+        session.cursor = record.last_message_id
+        # Anything queued before the app identified itself is either covered by
+        # the replay below or predates this client's interest.
+        session.inbox.clear()
+
+        if record.connections > 1 and self.replay_limit > 0 and record.last_message_id < latest:
+            missed, skipped = await MessageRepository.get_incoming_after_id(
+                record.last_message_id, self.replay_limit
+            )
+            for message in missed:
+                frame = await self._frame_for_message(message.model_dump())
+                if frame is not None:
+                    session.inbox.append((message.id, frame))
+            session.replayed = len(session.inbox)
+            if skipped:
+                # Those will never be delivered; do not keep offering them.
+                self._note_delivered(session, missed[0].id - 1 if missed else latest)
+            logger.info(
+                "Virtual node replaying %d missed message(s) to %s%s",
+                session.replayed,
+                session.client_id,
+                f" ({skipped} older ones skipped by the replay limit)" if skipped else "",
+            )
+        if session.inbox:
+            frames.append(protocol.encode_push_msg_waiting())
+        return frames
+
+    def _note_delivered(self, session: ClientSession, message_id: int | None) -> None:
+        """Advance the client's cursor once it has pulled a stored message."""
+        if message_id is None or message_id <= session.cursor:
+            return
+        session.cursor = message_id
+        session.cursor_dirty = True
+        if session.persist_task is None or session.persist_task.done():
+            session.persist_task = self._spawn(self._persist_cursor_later(session))
+
+    async def _persist_cursor_later(self, session: ClientSession) -> None:
+        await asyncio.sleep(CURSOR_PERSIST_DELAY_SECONDS)
+        await self._persist_cursor(session)
+
+    async def _persist_cursor(self, session: ClientSession) -> None:
+        if not session.cursor_dirty or session.client_id is None:
+            return
+        from app.repository import VirtualNodeClientRepository
+
+        try:
+            await VirtualNodeClientRepository.advance_cursor(
+                session.client_id, session.cursor, now=int(time.time())
+            )
+            session.cursor_dirty = False
+        except Exception as exc:
+            logger.debug("Virtual node could not persist cursor for %s: %s", session.client_id, exc)
 
     def _self_info(self) -> bytes:
         if self._self_info_frame is not None:
@@ -1024,10 +1140,10 @@ class VirtualNodeServer:
         except Exception as exc:
             logger.debug("Virtual node push to %s failed: %s", session.peer, exc)
 
-    def _enqueue_for_all(self, frame: bytes) -> None:
+    def _enqueue_for_all(self, frame: bytes, message_id: int | None = None) -> None:
         waiting = protocol.encode_push_msg_waiting()
         for session in list(self._clients):
-            session.inbox.append(frame)
+            session.inbox.append((message_id, frame))
             self._spawn(self._send_quietly(session, waiting))
 
     # ------------------------------------------------------------------ app pipeline -> apps
@@ -1055,20 +1171,24 @@ class VirtualNodeServer:
             self._spawn(self._ensure_channel_slots())
 
     async def _enqueue_message(self, message: dict) -> None:
+        frame = await self._frame_for_message(message)
+        if frame is None:
+            return
+        message_id = message.get("id")
+        self._enqueue_for_all(frame, message_id if isinstance(message_id, int) else None)
+
+    async def _frame_for_message(self, message: dict) -> bytes | None:
+        """The companion frame for a stored message payload, or None if it has no wire form."""
         msg_type = message.get("type")
         if msg_type == "PRIV":
-            frame = protocol.encode_contact_message(message)
-        elif msg_type == "CHAN":
+            return protocol.encode_contact_message(message)
+        if msg_type == "CHAN":
             key = str(message.get("conversation_key") or "")
             slot = await self._slot_for_channel(key) if key else None
             if slot is None:
-                return
-            frame = protocol.encode_channel_message(message, slot)
-        else:
-            return
-        if frame is None:
-            return
-        self._enqueue_for_all(frame)
+                return None
+            return protocol.encode_channel_message(message, slot)
+        return None
 
 
 def _pending_ack_for_message(message_id: int) -> tuple[str | None, int]:

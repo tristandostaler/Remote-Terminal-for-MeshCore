@@ -913,6 +913,205 @@ class TestSendsGoThroughTheServiceLayer:
         radio.meshcore.commands.add_contact.assert_awaited_once()
 
 
+APP_START_AS = {
+    "phone": b"\x01\x03      MeshCore",
+    "cli": b"\x01\x03      mccli",
+}
+
+
+async def store_incoming_dm(text: str, timestamp: int) -> int:
+    from app.repository import MessageRepository
+
+    message_id = await MessageRepository.create(
+        msg_type="PRIV",
+        text=text,
+        received_at=timestamp,
+        conversation_key=KEY_A,
+        sender_timestamp=timestamp,
+        outgoing=False,
+    )
+    assert message_id is not None
+    return message_id
+
+
+async def wait_for_clients(server: VirtualNodeServer, count: int) -> None:
+    for _ in range(100):
+        if server.client_count == count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"expected {count} clients, have {server.client_count}")
+
+
+class TestHistoryReplay:
+    """A returning app is handed what it missed, keyed by app name + address."""
+
+    @pytest.mark.asyncio
+    async def test_first_connection_starts_at_the_present(self, proxy):
+        server, radio, connect = proxy
+        await store_incoming_dm("before anyone connected", 1_700_000_000)
+        client = await connect()
+        frame = await client.command(APP_START_AS["phone"])
+        assert frame[0] == RESP.SELF_INFO.value
+        # No MSG_WAITING follows and the inbox is empty: history starts now.
+        assert (await client.command(b"\x05"))[0] == RESP.CURRENT_TIME.value
+        assert await client.command(b"\x0a") == protocol.encode_no_more_messages()
+        from app.repository import VirtualNodeClientRepository
+
+        record = await VirtualNodeClientRepository.get("MeshCore@127.0.0.1")
+        assert record is not None
+        assert record.connections == 1
+
+    @pytest.mark.asyncio
+    async def test_returning_client_gets_what_it_missed_in_order(self, proxy):
+        server, radio, connect = proxy
+        first = await connect()
+        await first.command(APP_START_AS["phone"])
+        await first.close()
+        await wait_for_clients(server, 0)
+
+        ids = [await store_incoming_dm(f"missed {i}", 1_700_000_000 + i) for i in range(3)]
+
+        second = await connect()
+        frame = await second.command(APP_START_AS["phone"])
+        assert frame[0] == RESP.SELF_INFO.value
+        assert await second.read() == protocol.encode_push_msg_waiting()
+        texts = []
+        for _ in ids:
+            events = await parse_with_library(await second.command(b"\x0a"))
+            texts.append(events[0].payload["text"])
+        assert texts == ["missed 0", "missed 1", "missed 2"]
+        assert await second.command(b"\x0a") == protocol.encode_no_more_messages()
+        assert radio.meshcore.sent == [], "replay never touches the radio"
+
+    @pytest.mark.asyncio
+    async def test_cursor_persists_so_history_is_not_replayed_twice(self, proxy):
+        server, radio, connect = proxy
+        first = await connect()
+        await first.command(APP_START_AS["phone"])
+        await first.close()
+        await wait_for_clients(server, 0)
+        await store_incoming_dm("once", 1_700_000_000)
+
+        with patch("app.virtual_node.server.CURSOR_PERSIST_DELAY_SECONDS", 0.01):
+            second = await connect()
+            await second.command(APP_START_AS["phone"])
+            assert await second.read() == protocol.encode_push_msg_waiting()
+            await second.command(b"\x0a")
+            await asyncio.sleep(0.05)
+        await second.close()
+        await wait_for_clients(server, 0)
+
+        third = await connect()
+        assert (await third.command(APP_START_AS["phone"]))[0] == RESP.SELF_INFO.value
+        assert await third.command(b"\x0a") == protocol.encode_no_more_messages()
+
+    @pytest.mark.asyncio
+    async def test_live_messages_advance_the_cursor_too(self, proxy):
+        server, radio, connect = proxy
+        first = await connect()
+        await first.command(APP_START_AS["phone"])
+        live_id = await store_incoming_dm("live", 1_700_000_000)
+        server.on_app_event(
+            "message",
+            {
+                "id": live_id,
+                "type": "PRIV",
+                "conversation_key": KEY_A,
+                "text": "live",
+                "sender_timestamp": 1_700_000_000,
+                "received_at": 1_700_000_000,
+                "outgoing": False,
+            },
+        )
+        assert await first.read() == protocol.encode_push_msg_waiting()
+        await first.command(b"\x0a")
+        await first.close()  # disconnect persists the cursor immediately
+        await wait_for_clients(server, 0)
+
+        second = await connect()
+        await second.command(APP_START_AS["phone"])
+        assert await second.command(b"\x0a") == protocol.encode_no_more_messages()
+
+    @pytest.mark.asyncio
+    async def test_replay_limit_keeps_the_newest_messages(self, proxy):
+        server, radio, connect = proxy
+        server.replay_limit = 2
+        first = await connect()
+        await first.command(APP_START_AS["phone"])
+        await first.close()
+        await wait_for_clients(server, 0)
+        for i in range(5):
+            await store_incoming_dm(f"m{i}", 1_700_000_000 + i)
+
+        second = await connect()
+        await second.command(APP_START_AS["phone"])
+        assert await second.read() == protocol.encode_push_msg_waiting()
+        texts = [
+            (await parse_with_library(await second.command(b"\x0a")))[0].payload["text"]
+            for _ in range(2)
+        ]
+        assert texts == ["m3", "m4"]
+        assert await second.command(b"\x0a") == protocol.encode_no_more_messages()
+
+    @pytest.mark.asyncio
+    async def test_replay_can_be_disabled(self, proxy):
+        server, radio, connect = proxy
+        server.replay_limit = 0
+        first = await connect()
+        await first.command(APP_START_AS["phone"])
+        await first.close()
+        await wait_for_clients(server, 0)
+        await store_incoming_dm("lost", 1_700_000_000)
+        second = await connect()
+        assert (await second.command(APP_START_AS["phone"]))[0] == RESP.SELF_INFO.value
+        assert await second.command(b"\x0a") == protocol.encode_no_more_messages()
+
+    @pytest.mark.asyncio
+    async def test_different_apps_from_the_same_host_keep_separate_cursors(self, proxy):
+        server, radio, connect = proxy
+        phone = await connect()
+        await phone.command(APP_START_AS["phone"])
+        await phone.close()
+        await wait_for_clients(server, 0)
+        await store_incoming_dm("for the phone", 1_700_000_000)
+
+        cli = await connect()
+        assert (await cli.command(APP_START_AS["cli"]))[0] == RESP.SELF_INFO.value
+        # First time this app connects: nothing to catch up on.
+        assert await cli.command(b"\x0a") == protocol.encode_no_more_messages()
+
+        phone_again = await connect()
+        await phone_again.command(APP_START_AS["phone"])
+        assert await phone_again.read() == protocol.encode_push_msg_waiting()
+        events = await parse_with_library(await phone_again.command(b"\x0a"))
+        assert events[0].payload["text"] == "for the phone"
+        assert server.status()["clients"][0]["client_id"] in {
+            "mccli@127.0.0.1",
+            "MeshCore@127.0.0.1",
+        }
+
+    @pytest.mark.asyncio
+    async def test_outgoing_messages_are_not_replayed(self, proxy):
+        from app.repository import MessageRepository
+
+        server, radio, connect = proxy
+        first = await connect()
+        await first.command(APP_START_AS["phone"])
+        await first.close()
+        await wait_for_clients(server, 0)
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text="ours",
+            received_at=1_700_000_000,
+            conversation_key=KEY_A,
+            sender_timestamp=1_700_000_000,
+            outgoing=True,
+        )
+        second = await connect()
+        await second.command(APP_START_AS["phone"])
+        assert await second.command(b"\x0a") == protocol.encode_no_more_messages()
+
+
 class TestRealLibraryClient:
     """meshcore-py itself, pointed at the virtual node like it would be at a WiFi companion."""
 

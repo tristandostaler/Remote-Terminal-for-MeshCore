@@ -535,6 +535,45 @@ class MessageRepository:
         return [MessageRepository._row_to_message(row) for row in rows]
 
     @staticmethod
+    async def get_latest_id() -> int:
+        """Highest message row id, or 0 for an empty table."""
+        async with db.readonly() as conn:
+            async with conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages") as cursor:
+                row = await cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    @staticmethod
+    async def get_incoming_after_id(after_id: int, limit: int) -> tuple[list[Message], int]:
+        """Incoming conversation messages newer than ``after_id``, oldest first.
+
+        Used by the virtual companion node to hand a returning app what it
+        missed. When more than ``limit`` were missed the *newest* ``limit`` are
+        returned, so the app lands on the present rather than on a stale page
+        of history; the second value is how many were skipped that way.
+        """
+        if limit <= 0:
+            return [], 0
+        base_where = "WHERE messages.id > ? AND messages.outgoing = 0 AND messages.is_reaction = 0"
+        async with db.readonly() as conn:
+            async with conn.execute(
+                f"SELECT COUNT(*) FROM messages {base_where}", (after_id,)
+            ) as cursor:
+                count_row = await cursor.fetchone()
+            total = int(count_row[0]) if count_row else 0
+            async with conn.execute(
+                f"SELECT {MessageRepository._message_select('messages')} FROM messages "
+                "LEFT JOIN contacts ON messages.type = 'PRIV' "
+                "AND messages.conversation_key = contacts.public_key "
+                "LEFT JOIN channels ON messages.type = 'CHAN' "
+                "AND messages.conversation_key = channels.key "
+                f"{base_where} ORDER BY messages.id DESC LIMIT ?",
+                (after_id, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        messages = [MessageRepository._row_to_message(row) for row in list(rows)[::-1]]
+        return messages, max(0, total - len(messages))
+
+    @staticmethod
     async def get_around(
         message_id: int,
         msg_type: str | None = None,

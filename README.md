@@ -216,6 +216,7 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_VIRTUAL_NODE_HOST` | `0.0.0.0` | Interface the virtual node listens on |
 | `MESHCORE_VIRTUAL_NODE_PORT` | 5000 | Port the virtual node listens on (the same port a WiFi companion uses) |
 | `MESHCORE_VIRTUAL_NODE_READ_ONLY` | false | Refuse every command that transmits or changes radio/contact/channel state; connected apps can still read contacts, channels and live messages |
+| `MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT` | 1000 | How many missed messages a returning app is handed when it reconnects to the virtual node (newest first when more were missed); `0` disables replay |
 
 Common launch patterns:
 
@@ -363,13 +364,27 @@ server's IP with port `5000`; with meshcore-cli use `meshcore-cli -t <server-ip>
 the Home Assistant MeshCore integration takes the same host and port. Several
 apps can be connected at once. Docker users need to publish the port
 (`-p 5000:5000`), and the port can be changed with `MESHCORE_VIRTUAL_NODE_PORT`.
+In the Home Assistant add-on, switch on `MESHCORE_VIRTUAL_NODE_ENABLED` in the
+add-on options and pick the host port for "Virtual MeshCore companion node"
+under the add-on's **Network** section (default 5000; clear it to keep the port
+closed).
+
+An app that reconnects picks up where it left off. The node remembers each app
+(by the name it announces plus the address it connects from) and, on its next
+connection, replays the incoming messages it missed, oldest first, up to
+`MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT` (1000 by default; when more were missed the
+newest ones win so the app lands on the present). An app connecting for the
+first time starts at the present rather than being flooded with history. This
+identity is a heuristic: two devices running the same app from the same address
+share a cursor, and a device that changes address starts over.
 
 What it does for the radio:
 
 - **Answers from RemoteTerm's own state** — identity, the *whole* contact list
   (the server keeps far more contacts than the radio can hold), channels, the
-  clock, battery and every incoming message — so the traffic apps generate on
-  connect and while browsing never reaches the radio.
+  clock, battery, every incoming message and the history a reconnecting app
+  missed — so the traffic apps generate on connect and while browsing never
+  reaches the radio.
 - **Caches read-only device queries** for 30 seconds, so several apps polling the
   same thing cost one radio round trip.
 - **Forwards the rest** (sends, repeater logins, telemetry requests, radio
