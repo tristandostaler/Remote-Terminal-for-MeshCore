@@ -34,6 +34,7 @@ from typing import Any
 from meshcore import EventType
 from meshcore.packets import CommandType, PacketType
 
+from app.channel_constants import PUBLIC_CHANNEL_KEY
 from app.config import settings
 from app.models import ContactUpsert
 from app.repository import ChannelRepository, ContactRepository
@@ -277,6 +278,9 @@ class VirtualNodeServer:
         self._channel_slots_lock = asyncio.Lock()
         # (prefix, timestamp, text) -> (message_id, expires_at, is_flood)
         self._recent_dm_sends: dict[tuple[str, int, str], tuple[int, float, bool]] = {}
+        # Newest RESP_CODE_SENT the radio produced, with the monotonic time it
+        # arrived, so an app's send can be answered with the radio's own frame.
+        self._last_msg_sent: tuple[float, bytes] | None = None
         self.host = settings.virtual_node_host
         self.port = settings.virtual_node_port
         self.read_only = settings.virtual_node_read_only
@@ -769,10 +773,45 @@ class VirtualNodeServer:
 
     # ------------------------------------------------------------------ channels
 
+    def _pin_public_channel_slot(self, known: set[str]) -> None:
+        """Put the public channel in slot 0, the way the firmware always does.
+
+        Every MeshCore client treats channel index 0 as the public channel --
+        the app sends there without ever having read the slot back. Assigning
+        slots by sorted key alone gave slot 0 to whichever channel happened to
+        sort first (a ``#hashtag`` channel roughly half the time), so a message
+        sent on Public from an app arrived on the wrong channel, or on an empty
+        slot, which the node refused outright.
+        """
+        if PUBLIC_CHANNEL_KEY not in known:
+            return
+        slots = self._channel_slots
+        if not slots:
+            slots.append(PUBLIC_CHANNEL_KEY)
+            return
+        if slots[0] == PUBLIC_CHANNEL_KEY:
+            return
+        displaced = slots[0]
+        current = slots.index(PUBLIC_CHANNEL_KEY) if PUBLIC_CHANNEL_KEY in slots else None
+        slots[0] = PUBLIC_CHANNEL_KEY
+        if current is not None:
+            slots[current] = displaced
+        elif displaced is not None:
+            if None in slots:
+                slots[slots.index(None)] = displaced
+            elif len(slots) < MAX_VIRTUAL_CHANNEL_SLOTS:
+                slots.append(displaced)
+            else:
+                logger.warning(
+                    "Virtual node channel table full; %s dropped to seat the public channel",
+                    displaced,
+                )
+
     async def _ensure_channel_slots(self) -> list[str | None]:
         """Reconcile the virtual slot table with the channel store.
 
-        Slots are assigned on first sight and kept for the life of the process
+        Slot 0 is always the public channel (see :meth:`_pin_public_channel_slot`).
+        The rest are assigned on first sight and kept for the life of the process
         so an app's channel index stays meaningful between its requests; a
         deleted channel leaves a blank slot, reused only once the table is full.
         """
@@ -782,6 +821,7 @@ class VirtualNodeServer:
             for index, key in enumerate(self._channel_slots):
                 if key is not None and key not in known:
                     self._channel_slots[index] = None
+            self._pin_public_channel_slot(known)
             present = {k for k in self._channel_slots if k is not None}
             for key in sorted(known - present):
                 if len(self._channel_slots) < MAX_VIRTUAL_CHANNEL_SLOTS:
@@ -892,6 +932,7 @@ class VirtualNodeServer:
             raise VirtualNodeError(ErrorCode.NOT_FOUND, "unknown destination prefix")
 
         self.forwarded_commands += 1
+        started = time.monotonic()
         try:
             message = await send_direct_message_to_contact(
                 contact=contact,
@@ -912,9 +953,25 @@ class VirtualNodeServer:
             time.time() + RECENT_DM_SEND_TTL_SECONDS,
             is_flood,
         )
-        return self._msg_sent_for_message(message.id, is_flood=is_flood)
+        return self._msg_sent_for_message(message.id, is_flood=is_flood, since=started)
 
-    def _msg_sent_for_message(self, message_id: int, *, is_flood: bool) -> bytes:
+    def _msg_sent_for_message(
+        self, message_id: int, *, is_flood: bool, since: float | None = None
+    ) -> bytes:
+        """The ``RESP_CODE_SENT`` answering an app's send.
+
+        Prefer the frame the radio itself produced during this send (captured
+        by the frame tap): it carries the true expected-ACK code and the
+        firmware's suggested timeout, which is what lets the app move the
+        message from "sending" to "delivered" when the ACK push arrives. The
+        radio lock serializes sends, so the newest one seen after ``since`` is
+        ours. Falling back to the ACK tracker keeps a synthesized answer for
+        the retry path and for firmware that returns no ACK code at all.
+        """
+        if since is not None and self._last_msg_sent is not None:
+            seen_at, frame = self._last_msg_sent
+            if seen_at >= since:
+                return frame
         code, timeout_ms = _pending_ack_for_message(message_id)
         return protocol.encode_msg_sent(
             is_flood=is_flood,
@@ -1132,6 +1189,8 @@ class VirtualNodeServer:
             self._self_info_frame = bytes(frame)
         elif code == _RESP.DEVICE_INFO.value:
             self._device_info_frame = bytes(frame)
+        elif code == MSG_SENT:
+            self._last_msg_sent = (time.monotonic(), bytes(frame))
 
         pending = self._pending_forward
         if pending is not None and not pending.future.done() and code < 0x80:
