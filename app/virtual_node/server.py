@@ -37,7 +37,11 @@ from meshcore.packets import CommandType, PacketType
 from app.channel_constants import PUBLIC_CHANNEL_KEY
 from app.config import settings
 from app.models import ContactUpsert
-from app.repository import ChannelRepository, ContactRepository
+from app.repository import (
+    ChannelRepository,
+    ContactRepository,
+    VirtualNodeChannelSlotRepository,
+)
 from app.services import dm_ack_tracker
 from app.virtual_node import protocol
 from app.virtual_node.protocol import ErrorCode
@@ -95,16 +99,24 @@ TRANSMIT_COMMANDS = {
     _CMD.SEND_CONTROL_DATA.value,
     _CMD.SEND_ANON_REQ.value,
 }
-# Parameters for the transmission an app is about to make, not configuration.
+# Parameters for the transmission an app is about to make. Acknowledged, never
+# applied -- RemoteTerm shapes its own sends.
 #
-# Both of these are how a client says "send the next one this way": RemoteTerm's
-# own channel send sets the flood scope and the path hash mode around every
-# send and restores them afterwards (`send_channel_message_with_effective_scope`),
-# and MeshCore Open does the same before a channel message. Classing them as
-# radio configuration put them behind the admin switch, where refusing
-# SET_FLOOD_SCOPE made the app abandon the send -- the message never went out
-# and the app only reported that it could not send. They are refused in
-# read-only mode, with everything else that puts a packet on the air.
+# Both of these are how a client says "send the next one this way", and both are
+# sticky on the radio: the setting stays in force until something else changes
+# it. Refusing them made MeshCore Open abandon the send before it started
+# (nothing on the air, "could not send" in the app). Forwarding them is worse
+# and less visible: the app's scope becomes the radio's standing scope, and
+# `send_channel_message_with_effective_scope` only overrides and restores it
+# when the channel carries an explicit override -- so in the default case the
+# app's setting shapes the message, stays on the radio afterwards, and shapes
+# RemoteTerm's own sends too. The packet then goes out and is repeated normally
+# but is scoped away from the people it was meant for: sent, never delivered.
+#
+# So they are absorbed here. The app gets its OK and sends; the message goes out
+# under the operator's scope and path hash mode, exactly like a message sent
+# from RemoteTerm's own UI. An operator who wants a different scope for a
+# channel sets it in RemoteTerm, which is the one place that knows about it.
 SEND_SHAPING_COMMANDS = {
     _CMD.SET_FLOOD_SCOPE.value,
     _CMD.SET_PATH_HASH_MODE.value,
@@ -135,7 +147,6 @@ IDENTITY_CHANGING_COMMANDS = {
     _CMD.SET_RADIO_TX_POWER.value,
     _CMD.SET_ADVERT_LATLON.value,
     _CMD.SET_OTHER_PARAMS.value,
-    _CMD.SET_PATH_HASH_MODE.value,
 }
 # Commands that write contact or channel state -- ours, or the radio's in the
 # case of IMPORT_CONTACT (adding a contact from a shared card is contact
@@ -289,6 +300,10 @@ class ClientSession:
     cursor_dirty: bool = False
     persist_task: asyncio.Task | None = None
     replayed: int = 0
+    # What the handler wants said about the command it is serving right now, for
+    # the activity trace. Commands are served one at a time per connection, so
+    # this belongs to the command in flight. Cleared by ``_serve`` before each.
+    command_note: str = ""
 
     async def send(self, payload: bytes) -> None:
         async with self.write_lock:
@@ -317,6 +332,7 @@ class VirtualNodeServer:
         self._device_info_frame: bytes | None = None
         self._channel_slots: list[str | None] = []
         self._channel_slots_lock = asyncio.Lock()
+        self._channel_slots_loaded = False
         # (prefix, timestamp, text) -> (message_id, expires_at, is_flood)
         self._recent_dm_sends: dict[tuple[str, int, str], tuple[int, float, bool]] = {}
         # Newest RESP_CODE_SENT the radio produced, with the monotonic time it
@@ -488,6 +504,7 @@ class VirtualNodeServer:
         session.commands_served += 1
         started = time.monotonic()
         detail = ""
+        session.command_note = ""
         try:
             responses = await self.handle_command(session, code, command[1:])
         except VirtualNodeError as exc:
@@ -514,6 +531,8 @@ class VirtualNodeServer:
                     session.peer,
                     error_name(first[1]),
                 )
+            else:
+                detail = session.command_note
         self._note_command(session, code, responses, detail, started)
         for frame in responses:
             await session.send(frame)
@@ -565,10 +584,7 @@ class VirtualNodeServer:
         if code in REFUSED_COMMANDS:
             raise VirtualNodeError(ErrorCode.UNSUPPORTED_CMD, "refused by virtual node")
         if self.read_only and (
-            code in TRANSMIT_COMMANDS
-            or code in SEND_SHAPING_COMMANDS
-            or code in ADMIN_COMMANDS
-            or code in LOCAL_WRITE_COMMANDS
+            code in TRANSMIT_COMMANDS or code in ADMIN_COMMANDS or code in LOCAL_WRITE_COMMANDS
         ):
             raise VirtualNodeError(ErrorCode.UNSUPPORTED_CMD, "virtual node is read-only")
         if code in ADMIN_COMMANDS and not await self.admin_commands_allowed():
@@ -577,6 +593,13 @@ class VirtualNodeServer:
                 "radio configuration from apps is off (Settings > Virtual Node)",
             )
 
+        if code in SEND_SHAPING_COMMANDS:
+            # Acknowledged and dropped; see SEND_SHAPING_COMMANDS. Answering OK
+            # is what lets the app go on to send. Refusing stops it dead, and
+            # applying it leaves the app's setting on the radio for good.
+            self.local_commands += 1
+            session.command_note = "acknowledged; RemoteTerm shapes its own sends"
+            return [protocol.encode_ok()]
         if code == _CMD.APP_START.value:
             self.local_commands += 1
             return await self._start_app_session(session, payload)
@@ -619,9 +642,9 @@ class VirtualNodeServer:
             self.local_commands += 1
             return [await self._remove_contact(payload)]
         if code == _CMD.SEND_TXT_MSG.value:
-            return [await self._send_text_message(payload)]
+            return [await self._send_text_message(session, payload)]
         if code == _CMD.SEND_CHANNEL_TXT_MSG.value:
-            return [await self._send_channel_message(payload)]
+            return [await self._send_channel_message(session, payload)]
         if code == _CMD.GET_BATT_AND_STORAGE.value:
             cached = self._battery_from_stats()
             if cached is not None:
@@ -917,15 +940,44 @@ class VirtualNodeServer:
                     displaced,
                 )
 
+    async def _load_channel_slots(self) -> None:
+        """Seed the slot table from the last assignment we persisted.
+
+        Call under ``_channel_slots_lock``. Slots are what an app caches and
+        addresses its sends to, so they have to survive a restart: deriving them
+        afresh each time re-sorted the table whenever a channel had been added or
+        removed, and an app's cached index then pointed at a different channel.
+        """
+        if self._channel_slots_loaded:
+            return
+        self._channel_slots_loaded = True
+        try:
+            stored = await VirtualNodeChannelSlotRepository.get_all()
+        except Exception:
+            logger.exception("Virtual node could not load channel slots; assigning fresh ones")
+            return
+        if not stored:
+            return
+        self._channel_slots = [stored.get(index) for index in range(max(stored) + 1)]
+
+    async def _persist_channel_slots(self) -> None:
+        try:
+            await VirtualNodeChannelSlotRepository.replace_all(self._channel_slots)
+        except Exception:
+            logger.exception("Virtual node could not persist channel slots")
+
     async def _ensure_channel_slots(self) -> list[str | None]:
         """Reconcile the virtual slot table with the channel store.
 
         Slot 0 is always the public channel (see :meth:`_pin_public_channel_slot`).
-        The rest are assigned on first sight and kept for the life of the process
-        so an app's channel index stays meaningful between its requests; a
-        deleted channel leaves a blank slot, reused only once the table is full.
+        The rest are assigned on first sight and then kept -- across restarts, in
+        ``virtual_node_channel_slots`` -- so an app's channel index keeps meaning
+        the same channel; a deleted channel leaves a blank slot, reused only once
+        the table is full.
         """
         async with self._channel_slots_lock:
+            await self._load_channel_slots()
+            before = list(self._channel_slots)
             channels = await ChannelRepository.get_all()
             known = {c.key.upper() for c in channels}
             for index, key in enumerate(self._channel_slots):
@@ -940,6 +992,8 @@ class VirtualNodeServer:
                     self._channel_slots[self._channel_slots.index(None)] = key
                 else:
                     logger.warning("Virtual node channel table full; %s not exposed", key)
+            if self._channel_slots != before:
+                await self._persist_channel_slots()
             return list(self._channel_slots)
 
     async def _slot_for_channel(self, key: str) -> int | None:
@@ -984,12 +1038,14 @@ class VirtualNodeServer:
                     logger.info(
                         "Virtual node unbound channel %s from slot %d", previous, update.index
                     )
+                    await self._persist_channel_slots()
                 return protocol.encode_ok()
             if update.key in self._channel_slots and self._channel_slots.index(update.key) != (
                 update.index
             ):
                 self._channel_slots[self._channel_slots.index(update.key)] = None
             self._channel_slots[update.index] = update.key
+            await self._persist_channel_slots()
 
         existing = await ChannelRepository.get_by_key(update.key)
         name = update.name or (existing.name if existing else update.key[:8])
@@ -1007,7 +1063,7 @@ class VirtualNodeServer:
 
     # ------------------------------------------------------------------ sends
 
-    async def _send_text_message(self, payload: bytes) -> bytes:
+    async def _send_text_message(self, session: ClientSession, payload: bytes) -> bytes:
         from fastapi import HTTPException
 
         from app.services.message_send import send_direct_message_to_contact
@@ -1041,6 +1097,10 @@ class VirtualNodeServer:
         if contact is None:
             raise VirtualNodeError(ErrorCode.NOT_FOUND, "unknown destination prefix")
 
+        # An app addresses a contact by a 6-byte prefix; say which one that
+        # turned out to be, so a message that goes out and never arrives can be
+        # told apart from one that went to the wrong node.
+        session.command_note = f"to {contact.name or contact.public_key[:12]}"[:200]
         self.forwarded_commands += 1
         started = time.monotonic()
         try:
@@ -1104,7 +1164,7 @@ class VirtualNodeServer:
             return None
         return contact
 
-    async def _send_channel_message(self, payload: bytes) -> bytes:
+    async def _send_channel_message(self, session: ClientSession, payload: bytes) -> bytes:
         from fastapi import HTTPException
 
         from app.services.message_send import send_channel_message_to_channel
@@ -1118,6 +1178,10 @@ class VirtualNodeServer:
         channel = await ChannelRepository.get_by_key(key) if key else None
         if channel is None:
             raise VirtualNodeError(ErrorCode.NOT_FOUND, "no channel in that slot")
+        # The app names a slot, not a channel. Record which channel that slot
+        # resolved to: a message encrypted for the wrong channel still goes out
+        # and is still repeated, it just reaches nobody.
+        session.command_note = f"slot {outgoing.channel_index} -> {channel.name}"[:200]
         self.forwarded_commands += 1
         try:
             await send_channel_message_to_channel(

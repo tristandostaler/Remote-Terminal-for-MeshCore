@@ -61,16 +61,33 @@ vars, autoadd, default flood scope, signing) is refused with
 `virtual_node_allow_admin_commands` (migration 085) is on.
 
 `SEND_SHAPING_COMMANDS` — `SET_FLOOD_SCOPE` and `SET_PATH_HASH_MODE` — are
-deliberately **not** admin commands, even though they write device state. They
-are how a client says "send the next one this way": RemoteTerm's own channel
-send sets both around every send and restores them afterwards
-(`send_channel_message_with_effective_scope`), and MeshCore Open sends
-`SET_FLOOD_SCOPE` immediately before a channel message. Classing them as
-configuration put them behind the switch, and refusing one made the app
-abandon the send — the message never went out, and the app reported only that
-it could not send, with the reason nowhere but the server log. `IMPORT_CONTACT`
-is likewise contact management rather than radio configuration, and sits with
-the other contact writes. All of them are still refused in read-only mode. It is an
+neither admin commands nor forwarded: they are **acknowledged and dropped**.
+They are how a client says "send the next one this way", and MeshCore Open
+sends `SET_FLOOD_SCOPE` immediately before every channel message. Both ends of
+the obvious treatment are wrong:
+
+- *Refusing* them (they were admin commands once) made the app abandon the
+  send. The message never went out and the app reported only that it could not
+  send, with the reason nowhere but the server log.
+- *Forwarding* them is worse, because it fails silently. Both settings stick on
+  the radio until something changes them, and
+  `send_channel_message_with_effective_scope` only overrides and restores the
+  scope when the channel carries an explicit override — so in the default case
+  the app's scope shaped the message, stayed on the radio afterwards, and
+  shaped RemoteTerm's own sends too. The packet goes out and is repeated
+  normally but is scoped away from the people it was addressed to: sent,
+  repeated, never delivered.
+
+Absorbing them keeps the app sending while RemoteTerm shapes its own
+transmissions, so a message from an app goes out exactly like one sent from the
+web UI. An operator who wants a different scope for a channel sets it in
+RemoteTerm, the one place that knows about it.
+
+`IMPORT_CONTACT` is contact management rather than radio configuration, and
+sits with the other contact writes. Read-only mode refuses the transmit,
+admin and local-write commands; send shaping is still answered there, because
+refusing the parameter stops the app before it can be told plainly that the
+*send* is what is not allowed. It is an
 *app* setting rather than an env var so the operator can flip it from
 Settings → Virtual Node while apps are connected; the server reads it per
 command (`admin_commands_allowed`), so a change takes effect on the next
@@ -137,10 +154,20 @@ LOG_DATA, CONTROL_DATA, ...) is relayed to every client as-is.
 ## Virtual channel slots
 
 Apps address channels by a 1-byte slot index, but the server keeps far more
-channels than the radio has slots. `_channel_slots` is a process-lifetime
-table: channels get a slot on first sight (sorted by key on each reconcile),
-keep it for the life of the process, and a deleted channel leaves a blank
-slot that is reused only once the table (255) is full.
+channels than the radio has slots. `_channel_slots` is a **durable** table,
+persisted in `virtual_node_channel_slots` (migration 086): channels get a slot
+on first sight (sorted by key), keep it across restarts, and a deleted channel
+leaves a blank slot that is reused only once the table (255) is full.
+
+The persistence is the point, not a convenience. An app caches the slot index
+along with the channel name it read once, and re-derived-on-boot slots shift
+whenever the channel set has changed — sorting a newly added key in front of
+the others pushes every later channel down one. An app's cached "slot 2" then
+addressed a different channel, and the send still went out and was still
+repeated, encrypted for a channel nobody in that conversation was listening
+to. `SEND_CHANNEL_TXT_MSG` records the channel a slot resolved to in the
+activity trace for the same reason: a message delivered to the wrong channel
+and one delivered correctly are indistinguishable from the app's side.
 
 **Slot 0 is always the public channel** (`_pin_public_channel_slot`), the way
 firmware lays it out. Clients send on the public channel as index 0 without
@@ -202,8 +229,9 @@ replayed, matching the firmware, which never hands the host its own sends.
 
 ## Not done / known gaps
 
-- `SET_FLOOD_SCOPE` from an app is forwarded verbatim; RemoteTerm re-applies
-  its own configured scope around scoped channel sends, so the two can
-  disagree until the next send.
+- An app cannot choose the flood scope or path hash mode for its own send:
+  both are acknowledged and dropped, and the message goes out under
+  RemoteTerm's scope for that channel. Per-channel overrides live in
+  Settings → Channels.
 - `IMPORT_CONTACT` is forwarded to the radio only; the periodic contact sync
   picks the contact up into the store afterwards.
