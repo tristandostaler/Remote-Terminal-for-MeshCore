@@ -1380,6 +1380,42 @@ class TestRealSendPath:
         assert ("0011" + "22" * 14) in after
 
 
+class TestRefusalDiagnostics:
+    """An app only says "could not send"; the node has to say why."""
+
+    @pytest.mark.asyncio
+    async def test_a_refused_send_is_recorded_with_command_and_reason(self, proxy):
+        from app.routers.virtual_node import get_virtual_node_overview
+
+        server, radio, connect = proxy
+        client = await connect()
+        await client.command(APP_START_AS["phone"])
+        # Slot 39 holds no channel.
+        payload = b"\x03\x00\x27" + (1_700_000_000).to_bytes(4, "little") + b"hi"
+        assert await client.command(payload) == protocol.encode_error(ErrorCode.NOT_FOUND)
+
+        with patch("app.routers.virtual_node.virtual_node", server):
+            overview = await get_virtual_node_overview()
+        assert len(overview.recent_refusals) == 1
+        refusal = overview.recent_refusals[0]
+        assert refusal.command == "SEND_CHANNEL_TXT_MSG"
+        assert refusal.error == "NOT_FOUND"
+        assert "no channel in that slot" in refusal.detail
+        assert refusal.app_name == "MeshCore"
+
+    @pytest.mark.asyncio
+    async def test_overview_reports_the_channel_slot_map(self, proxy):
+        from app.routers.virtual_node import get_virtual_node_overview
+
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        await server._ensure_channel_slots()
+        with patch("app.routers.virtual_node.virtual_node", server):
+            overview = await get_virtual_node_overview()
+        assert overview.channel_slots[0].index == 0
+        assert overview.channel_slots[0].name == "Public"
+
+
 class TestStatusSurface:
     @pytest.mark.asyncio
     async def test_status_reports_listener_and_clients(self, proxy):

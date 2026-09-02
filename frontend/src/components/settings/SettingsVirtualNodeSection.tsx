@@ -230,6 +230,74 @@ export function SettingsVirtualNodeSection({
         )}
       </div>
 
+      {/* Channel slots */}
+      {overview && (overview.channel_slots?.length ?? 0) > 0 ? (
+        <div className="space-y-2">
+          <h4 className="font-medium">Channel slots</h4>
+          <p className="text-[0.8125rem] text-muted-foreground">
+            Apps address channels by slot number, and every MeshCore client treats slot 0 as the
+            public channel. If a channel is missing from an app, or a message lands in the wrong
+            one, compare this against the channel list in the app.
+          </p>
+          <div className="overflow-x-auto rounded-md border border-input">
+            <table className="w-full text-sm" data-testid="virtual-node-slots">
+              <thead className="text-left text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Slot</th>
+                  <th className="px-3 py-2 font-medium">Channel</th>
+                </tr>
+              </thead>
+              <tbody>
+                {overview.channel_slots?.map((slot) => (
+                  <tr key={slot.index} className="border-t border-border/60">
+                    <td className="px-3 py-2">{slot.index}</td>
+                    <td className="px-3 py-2">{slot.name ?? slot.key}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Recent refusals */}
+      {overview && (overview.recent_refusals?.length ?? 0) > 0 ? (
+        <div className="space-y-2">
+          <h4 className="font-medium">Recent refusals</h4>
+          <p className="text-[0.8125rem] text-muted-foreground">
+            Commands the node answered with an error. An app usually just says the message could not
+            be sent, so this is where the reason shows up.
+          </p>
+          <div className="overflow-x-auto rounded-md border border-input">
+            <table className="w-full text-sm" data-testid="virtual-node-refusals">
+              <thead className="text-left text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">When</th>
+                  <th className="px-3 py-2 font-medium">App</th>
+                  <th className="px-3 py-2 font-medium">Command</th>
+                  <th className="px-3 py-2 font-medium">Error</th>
+                  <th className="px-3 py-2 font-medium">Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {overview.recent_refusals
+                  ?.slice()
+                  .reverse()
+                  .map((refusal, index) => (
+                    <tr key={`${refusal.at}-${index}`} className="border-t border-border/60">
+                      <td className="px-3 py-2 whitespace-nowrap">{formatTime(refusal.at)}</td>
+                      <td className="px-3 py-2">{refusal.app_name || refusal.peer}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{refusal.command}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{refusal.error}</td>
+                      <td className="px-3 py-2 text-muted-foreground">{refusal.detail}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
       {/* Remembered apps */}
       <div className="space-y-2">
         <h4 className="font-medium">Remembered apps</h4>

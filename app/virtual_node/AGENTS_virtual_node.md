@@ -79,6 +79,13 @@ refuses every transmit and local-write command; apps become viewers.
   socket (`VirtualNodeServer.disconnect_peer`); its cursor is persisted on the
   way out like any disconnect.
 
+The overview also carries the **channel slot map** and the **last 20 refusals**
+(`_note_refusal`: command name, `ERR_CODE_*`, reason, app, timestamp). A
+companion app reports "could not send" and nothing else, so without these the
+reason existed only in the server log — the wrong place to look when the phone
+in your hand will not send. Every error answer is recorded, including the ones
+a handler returns rather than raises.
+
 The switch itself is `PATCH /api/settings` with
 `virtual_node_allow_admin_commands`. The frontend section is
 `frontend/src/components/settings/SettingsVirtualNodeSection.tsx` (polls the

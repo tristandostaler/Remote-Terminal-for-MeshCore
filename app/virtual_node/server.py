@@ -56,6 +56,8 @@ RESPONSE_CACHE_TTL_SECONDS = 30.0
 BATTERY_CACHE_MAX_AGE_SECONDS = 180.0
 # Per-client inbound message backlog. A client that never drains loses the oldest.
 MAX_QUEUED_MESSAGES = 500
+# Recent refusals kept for the settings page (see _note_refusal).
+MAX_RECENT_REFUSALS = 20
 # 1-byte channel index on the wire.
 MAX_VIRTUAL_CHANNEL_SLOTS = 255
 # Hard floor for the slot count we advertise so apps keep probing new slots.
@@ -218,6 +220,21 @@ _UNRELAYED_PUSH_CODES = frozenset(
 )
 
 
+def command_name(code: int) -> str:
+    """Readable name for a host command code, for logs and the settings page."""
+    try:
+        return CommandType(code).name
+    except ValueError:
+        return f"CMD_{code}"
+
+
+def error_name(code: int) -> str:
+    try:
+        return ErrorCode(code).name
+    except ValueError:
+        return f"ERR_{code}"
+
+
 class VirtualNodeError(Exception):
     """A command could not be served; carries the ``ERR_CODE`` to answer with."""
 
@@ -281,6 +298,7 @@ class VirtualNodeServer:
         # Newest RESP_CODE_SENT the radio produced, with the monotonic time it
         # arrived, so an app's send can be answered with the radio's own frame.
         self._last_msg_sent: tuple[float, bytes] | None = None
+        self._recent_refusals: deque[dict[str, Any]] = deque(maxlen=MAX_RECENT_REFUSALS)
         self.host = settings.virtual_node_host
         self.port = settings.virtual_node_port
         self.read_only = settings.virtual_node_read_only
@@ -323,6 +341,12 @@ class VirtualNodeServer:
             "local_commands": self.local_commands,
             "cached_commands": self.cached_commands,
             "forwarded_commands": self.forwarded_commands,
+            "recent_refusals": list(self._recent_refusals),
+            "channel_slots": [
+                {"index": index, "key": key}
+                for index, key in enumerate(self._channel_slots)
+                if key is not None
+            ],
         }
 
     async def start(self, *, host: str | None = None, port: int | None = None) -> None:
@@ -441,13 +465,64 @@ class VirtualNodeServer:
         try:
             responses = await self.handle_command(session, code, command[1:])
         except VirtualNodeError as exc:
-            logger.info("Virtual node refused command %d from %s: %s", code, session.peer, exc)
+            logger.warning(
+                "Virtual node refused %s from %s: %s", command_name(code), session.peer, exc
+            )
+            self._note_refusal(session, code, exc.code, str(exc))
             responses = [protocol.encode_error(exc.code)]
-        except Exception:
-            logger.exception("Virtual node failed to serve command %d from %s", code, session.peer)
+        except Exception as exc:
+            logger.exception(
+                "Virtual node failed to serve %s from %s", command_name(code), session.peer
+            )
+            self._note_refusal(
+                session, code, ErrorCode.BAD_STATE, f"{type(exc).__name__}: {exc}"[:200]
+            )
             responses = [protocol.encode_error(ErrorCode.BAD_STATE)]
+        else:
+            # A handler can answer with an error frame of its own (a forwarded
+            # command the radio rejected, a malformed payload). Those are the
+            # ones an operator has no other way to see, so record them too.
+            first = responses[0] if responses else b""
+            if len(first) >= 2 and first[0] == ERR:
+                self._note_refusal(
+                    session, code, first[1], "refused by the radio or the node", logged=False
+                )
         for frame in responses:
             await session.send(frame)
+
+    def _note_refusal(
+        self,
+        session: ClientSession,
+        command_code: int,
+        error_code: int,
+        detail: str,
+        *,
+        logged: bool = True,
+    ) -> None:
+        """Remember why a command was refused, for the Virtual Node settings page.
+
+        A companion app shows "could not send" and nothing else -- the reason
+        only ever existed in the server log, which is the wrong place to look
+        when the app on your phone will not send. Keep the last few here so the
+        UI can show them.
+        """
+        if not logged:
+            logger.info(
+                "Virtual node answered %s from %s with error %d",
+                command_name(command_code),
+                session.peer,
+                error_code,
+            )
+        self._recent_refusals.append(
+            {
+                "at": int(time.time()),
+                "peer": session.peer,
+                "app_name": session.app_name,
+                "command": command_name(command_code),
+                "error": error_name(error_code),
+                "detail": detail,
+            }
+        )
 
     # ------------------------------------------------------------------ dispatch
 
