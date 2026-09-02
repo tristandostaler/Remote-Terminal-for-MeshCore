@@ -169,7 +169,9 @@ export function SettingsVirtualNodeSection({
             variables, default flood scope, signing) is refused. Turn it on to configure the radio
             from a phone; it applies to every connected app at once. Per-send parameters an app sets
             while sending — the flood scope and path hash mode for that message — are not covered by
-            this and always go through, because refusing them stops the app sending at all.
+            this: they are acknowledged and dropped, because refusing them stops the app sending at
+            all and applying them would leave the app&apos;s setting on the radio. Messages sent
+            from an app go out under this server&apos;s scope, the same as messages sent from here.
             {overview?.read_only ? (
               <>
                 {' '}
@@ -239,8 +241,9 @@ export function SettingsVirtualNodeSection({
           <h4 className="font-medium">Channel slots</h4>
           <p className="text-[0.8125rem] text-muted-foreground">
             Apps address channels by slot number, and every MeshCore client treats slot 0 as the
-            public channel. If a channel is missing from an app, or a message lands in the wrong
-            one, compare this against the channel list in the app.
+            public channel. These assignments are kept for good, so an index an app has cached keeps
+            meaning the same channel. If a channel is missing from an app, or a message lands in the
+            wrong one, compare this against the channel list in the app.
           </p>
           <div className="overflow-x-auto rounded-md border border-input">
             <table className="w-full text-sm" data-testid="virtual-node-slots">

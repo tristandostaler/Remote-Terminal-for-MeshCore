@@ -887,14 +887,11 @@ class TestAdminCommandGate:
     async def test_send_shaping_commands_are_not_radio_configuration(self, proxy):
         """Regression: SET_FLOOD_SCOPE is how an app scopes the send it is making.
 
-        MeshCore Open sends it immediately before a channel message, exactly as
-        RemoteTerm's own channel send does. Gating it behind the admin switch
-        made the app abandon the send: the message never went out and the app
-        reported only that it could not send.
+        MeshCore Open sends it immediately before a channel message. Gating it
+        behind the admin switch made the app abandon the send: the message never
+        went out and the app reported only that it could not send.
         """
         server, radio, connect = proxy
-        radio.meshcore.responses[CMD.SET_FLOOD_SCOPE.value] = protocol.encode_ok()
-        radio.meshcore.responses[CMD.SET_PATH_HASH_MODE.value] = protocol.encode_ok()
         radio.meshcore.responses[CMD.IMPORT_CONTACT.value] = protocol.encode_ok()
         client = await connect()
         assert not (await server.admin_commands_allowed()), "admin stays off for this test"
@@ -913,16 +910,52 @@ class TestAdminCommandGate:
         )
 
     @pytest.mark.asyncio
-    async def test_read_only_still_refuses_send_shaping(self, proxy):
+    async def test_send_shaping_is_acknowledged_but_never_reaches_the_radio(self, proxy):
+        """Regression: the app's scope must not become the radio's standing scope.
+
+        Flood scope and path hash mode stick on the radio until something else
+        changes them, and RemoteTerm's channel send only overrides and restores
+        them when the channel carries an explicit override. Forwarding the app's
+        setting therefore shaped the message *and* every send after it: the
+        packet went out and was repeated normally, scoped away from the people
+        it was addressed to. Sent, never delivered.
+        """
+        server, radio, connect = proxy
+        client = await connect()
+        assert await client.command(bytes([CMD.SET_FLOOD_SCOPE.value, 0]) + bytes(16)) == (
+            protocol.encode_ok()
+        )
+        assert await client.command(bytes([CMD.SET_PATH_HASH_MODE.value, 1])) == (
+            protocol.encode_ok()
+        )
+        assert radio.meshcore.sent == []
+        assert [c["detail"] for c in server.status()["recent_commands"]] == [
+            "acknowledged; RemoteTerm shapes its own sends",
+            "acknowledged; RemoteTerm shapes its own sends",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_read_only_answers_shaping_and_refuses_the_send_itself(self, proxy):
+        """Read-only refuses what transmits, not the parameters for it.
+
+        Refusing the parameter is what stopped MeshCore Open before it ever
+        tried; refusing the send says plainly which command was not allowed.
+        """
         server, radio, connect = proxy
         server.read_only = True
         client = await connect()
-        for payload in (
-            bytes([CMD.SET_FLOOD_SCOPE.value, 0]) + bytes(16),
-            bytes([CMD.SET_PATH_HASH_MODE.value, 1]),
-            bytes([CMD.IMPORT_CONTACT.value]) + bytes(32),
-        ):
-            assert await client.command(payload) == protocol.encode_error(ErrorCode.UNSUPPORTED_CMD)
+        assert await client.command(bytes([CMD.SET_FLOOD_SCOPE.value, 0]) + bytes(16)) == (
+            protocol.encode_ok()
+        )
+        assert await client.command(bytes([CMD.SET_PATH_HASH_MODE.value, 1])) == (
+            protocol.encode_ok()
+        )
+        assert await client.command(bytes([CMD.IMPORT_CONTACT.value]) + bytes(32)) == (
+            protocol.encode_error(ErrorCode.UNSUPPORTED_CMD)
+        )
+        assert await client.command(
+            bytes([CMD.SEND_CHANNEL_TXT_MSG.value, 0, 0]) + bytes(4) + b"hi"
+        ) == protocol.encode_error(ErrorCode.UNSUPPORTED_CMD)
         assert radio.meshcore.sent == []
 
     @pytest.mark.asyncio
@@ -1093,6 +1126,34 @@ class TestSendsGoThroughTheServiceLayer:
         send.assert_awaited_once()
         assert send.await_args.kwargs["channel"].key == CHANNEL_KEY
         assert send.await_args.kwargs["text"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_the_trace_records_what_a_send_resolved_to(self, proxy):
+        """A send that goes out and reaches nobody looks identical to one that worked.
+
+        The slot and the 6-byte prefix an app addresses are resolved here, so
+        the trace is the only place that can say which channel or contact the
+        message was actually encrypted for.
+        """
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(CHANNEL_KEY, "#test", is_hashtag=True)
+        await ContactRepository.upsert(ContactUpsert(public_key=KEY_A, name="Alice", type=1))
+        client = await connect()
+        slot = await server._slot_for_channel(CHANNEL_KEY)
+        dm = b"\x00\x00" + bytes(4) + bytes.fromhex(KEY_A[:12]) + b"hi"
+        with (
+            patch("app.services.message_send.send_channel_message_to_channel", AsyncMock()),
+            patch(
+                "app.services.message_send.send_direct_message_to_contact",
+                AsyncMock(return_value=MagicMock(id=1, acked=0)),
+            ),
+        ):
+            await client.command(b"\x03" + bytes([0, slot]) + bytes(4) + b"hello")
+            await client.command(b"\x02" + dm)
+
+        traced = {entry["command"]: entry["detail"] for entry in server.status()["recent_commands"]}
+        assert traced["SEND_CHANNEL_TXT_MSG"] == f"slot {slot} -> #test"
+        assert traced["SEND_TXT_MSG"] == "to Alice"
 
     @pytest.mark.asyncio
     async def test_channel_message_to_empty_slot_is_not_found(self, proxy):
@@ -1420,6 +1481,44 @@ class TestRealSendPath:
         assert after[0] == PUBLIC_CHANNEL_KEY
         # The displaced channel keeps a slot rather than falling off the table.
         assert ("0011" + "22" * 14) in after
+
+    @pytest.mark.asyncio
+    async def test_slot_assignments_survive_a_restart(self, proxy):
+        """Regression: an app caches the slot index, so it has to keep its meaning.
+
+        Slots used to be derived afresh each start, from the channel keys in
+        sorted order. Adding a channel that sorted early therefore pushed every
+        later channel down one, and an app's cached "slot 2" came back pointing
+        at a different channel. The send still went out and was still repeated
+        -- encrypted for a channel nobody in that conversation was listening to.
+        """
+        server, _radio, _connect = proxy
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        await ChannelRepository.upsert("ff" * 32, "Work")
+        before = await server._ensure_channel_slots()
+        work_slot = before.index("FF" * 32)
+
+        # A channel added later sorts first but must not displace anything.
+        await ChannelRepository.upsert("00" * 32, "Family")
+        restarted = VirtualNodeServer(radio=_radio)
+        after = await restarted._ensure_channel_slots()
+
+        assert after[0] == PUBLIC_CHANNEL_KEY
+        assert after[work_slot] == "FF" * 32
+        assert ("00" * 32).upper() in after
+
+    @pytest.mark.asyncio
+    async def test_a_slot_bound_by_an_app_is_remembered(self, proxy):
+        server, _radio, connect = proxy
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        client = await connect()
+        secret = bytes.fromhex("ab" * 16)
+        payload = bytes([CMD.SET_CHANNEL.value, 5]) + b"Ham".ljust(32, b"\x00") + secret
+        assert await client.command(payload) == protocol.encode_ok()
+        bound = (await server._ensure_channel_slots())[5]
+
+        restarted = VirtualNodeServer(radio=_radio)
+        assert (await restarted._ensure_channel_slots())[5] == bound
 
 
 class TestRefusalDiagnostics:
