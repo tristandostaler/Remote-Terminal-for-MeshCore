@@ -54,8 +54,35 @@ Every host command is one of:
 | **Forwarded** | `SEND_SELF_ADVERT`, `SEND_LOGIN`, `SEND_STATUS_REQ`, `LOGOUT`, `BINARY_REQ`, `PATH_DISCOVERY`, `SEND_ANON_REQ`, `SEND_TELEMETRY_REQ`, `SEND_TRACE_PATH`, `SEND_RAW_DATA`, `SEND_CONTROL_DATA`, `SHARE_CONTACT`, `EXPORT_CONTACT`, CLI text (`SEND_TXT_MSG` txt_type 1/2), all `SET_*` config writes, `SIGN_*`, `HAS_CONNECTION`, anything unknown | Raw bytes sent to the radio under the shared `radio_operation` lock; the reply is the first frame whose code is in the command's expected set. Contact-addressed commands re-stage the contact on the radio first (RemoteTerm offloads contacts, so the radio may not have it). Identity-changing writes trigger a `SELF_INFO`/`DEVICE_INFO` refresh and update `radio_manager.path_hash_mode` / `repeat_enabled`. |
 | **Refused** | `REBOOT`, `FACTORY_RESET`, `IMPORT_PRIVATE_KEY`; `EXPORT_PRIVATE_KEY` unless `MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT=true` | `ERR_CODE_UNSUPPORTED_CMD` / `RESP_CODE_DISABLED`. They would take the radio away from RemoteTerm. |
 
-`MESHCORE_VIRTUAL_NODE_READ_ONLY=true` additionally refuses every transmit,
-admin and local-write command; apps become viewers.
+**Admin commands are off by default.** Every `ADMIN_COMMANDS` entry (name,
+location, radio params, TX power, tuning, other params, device PIN, custom
+vars, flood scope, autoadd, path hash mode, default flood scope, signing,
+contact import) is refused with `ERR_CODE_UNSUPPORTED_CMD` unless the app
+setting `virtual_node_allow_admin_commands` (migration 085) is on. It is an
+*app* setting rather than an env var so the operator can flip it from
+Settings → Virtual Node while apps are connected; the server reads it per
+command (`admin_commands_allowed`), so a change takes effect on the next
+command. `MESHCORE_VIRTUAL_NODE_READ_ONLY=true` wins over it and additionally
+refuses every transmit and local-write command; apps become viewers.
+
+## Operator surface
+
+`app/routers/virtual_node.py`:
+
+- `GET /api/virtual-node` — one payload for the settings page: listener state,
+  counters, `admin_commands_allowed`, the connected sessions (peer, client
+  id, app name, connected since, commands, queued, replayed) and every
+  remembered client from `virtual_node_clients` with a `connected` flag.
+- `DELETE /api/virtual-node/clients/{client_id}` — forget a remembered app;
+  its next connection starts at the present.
+- `POST /api/virtual-node/connections/{peer}/disconnect` — close one app's
+  socket (`VirtualNodeServer.disconnect_peer`); its cursor is persisted on the
+  way out like any disconnect.
+
+The switch itself is `PATCH /api/settings` with
+`virtual_node_allow_admin_commands`. The frontend section is
+`frontend/src/components/settings/SettingsVirtualNodeSection.tsx` (polls the
+overview every 5 s while open).
 
 ## Why the reply matching is safe without pausing auto-fetch
 

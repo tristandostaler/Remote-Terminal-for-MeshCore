@@ -69,6 +69,10 @@ API_TAGS_METADATA: list[dict[str, Any]] = [
         "description": "Browser Web Push subscriptions, per-device preferences, tests, and conversations.",
     },
     {
+        "name": "virtual-node",
+        "description": "Virtual MeshCore companion node: listener state, connected and remembered apps, operator actions.",
+    },
+    {
         "name": "fanout",
         "description": "MQTT, webhooks, Apprise, SQS, Home Assistant, map upload, and Discord/Telegram bridge integrations.",
     },

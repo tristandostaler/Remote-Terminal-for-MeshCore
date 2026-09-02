@@ -555,6 +555,8 @@ export interface AppSettings {
   max_message_retries: number;
   telemetry_interval_hours: number;
   telemetry_routed_hourly: boolean;
+  /** Apps on the virtual companion node may change radio settings (default off). */
+  virtual_node_allow_admin_commands: boolean;
 }
 
 /** Bounds and default for `max_message_retries`, mirroring app/send_attempts.py. */
@@ -575,6 +577,46 @@ export interface AppSettingsUpdate {
   discovery_blocked_types?: number[];
   telemetry_interval_hours?: number;
   telemetry_routed_hourly?: boolean;
+  virtual_node_allow_admin_commands?: boolean;
+}
+
+/** One app currently connected to the virtual companion node. */
+export interface VirtualNodeConnectedClient {
+  peer: string;
+  client_id: string | null;
+  app_name: string;
+  connected_at: number;
+  commands: number;
+  queued_messages: number;
+  replayed_messages: number;
+}
+
+/** An app the virtual node remembers (history cursor), connected or not. */
+export interface VirtualNodeKnownClient {
+  client_id: string;
+  app_name: string;
+  peer_host: string;
+  last_message_id: number;
+  first_seen: number;
+  last_seen: number;
+  connections: number;
+  connected: boolean;
+}
+
+export interface VirtualNodeOverview {
+  enabled: boolean;
+  listening: boolean;
+  host: string | null;
+  port: number | null;
+  read_only: boolean;
+  replay_limit: number;
+  admin_commands_allowed: boolean;
+  client_count: number;
+  local_commands: number;
+  cached_commands: number;
+  forwarded_commands: number;
+  connected: VirtualNodeConnectedClient[];
+  known_clients: VirtualNodeKnownClient[];
 }
 
 export interface TelemetrySchedule {

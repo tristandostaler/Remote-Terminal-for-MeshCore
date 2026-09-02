@@ -25,6 +25,7 @@ import { SettingsRadioAppSection } from './settings/SettingsRadioAppSection';
 import { SettingsFanoutSection } from './settings/SettingsFanoutSection';
 import { SettingsDatabaseSection } from './settings/SettingsDatabaseSection';
 import { SettingsAboutSection } from './settings/SettingsAboutSection';
+import { SettingsVirtualNodeSection } from './settings/SettingsVirtualNodeSection';
 import { SettingsHttpsSection } from './settings/SettingsHttpsSection';
 
 interface SettingsModalBaseProps {
@@ -124,6 +125,7 @@ export function SettingsModal(props: SettingsModalProps) {
     local: false,
     https: false,
     'radio-app': false,
+    'virtual-node': false,
     fanout: false,
     database: false,
     about: false,
@@ -327,6 +329,19 @@ export function SettingsModal(props: SettingsModalProps) {
             <SettingsFanoutSection
               health={health}
               onHealthRefresh={onHealthRefresh}
+              className={sectionContentClass}
+            />
+          )}
+        </section>
+      )}
+
+      {shouldRenderSection('virtual-node') && (
+        <section className={sectionWrapperClass}>
+          {renderSectionHeader('virtual-node')}
+          {isSectionVisible('virtual-node') && (
+            <SettingsVirtualNodeSection
+              appSettings={appSettings}
+              onSaveAppSettings={onSaveAppSettings}
               className={sectionContentClass}
             />
           )}

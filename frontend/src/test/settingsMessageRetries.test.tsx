@@ -42,6 +42,7 @@ const baseSettings: AppSettings = {
   max_message_retries: 3,
   telemetry_interval_hours: 8,
   telemetry_routed_hourly: false,
+  virtual_node_allow_admin_commands: false,
 };
 
 function renderSection(overrides: Partial<AppSettings> = {}) {

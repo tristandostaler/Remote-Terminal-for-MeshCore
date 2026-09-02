@@ -308,6 +308,7 @@ class VirtualNodeServer:
                 {
                     "peer": c.peer,
                     "client_id": c.client_id,
+                    "app_name": c.app_name,
                     "connected_at": int(c.connected_at),
                     "commands": c.commands_served,
                     "queued_messages": len(c.inbox),
@@ -355,6 +356,25 @@ class VirtualNodeServer:
             await asyncio.gather(*self._background, return_exceptions=True)
         self._clients.clear()
         logger.info("Virtual MeshCore node stopped")
+
+    async def admin_commands_allowed(self) -> bool:
+        """Whether apps may change radio settings through the node (app setting, default off)."""
+        from app.repository import AppSettingsRepository
+
+        try:
+            return bool((await AppSettingsRepository.get()).virtual_node_allow_admin_commands)
+        except Exception:
+            logger.debug("Could not read the virtual node admin switch; refusing", exc_info=True)
+            return False
+
+    def disconnect_peer(self, peer: str) -> bool:
+        """Close a connected app's socket. Its cursor is persisted on the way out."""
+        for session in list(self._clients):
+            if session.peer == peer:
+                session.writer.close()
+                logger.info("Virtual node client %s disconnected by operator", peer)
+                return True
+        return False
 
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -437,6 +457,11 @@ class VirtualNodeServer:
             code in TRANSMIT_COMMANDS or code in ADMIN_COMMANDS or code in LOCAL_WRITE_COMMANDS
         ):
             raise VirtualNodeError(ErrorCode.UNSUPPORTED_CMD, "virtual node is read-only")
+        if code in ADMIN_COMMANDS and not await self.admin_commands_allowed():
+            raise VirtualNodeError(
+                ErrorCode.UNSUPPORTED_CMD,
+                "radio configuration from apps is off (Settings > Virtual Node)",
+            )
 
         if code == _CMD.APP_START.value:
             self.local_commands += 1

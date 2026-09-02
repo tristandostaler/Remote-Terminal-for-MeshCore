@@ -111,6 +111,13 @@ class AppSettingsUpdate(BaseModel):
             "path are polled every hour instead of on the normal scheduled interval."
         ),
     )
+    virtual_node_allow_admin_commands: bool | None = Field(
+        default=None,
+        description=(
+            "Allow apps connected to the virtual companion node to change radio "
+            "settings. Off by default."
+        ),
+    )
 
 
 class BlockKeyRequest(BaseModel):
@@ -291,6 +298,13 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
     # Auto-resend channel
     if update.auto_resend_channel is not None:
         kwargs["auto_resend_channel"] = update.auto_resend_channel
+
+    if update.virtual_node_allow_admin_commands is not None:
+        logger.info(
+            "Virtual node admin commands from apps: %s",
+            "allowed" if update.virtual_node_allow_admin_commands else "refused",
+        )
+        kwargs["virtual_node_allow_admin_commands"] = update.virtual_node_allow_admin_commands
 
     # Direct-message attempt cap. Clamped rather than 400-ed so a stale client
     # sending an out-of-range value can't brick settings saves.

@@ -83,6 +83,9 @@ from app.routers import (
     voice,
     ws,
 )
+from app.routers import (
+    virtual_node as virtual_node_router,
+)
 from app.security import add_optional_basic_auth_middleware
 from app.services.radio_runtime import radio_runtime as radio_manager
 from app.services.radio_stats import start_radio_stats_sampling, stop_radio_stats_sampling
@@ -274,6 +277,7 @@ app.include_router(voice.router, prefix="/api")
 app.include_router(images.router, prefix="/api")
 app.include_router(aeic_images.router, prefix="/api")
 app.include_router(unsupported_media.router, prefix="/api")
+app.include_router(virtual_node_router.router, prefix="/api")
 app.include_router(ws.router, prefix="/api")
 
 # Serve frontend static files in production

@@ -111,6 +111,7 @@ beforeEach(() => {
     max_message_retries: 3,
     telemetry_interval_hours: 8,
     telemetry_routed_hourly: false,
+    virtual_node_allow_admin_commands: false,
   });
   mockedApi.getRadioConfig.mockResolvedValue({
     public_key: 'aa'.repeat(32),
@@ -1182,6 +1183,7 @@ describe('SettingsFanoutSection', () => {
       max_message_retries: 3,
       telemetry_interval_hours: 8,
       telemetry_routed_hourly: false,
+      virtual_node_allow_admin_commands: false,
     });
 
     renderSection();

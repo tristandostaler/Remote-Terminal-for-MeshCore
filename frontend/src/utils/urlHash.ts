@@ -30,6 +30,7 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
   'local',
   'https',
   'radio-app',
+  'virtual-node',
   'fanout',
   'database',
   'about',

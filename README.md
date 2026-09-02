@@ -396,17 +396,24 @@ What it does for the radio:
 
 Some things are deliberately not proxied: rebooting, factory reset and private
 key import are refused, and private key export follows
-`MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT`. Set
+`MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT`. Changing the radio's own settings
+from an app (name, location, frequency, TX power, tuning, flood scope, path hash
+mode, signing) is **off by default** and refused until you switch on "Allow
+connected apps to change radio settings" in **Settings → Virtual Node**; it
+applies to every connected app at once. Set
 `MESHCORE_VIRTUAL_NODE_READ_ONLY=true` to turn connected apps into viewers that
-can read but never transmit or change anything.
+can read but never transmit or change anything, whatever that switch says.
+
+**Settings → Virtual Node** also shows whether the node is listening and on
+which address, every app connected right now (with a Disconnect button), and
+every app the node remembers with how far into the history it has caught up
+(with a Forget button, which makes that app's next connection start at the
+present).
 
 > [!WARNING]
 > The companion protocol has no authentication, and neither does the virtual
 > node — anyone who can reach the port can use the radio. Keep it on a trusted
 > network (it is off by default). Basic Auth protects the web app only.
-
-Settings → About shows whether the node is listening, how many apps are
-connected, and how many commands were answered locally versus forwarded.
 
 ## Where To Go Next
 

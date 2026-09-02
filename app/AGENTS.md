@@ -86,6 +86,7 @@ app/
     ├── repeaters.py
     ├── statistics.py
     ├── push.py
+    ├── virtual_node.py     # Operator view/actions for the virtual companion node
     └── ws.py
 ```
 
@@ -482,6 +483,13 @@ Verified against the meshcore firmware (`examples/simple_room_server/MyMesh.cpp`
 - `POST /push/subscriptions/{id}/test` — send test notification
 - `GET /push/conversations` — global list of push-enabled conversation state keys
 - `POST /push/conversations/toggle` — add or remove a conversation from the global push list
+
+### Virtual node
+- `GET /virtual-node` — listener state, counters, `admin_commands_allowed`, connected apps, remembered apps with `connected` flag
+- `DELETE /virtual-node/clients/{client_id}` — forget a remembered app (history cursor)
+- `POST /virtual-node/connections/{peer}/disconnect` — close one connected app's socket
+
+The admin switch is `PATCH /settings` `virtual_node_allow_admin_commands` (default off; read per command by the node; read-only mode overrides it).
 
 ### WebSocket
 - `WS /ws`

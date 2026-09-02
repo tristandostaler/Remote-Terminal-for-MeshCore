@@ -727,7 +727,10 @@ class TestForwarding:
 
     @pytest.mark.asyncio
     async def test_config_writes_forward_and_invalidate_the_cache(self, proxy):
+        from app.repository import AppSettingsRepository
+
         server, radio, connect = proxy
+        await AppSettingsRepository.update(virtual_node_allow_admin_commands=True)
         radio.meshcore.responses[CMD.GET_CUSTOM_VARS.value] = (
             bytes([RESP.CUSTOM_VARS.value]) + b"a:1"
         )
@@ -807,6 +810,125 @@ class TestForwarding:
             frame = await client.command(b"\x14")
         assert frame == protocol.encode_battery(4012)
         assert radio.meshcore.sent == []
+
+
+class TestAdminCommandGate:
+    """Radio configuration from apps is an explicit, default-off operator choice."""
+
+    @pytest.mark.asyncio
+    async def test_admin_commands_are_refused_by_default(self, proxy):
+        server, radio, connect = proxy
+        radio.meshcore.responses[CMD.SET_ADVERT_NAME.value] = protocol.encode_ok()
+        client = await connect()
+        for payload in (b"\x08NewName", b"\x0c" + (20).to_bytes(4, "little"), b"\x29a:2"):
+            assert await client.command(payload) == protocol.encode_error(ErrorCode.UNSUPPORTED_CMD)
+        assert radio.meshcore.sent == []
+        # Everything that is not radio configuration still works.
+        radio.meshcore.responses[CMD.SEND_SELF_ADVERT.value] = protocol.encode_ok()
+        assert await client.command(b"\x07\x01") == protocol.encode_ok()
+
+    @pytest.mark.asyncio
+    async def test_admin_commands_forward_once_the_setting_is_on(self, proxy):
+        from app.repository import AppSettingsRepository
+
+        server, radio, connect = proxy
+        await AppSettingsRepository.update(virtual_node_allow_admin_commands=True)
+        radio.meshcore.responses[CMD.SET_ADVERT_NAME.value] = protocol.encode_ok()
+        client = await connect()
+        assert await client.command(b"\x08NewName") == protocol.encode_ok()
+        assert radio.meshcore.sent == [b"\x08NewName"]
+        # Switching it back off takes effect on the next command.
+        await AppSettingsRepository.update(virtual_node_allow_admin_commands=False)
+        assert await client.command(b"\x08Again") == protocol.encode_error(
+            ErrorCode.UNSUPPORTED_CMD
+        )
+        assert len(radio.meshcore.sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_read_only_wins_over_the_admin_setting(self, proxy):
+        from app.repository import AppSettingsRepository
+
+        server, radio, connect = proxy
+        await AppSettingsRepository.update(virtual_node_allow_admin_commands=True)
+        server.read_only = True
+        client = await connect()
+        assert await client.command(b"\x08NewName") == protocol.encode_error(
+            ErrorCode.UNSUPPORTED_CMD
+        )
+        assert radio.meshcore.sent == []
+
+
+class TestOperatorRouter:
+    """GET /virtual-node and the two operator actions."""
+
+    @pytest.mark.asyncio
+    async def test_overview_lists_connected_and_remembered_apps(self, proxy):
+        from app.repository import AppSettingsRepository
+        from app.routers.virtual_node import get_virtual_node_overview
+
+        server, radio, connect = proxy
+        earlier = await connect()
+        await earlier.command(APP_START_AS["cli"])
+        await earlier.close()
+        await wait_for_clients(server, 0)
+        phone = await connect()
+        await phone.command(APP_START_AS["phone"])
+        await AppSettingsRepository.update(virtual_node_allow_admin_commands=True)
+
+        with patch("app.routers.virtual_node.virtual_node", server):
+            overview = await get_virtual_node_overview()
+
+        assert overview.listening is True
+        assert overview.port == server.port
+        assert overview.admin_commands_allowed is True
+        assert overview.client_count == 1
+        assert [c.client_id for c in overview.connected] == ["MeshCore@127.0.0.1"]
+        assert overview.connected[0].app_name == "MeshCore"
+        known = {k.client_id: k for k in overview.known_clients}
+        assert set(known) == {"MeshCore@127.0.0.1", "mccli@127.0.0.1"}
+        assert known["MeshCore@127.0.0.1"].connected is True
+        assert known["mccli@127.0.0.1"].connected is False
+
+    @pytest.mark.asyncio
+    async def test_forgetting_a_client_resets_its_history(self, proxy):
+        from fastapi import HTTPException
+
+        from app.routers.virtual_node import forget_virtual_node_client
+
+        server, radio, connect = proxy
+        first = await connect()
+        await first.command(APP_START_AS["phone"])
+        await first.close()
+        await wait_for_clients(server, 0)
+        await store_incoming_dm("would have been replayed", 1_700_000_000)
+
+        with patch("app.routers.virtual_node.virtual_node", server):
+            assert (await forget_virtual_node_client("MeshCore@127.0.0.1"))["status"] == "ok"
+            with pytest.raises(HTTPException) as exc:
+                await forget_virtual_node_client("MeshCore@127.0.0.1")
+            assert exc.value.status_code == 404
+
+        second = await connect()
+        assert (await second.command(APP_START_AS["phone"]))[0] == RESP.SELF_INFO.value
+        assert await second.command(b"\x0a") == protocol.encode_no_more_messages()
+
+    @pytest.mark.asyncio
+    async def test_operator_can_disconnect_an_app(self, proxy):
+        from fastapi import HTTPException
+
+        from app.routers.virtual_node import disconnect_virtual_node_client
+
+        server, radio, connect = proxy
+        client = await connect()
+        await client.command(APP_START_AS["phone"])
+        peer = server.status()["clients"][0]["peer"]
+        with patch("app.routers.virtual_node.virtual_node", server):
+            assert (await disconnect_virtual_node_client(peer))["status"] == "ok"
+            await wait_for_clients(server, 0)
+            with pytest.raises(HTTPException):
+                await disconnect_virtual_node_client(peer)
+        with pytest.raises((asyncio.IncompleteReadError, ConnectionError, TimeoutError)):
+            await client.command(b"\x05")
 
 
 class TestPushRelay:
