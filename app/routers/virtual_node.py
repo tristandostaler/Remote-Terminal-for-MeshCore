@@ -11,7 +11,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.repository import AppSettingsRepository, VirtualNodeClientRepository
+from app.repository import AppSettingsRepository, ChannelRepository, VirtualNodeClientRepository
 from app.virtual_node import virtual_node
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,27 @@ class KnownVirtualNodeClient(BaseModel):
     connected: bool = Field(description="Whether a connection with this identity is open now")
 
 
+class VirtualNodeCommand(BaseModel):
+    """One command an app sent and what it was answered with."""
+
+    at: int
+    peer: str
+    app_name: str = ""
+    command: str = Field(description="Host command name, e.g. SEND_CHANNEL_TXT_MSG")
+    result: str = Field(description="Response frame name, or the ERR_CODE_* returned")
+    failed: bool = False
+    detail: str = ""
+    duration_ms: int = 0
+
+
+class VirtualNodeChannelSlot(BaseModel):
+    """Which channel an app finds at a given slot index. Slot 0 is always Public."""
+
+    index: int
+    key: str
+    name: str | None = None
+
+
 class VirtualNodeOverview(BaseModel):
     enabled: bool
     listening: bool
@@ -57,6 +78,8 @@ class VirtualNodeOverview(BaseModel):
     forwarded_commands: int
     connected: list[ConnectedVirtualNodeClient]
     known_clients: list[KnownVirtualNodeClient]
+    channel_slots: list[VirtualNodeChannelSlot] = Field(default_factory=list)
+    recent_commands: list[VirtualNodeCommand] = Field(default_factory=list)
 
 
 @router.get("", response_model=VirtualNodeOverview)
@@ -79,6 +102,13 @@ async def get_virtual_node_overview() -> VirtualNodeOverview:
         )
         for k in await VirtualNodeClientRepository.list_all()
     ]
+    channel_names = {c.key.upper(): c.name for c in await ChannelRepository.get_all()}
+    channel_slots = [
+        VirtualNodeChannelSlot(
+            index=slot["index"], key=slot["key"], name=channel_names.get(slot["key"])
+        )
+        for slot in status["channel_slots"]
+    ]
     return VirtualNodeOverview(
         enabled=status["enabled"],
         listening=status["listening"],
@@ -93,6 +123,8 @@ async def get_virtual_node_overview() -> VirtualNodeOverview:
         forwarded_commands=status["forwarded_commands"],
         connected=connected,
         known_clients=known,
+        channel_slots=channel_slots,
+        recent_commands=[VirtualNodeCommand(**entry) for entry in status["recent_commands"]],
     )
 
 

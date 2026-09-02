@@ -34,6 +34,7 @@ from typing import Any
 from meshcore import EventType
 from meshcore.packets import CommandType, PacketType
 
+from app.channel_constants import PUBLIC_CHANNEL_KEY
 from app.config import settings
 from app.models import ContactUpsert
 from app.repository import ChannelRepository, ContactRepository
@@ -55,6 +56,8 @@ RESPONSE_CACHE_TTL_SECONDS = 30.0
 BATTERY_CACHE_MAX_AGE_SECONDS = 180.0
 # Per-client inbound message backlog. A client that never drains loses the oldest.
 MAX_QUEUED_MESSAGES = 500
+# Commands kept for the settings page's activity trace (see _note_command).
+MAX_RECENT_COMMANDS = 60
 # 1-byte channel index on the wire.
 MAX_VIRTUAL_CHANNEL_SLOTS = 255
 # Hard floor for the slot count we advertise so apps keep probing new slots.
@@ -217,6 +220,28 @@ _UNRELAYED_PUSH_CODES = frozenset(
 )
 
 
+def command_name(code: int) -> str:
+    """Readable name for a host command code, for logs and the settings page."""
+    try:
+        return CommandType(code).name
+    except ValueError:
+        return f"CMD_{code}"
+
+
+def error_name(code: int) -> str:
+    try:
+        return ErrorCode(code).name
+    except ValueError:
+        return f"ERR_{code}"
+
+
+def response_name(code: int) -> str:
+    try:
+        return PacketType(code).name
+    except ValueError:
+        return f"RESP_{code}"
+
+
 class VirtualNodeError(Exception):
     """A command could not be served; carries the ``ERR_CODE`` to answer with."""
 
@@ -277,6 +302,10 @@ class VirtualNodeServer:
         self._channel_slots_lock = asyncio.Lock()
         # (prefix, timestamp, text) -> (message_id, expires_at, is_flood)
         self._recent_dm_sends: dict[tuple[str, int, str], tuple[int, float, bool]] = {}
+        # Newest RESP_CODE_SENT the radio produced, with the monotonic time it
+        # arrived, so an app's send can be answered with the radio's own frame.
+        self._last_msg_sent: tuple[float, bytes] | None = None
+        self._recent_commands: deque[dict[str, Any]] = deque(maxlen=MAX_RECENT_COMMANDS)
         self.host = settings.virtual_node_host
         self.port = settings.virtual_node_port
         self.read_only = settings.virtual_node_read_only
@@ -319,6 +348,12 @@ class VirtualNodeServer:
             "local_commands": self.local_commands,
             "cached_commands": self.cached_commands,
             "forwarded_commands": self.forwarded_commands,
+            "recent_commands": list(self._recent_commands),
+            "channel_slots": [
+                {"index": index, "key": key}
+                for index, key in enumerate(self._channel_slots)
+                if key is not None
+            ],
         }
 
     async def start(self, *, host: str | None = None, port: int | None = None) -> None:
@@ -434,16 +469,75 @@ class VirtualNodeServer:
             return
         code = command[0]
         session.commands_served += 1
+        started = time.monotonic()
+        detail = ""
         try:
             responses = await self.handle_command(session, code, command[1:])
         except VirtualNodeError as exc:
-            logger.info("Virtual node refused command %d from %s: %s", code, session.peer, exc)
+            logger.warning(
+                "Virtual node refused %s from %s: %s", command_name(code), session.peer, exc
+            )
+            detail = str(exc)
             responses = [protocol.encode_error(exc.code)]
-        except Exception:
-            logger.exception("Virtual node failed to serve command %d from %s", code, session.peer)
+        except Exception as exc:
+            logger.exception(
+                "Virtual node failed to serve %s from %s", command_name(code), session.peer
+            )
+            detail = f"{type(exc).__name__}: {exc}"[:200]
             responses = [protocol.encode_error(ErrorCode.BAD_STATE)]
+        else:
+            # A handler can answer with an error frame of its own (a forwarded
+            # command the radio rejected, a malformed payload); say so.
+            first = responses[0] if responses else b""
+            if len(first) >= 2 and first[0] == ERR:
+                detail = "refused by the radio or the node"
+                logger.info(
+                    "Virtual node answered %s from %s with %s",
+                    command_name(code),
+                    session.peer,
+                    error_name(first[1]),
+                )
+        self._note_command(session, code, responses, detail, started)
         for frame in responses:
             await session.send(frame)
+
+    def _note_command(
+        self,
+        session: ClientSession,
+        command_code: int,
+        responses: list[bytes],
+        detail: str,
+        started: float,
+    ) -> None:
+        """Record one command and what it was answered with, for the settings page.
+
+        A companion app reports "could not send" and nothing more, and the app
+        is the one piece of this we cannot see into: the question is usually
+        whether it even sent the command, and what it got back. That answer
+        used to exist only in the server log -- the wrong place to look when
+        the phone in your hand will not send -- so the last commands are kept
+        here and shown in Settings > Virtual Node.
+        """
+        first = responses[0] if responses else b""
+        code = first[0] if first else None
+        if code is None:
+            result = "no reply"
+        elif code == ERR:
+            result = error_name(first[1]) if len(first) >= 2 else "ERROR"
+        else:
+            result = response_name(code)
+        self._recent_commands.append(
+            {
+                "at": int(time.time()),
+                "peer": session.peer,
+                "app_name": session.app_name,
+                "command": command_name(command_code),
+                "result": result,
+                "failed": code == ERR,
+                "detail": detail,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            }
+        )
 
     # ------------------------------------------------------------------ dispatch
 
@@ -769,10 +863,45 @@ class VirtualNodeServer:
 
     # ------------------------------------------------------------------ channels
 
+    def _pin_public_channel_slot(self, known: set[str]) -> None:
+        """Put the public channel in slot 0, the way the firmware always does.
+
+        Every MeshCore client treats channel index 0 as the public channel --
+        the app sends there without ever having read the slot back. Assigning
+        slots by sorted key alone gave slot 0 to whichever channel happened to
+        sort first (a ``#hashtag`` channel roughly half the time), so a message
+        sent on Public from an app arrived on the wrong channel, or on an empty
+        slot, which the node refused outright.
+        """
+        if PUBLIC_CHANNEL_KEY not in known:
+            return
+        slots = self._channel_slots
+        if not slots:
+            slots.append(PUBLIC_CHANNEL_KEY)
+            return
+        if slots[0] == PUBLIC_CHANNEL_KEY:
+            return
+        displaced = slots[0]
+        current = slots.index(PUBLIC_CHANNEL_KEY) if PUBLIC_CHANNEL_KEY in slots else None
+        slots[0] = PUBLIC_CHANNEL_KEY
+        if current is not None:
+            slots[current] = displaced
+        elif displaced is not None:
+            if None in slots:
+                slots[slots.index(None)] = displaced
+            elif len(slots) < MAX_VIRTUAL_CHANNEL_SLOTS:
+                slots.append(displaced)
+            else:
+                logger.warning(
+                    "Virtual node channel table full; %s dropped to seat the public channel",
+                    displaced,
+                )
+
     async def _ensure_channel_slots(self) -> list[str | None]:
         """Reconcile the virtual slot table with the channel store.
 
-        Slots are assigned on first sight and kept for the life of the process
+        Slot 0 is always the public channel (see :meth:`_pin_public_channel_slot`).
+        The rest are assigned on first sight and kept for the life of the process
         so an app's channel index stays meaningful between its requests; a
         deleted channel leaves a blank slot, reused only once the table is full.
         """
@@ -782,6 +911,7 @@ class VirtualNodeServer:
             for index, key in enumerate(self._channel_slots):
                 if key is not None and key not in known:
                     self._channel_slots[index] = None
+            self._pin_public_channel_slot(known)
             present = {k for k in self._channel_slots if k is not None}
             for key in sorted(known - present):
                 if len(self._channel_slots) < MAX_VIRTUAL_CHANNEL_SLOTS:
@@ -892,6 +1022,7 @@ class VirtualNodeServer:
             raise VirtualNodeError(ErrorCode.NOT_FOUND, "unknown destination prefix")
 
         self.forwarded_commands += 1
+        started = time.monotonic()
         try:
             message = await send_direct_message_to_contact(
                 contact=contact,
@@ -912,9 +1043,25 @@ class VirtualNodeServer:
             time.time() + RECENT_DM_SEND_TTL_SECONDS,
             is_flood,
         )
-        return self._msg_sent_for_message(message.id, is_flood=is_flood)
+        return self._msg_sent_for_message(message.id, is_flood=is_flood, since=started)
 
-    def _msg_sent_for_message(self, message_id: int, *, is_flood: bool) -> bytes:
+    def _msg_sent_for_message(
+        self, message_id: int, *, is_flood: bool, since: float | None = None
+    ) -> bytes:
+        """The ``RESP_CODE_SENT`` answering an app's send.
+
+        Prefer the frame the radio itself produced during this send (captured
+        by the frame tap): it carries the true expected-ACK code and the
+        firmware's suggested timeout, which is what lets the app move the
+        message from "sending" to "delivered" when the ACK push arrives. The
+        radio lock serializes sends, so the newest one seen after ``since`` is
+        ours. Falling back to the ACK tracker keeps a synthesized answer for
+        the retry path and for firmware that returns no ACK code at all.
+        """
+        if since is not None and self._last_msg_sent is not None:
+            seen_at, frame = self._last_msg_sent
+            if seen_at >= since:
+                return frame
         code, timeout_ms = _pending_ack_for_message(message_id)
         return protocol.encode_msg_sent(
             is_flood=is_flood,
@@ -1132,6 +1279,8 @@ class VirtualNodeServer:
             self._self_info_frame = bytes(frame)
         elif code == _RESP.DEVICE_INFO.value:
             self._device_info_frame = bytes(frame)
+        elif code == MSG_SENT:
+            self._last_msg_sent = (time.monotonic(), bytes(frame))
 
         pending = self._pending_forward
         if pending is not None and not pending.future.done() and code < 0x80:

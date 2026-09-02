@@ -49,7 +49,7 @@ Every host command is one of:
 |---|---|---|
 | **Local read** | `APP_START`, `DEVICE_QUERY`, `GET_CONTACTS`, `GET_CONTACT_BY_KEY`, `GET_DEVICE_TIME`, `SYNC_NEXT_MESSAGE`, `GET_CHANNEL`, `GET_BATT_AND_STORAGE` (while the 60 s stats sample is fresh) | Answered from RemoteTerm state. No radio I/O. |
 | **Local write** | `ADD_UPDATE_CONTACT`, `RESET_PATH`, `REMOVE_CONTACT`, `SET_CHANNEL`, `SET_DEVICE_TIME` (acknowledged, ignored) | Written to the contact/channel store and broadcast to the web UI; the radio is touched only best-effort (`RESET_PATH`, `REMOVE_CONTACT` when the contact is loaded). |
-| **Sends** | `SEND_TXT_MSG` (txt_type 0), `SEND_CHANNEL_TXT_MSG` | Routed through `services/message_send.py`, the same workflow as the web UI: contact staged on the radio, row stored, `message` broadcast, ACK tracking and retries. The app's own DM retries (attempt > 0, same dest/timestamp/text) are answered from the pending ACK code instead of sending again. |
+| **Sends** | `SEND_TXT_MSG` (txt_type 0), `SEND_CHANNEL_TXT_MSG` | Routed through `services/message_send.py`, the same workflow as the web UI: contact staged on the radio, row stored, `message` broadcast, ACK tracking and retries. A DM is answered with **the radio's own `RESP_CODE_SENT` frame**, captured by the frame tap during the send (`_last_msg_sent`) — it carries the true expected-ACK code and firmware timeout, which is what lets the app move the message from "sending" to "delivered" when the ACK push relays through; the ACK tracker is only a fallback. Channel sends answer `OK`, matching firmware and `meshcore_py.send_chan_msg`. The app's own DM retries (attempt > 0, same dest/timestamp/text) are answered from the pending ACK code instead of sending again. |
 | **Cached query** | `GET_CUSTOM_VARS`, `GET_ADVERT_PATH`, `GET_TUNING_PARAMS`, `GET_STATS`, `GET_AUTOADD_CONFIG`, `GET_ALLOWED_REPEAT_FREQ`, `GET_DEFAULT_FLOOD_SCOPE`, stale `GET_BATT_AND_STORAGE` | Forwarded once, then served from a 30 s cache keyed by the full command bytes. The cache is re-checked *after* the radio lock is acquired and written before it is released, so N apps asking the same thing at the same moment cost one round trip. Any admin write clears the cache. |
 | **Forwarded** | `SEND_SELF_ADVERT`, `SEND_LOGIN`, `SEND_STATUS_REQ`, `LOGOUT`, `BINARY_REQ`, `PATH_DISCOVERY`, `SEND_ANON_REQ`, `SEND_TELEMETRY_REQ`, `SEND_TRACE_PATH`, `SEND_RAW_DATA`, `SEND_CONTROL_DATA`, `SHARE_CONTACT`, `EXPORT_CONTACT`, CLI text (`SEND_TXT_MSG` txt_type 1/2), all `SET_*` config writes, `SIGN_*`, `HAS_CONNECTION`, anything unknown | Raw bytes sent to the radio under the shared `radio_operation` lock; the reply is the first frame whose code is in the command's expected set. Contact-addressed commands re-stage the contact on the radio first (RemoteTerm offloads contacts, so the radio may not have it). Identity-changing writes trigger a `SELF_INFO`/`DEVICE_INFO` refresh and update `radio_manager.path_hash_mode` / `repeat_enabled`. |
 | **Refused** | `REBOOT`, `FACTORY_RESET`, `IMPORT_PRIVATE_KEY`; `EXPORT_PRIVATE_KEY` unless `MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT=true` | `ERR_CODE_UNSUPPORTED_CMD` / `RESP_CODE_DISABLED`. They would take the radio away from RemoteTerm. |
@@ -78,6 +78,14 @@ refuses every transmit and local-write command; apps become viewers.
 - `POST /api/virtual-node/connections/{peer}/disconnect` — close one app's
   socket (`VirtualNodeServer.disconnect_peer`); its cursor is persisted on the
   way out like any disconnect.
+
+The overview also carries the **channel slot map** and a trace of the **last 60
+commands** (`_note_command`: command name, the response frame or `ERR_CODE_*`
+it was answered with, reason on failure, app, duration). The app is the one
+piece of this we cannot see into, and it reports "could not send" and nothing
+more — so the questions are whether it sent the command at all and what came
+back, and that answer used to exist only in the server log. Successful commands
+are traced too for exactly that reason; the settings page filters to failures.
 
 The switch itself is `PATCH /api/settings` with
 `virtual_node_allow_admin_commands`. The frontend section is
@@ -120,7 +128,17 @@ Apps address channels by a 1-byte slot index, but the server keeps far more
 channels than the radio has slots. `_channel_slots` is a process-lifetime
 table: channels get a slot on first sight (sorted by key on each reconcile),
 keep it for the life of the process, and a deleted channel leaves a blank
-slot that is reused only once the table (255) is full. `DEVICE_INFO` is
+slot that is reused only once the table (255) is full.
+
+**Slot 0 is always the public channel** (`_pin_public_channel_slot`), the way
+firmware lays it out. Clients send on the public channel as index 0 without
+ever reading the slot back, so assigning by sorted key alone gave slot 0 to
+whichever channel sorted first — a `#hashtag` channel about half the time,
+including the `#remoteterm` channel a default install creates — and a message
+sent on Public from an app went to the wrong channel or to an empty slot,
+which the node refused outright. The pin also survives an app clearing slot 0
+with `SET_CHANNEL`; it is re-seated on the next reconcile, and any occupant it
+displaces keeps a slot rather than falling off the table. `DEVICE_INFO` is
 rewritten to advertise `max(40, radio max_channels, slots used)` so apps keep
 probing new slots. `SET_CHANNEL` binds a slot and upserts the channel;
 clearing a slot (blank name, zero secret) only unbinds it — the channel and

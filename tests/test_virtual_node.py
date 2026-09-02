@@ -11,8 +11,9 @@ from meshcore.events import Event, EventType
 from meshcore.packets import CommandType, PacketType
 from meshcore.reader import MessageReader
 
+from app.channel_constants import PUBLIC_CHANNEL_KEY
 from app.models import ContactUpsert
-from app.repository import ChannelRepository, ContactRepository
+from app.repository import ChannelRepository, ContactRepository, MessageRepository
 from app.services import dm_ack_tracker
 from app.virtual_node import protocol
 from app.virtual_node.protocol import ErrorCode
@@ -289,6 +290,23 @@ class FakeMeshCore:
         self.commands.reset_path = AsyncMock(return_value=Event(EventType.OK, {}))
         self.commands.remove_contact = AsyncMock(return_value=Event(EventType.OK, {}))
         self.commands.send_appstart = AsyncMock(return_value=Event(EventType.OK, {}))
+        self.commands.set_channel = AsyncMock(return_value=Event(EventType.OK, {}))
+        self.sent_direct: list[tuple] = []
+        self.sent_channel: list[tuple] = []
+
+        async def _send_msg(dst=None, msg=None, timestamp=None, **_kw):
+            self.sent_direct.append((dst, msg, timestamp))
+            return Event(
+                EventType.MSG_SENT,
+                {"type": 0, "expected_ack": b"\x01\x02\x03\x04", "suggested_timeout": 3000},
+            )
+
+        async def _send_chan_msg(chan=None, msg=None, timestamp=None, **_kw):
+            self.sent_channel.append((chan, msg, timestamp))
+            return Event(EventType.OK, {})
+
+        self.commands.send_msg = AsyncMock(side_effect=_send_msg)
+        self.commands.send_chan_msg = AsyncMock(side_effect=_send_chan_msg)
         self.connection_manager = MagicMock()
         self.connection_manager.send = AsyncMock(side_effect=self._send)
         self._contacts: dict[str, dict] = {}
@@ -316,6 +334,15 @@ class FakeRadio:
         self.operations: list[str] = []
         # The real RadioManager serializes every operation; the proxy relies on that.
         self._lock = asyncio.Lock()
+        # Everything not stubbed above (channel slot cache, capability flags) comes
+        # from a real RadioManager, so the send services exercise their real logic.
+        from app.radio import RadioManager
+
+        self._manager = RadioManager()
+        self._manager.max_channels = 8
+
+    def __getattr__(self, name):
+        return getattr(self._manager, name)
 
     @asynccontextmanager
     async def radio_operation(self, name: str, **_kwargs):
@@ -576,14 +603,26 @@ class TestChannels:
     @pytest.mark.asyncio
     async def test_clearing_a_slot_keeps_the_channel_on_the_server(self, proxy):
         server, radio, connect = proxy
-        await ChannelRepository.upsert(CHANNEL_KEY, "#test", is_hashtag=True)
+        other_key = ("dd" * 16).upper()
+        await ChannelRepository.upsert(other_key, "#test", is_hashtag=True)
         client = await connect()
-        slot = await server._slot_for_channel(CHANNEL_KEY)
+        slot = await server._slot_for_channel(other_key)
         clear = bytes([slot]) + bytes(32) + bytes(16)
         assert await client.command(b"\x20" + clear) == protocol.encode_ok()
-        assert await ChannelRepository.get_by_key(CHANNEL_KEY) is not None
+        assert await ChannelRepository.get_by_key(other_key) is not None
         blank = await parse_with_library(await client.command(b"\x1f" + bytes([slot])))
         assert blank[0].payload["channel_name"] == ""
+
+    @pytest.mark.asyncio
+    async def test_clearing_slot_zero_cannot_unseat_the_public_channel(self, proxy):
+        """Slot 0 is the public channel by definition; sends depend on it."""
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        client = await connect()
+        clear = bytes([0]) + bytes(32) + bytes(16)
+        assert await client.command(b"\x20" + clear) == protocol.encode_ok()
+        back = await parse_with_library(await client.command(b"\x1f\x00"))
+        assert back[0].payload["channel_name"] == "Public"
 
 
 class TestMessageQueue:
@@ -1271,6 +1310,129 @@ class TestRealLibraryClient:
         finally:
             await mc.disconnect()
         assert radio.meshcore.sent == [], "the whole session was answered without the radio"
+
+
+class TestRealSendPath:
+    """The send services for real, over TCP -- no mocked send workflow."""
+
+    @pytest.mark.asyncio
+    async def test_dm_send_answers_with_the_radios_own_sent_frame(self, proxy):
+        server, radio, connect = proxy
+        await ContactRepository.upsert(ContactUpsert(public_key=KEY_A, name="Alice", type=1))
+        client = await connect()
+        await client.command(APP_START_AS["phone"])
+
+        payload = (
+            b"\x02\x00\x00"
+            + (1_700_000_000).to_bytes(4, "little")
+            + bytes.fromhex(KEY_A[:12])
+            + b"hello from the app"
+        )
+        frame = await client.command(payload)
+
+        events = await parse_with_library(frame)
+        assert events[0].type == EventType.MSG_SENT
+        # The app needs the radio's real ACK code and timeout, or the message
+        # sits at "sending" forever waiting on an ACK that never matches.
+        assert events[0].payload["expected_ack"] == b"\x01\x02\x03\x04"
+        assert events[0].payload["suggested_timeout"] == 3000
+        assert radio.meshcore.sent_direct[0][1] == "hello from the app"
+        stored = await MessageRepository.get_all(limit=5)
+        assert [(m.text, m.outgoing) for m in stored] == [("hello from the app", True)]
+
+    @pytest.mark.asyncio
+    async def test_public_channel_is_always_slot_zero(self, proxy):
+        """Regression: clients send on the public channel as index 0, always.
+
+        Slots used to be handed out by sorted key, so a channel whose key sorts
+        below the public one took slot 0 and a message sent on Public from an
+        app landed on the wrong channel (or on nothing, and was refused).
+        """
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        # Sorts before the public key, and used to win slot 0.
+        await ChannelRepository.upsert("0011" + "22" * 14, "#early")
+        client = await connect()
+        await client.command(APP_START_AS["phone"])
+
+        slots = await server._ensure_channel_slots()
+        assert slots[0] == PUBLIC_CHANNEL_KEY
+        info = await parse_with_library(await client.command(b"\x1f\x00"))
+        assert info[0].payload["channel_name"] == "Public"
+
+        payload = b"\x03\x00\x00" + (1_700_000_000).to_bytes(4, "little") + b"hello channel"
+        assert await client.command(payload) == protocol.encode_ok()
+        assert radio.meshcore.sent_channel[0][1] == "hello channel"
+        stored = await MessageRepository.get_all(limit=5)
+        assert stored[0].conversation_key == PUBLIC_CHANNEL_KEY
+        assert stored[0].text == "Proxy: hello channel"
+
+    @pytest.mark.asyncio
+    async def test_public_channel_reclaims_slot_zero_from_an_earlier_occupant(self, proxy):
+        server, radio, connect = proxy
+        await ChannelRepository.upsert("0011" + "22" * 14, "#early")
+        first = await server._ensure_channel_slots()
+        assert first[0] == "0011" + "22" * 14
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        after = await server._ensure_channel_slots()
+        assert after[0] == PUBLIC_CHANNEL_KEY
+        # The displaced channel keeps a slot rather than falling off the table.
+        assert ("0011" + "22" * 14) in after
+
+
+class TestRefusalDiagnostics:
+    """An app only says "could not send"; the node has to say why."""
+
+    @pytest.mark.asyncio
+    async def test_every_command_is_traced_with_what_it_was_answered(self, proxy):
+        from app.routers.virtual_node import get_virtual_node_overview
+
+        server, radio, connect = proxy
+        client = await connect()
+        await client.command(APP_START_AS["phone"])
+        # Slot 39 holds no channel.
+        payload = b"\x03\x00\x27" + (1_700_000_000).to_bytes(4, "little") + b"hi"
+        assert await client.command(payload) == protocol.encode_error(ErrorCode.NOT_FOUND)
+
+        with patch("app.routers.virtual_node.virtual_node", server):
+            overview = await get_virtual_node_overview()
+
+        traced = {entry.command: entry for entry in overview.recent_commands}
+        # The successful command is traced too: the first question is always
+        # whether the app sent anything at all.
+        assert traced["APP_START"].result == "SELF_INFO"
+        assert traced["APP_START"].failed is False
+        send = traced["SEND_CHANNEL_TXT_MSG"]
+        assert send.failed is True
+        assert send.result == "NOT_FOUND"
+        assert "no channel in that slot" in send.detail
+        assert send.app_name == "MeshCore"
+
+    @pytest.mark.asyncio
+    async def test_a_crashing_handler_is_traced_with_the_exception(self, proxy):
+        from app.routers.virtual_node import get_virtual_node_overview
+
+        server, radio, connect = proxy
+        client = await connect()
+        with patch.object(VirtualNodeServer, "_contacts", side_effect=RuntimeError("boom")):
+            assert await client.command(b"\x04") == protocol.encode_error(ErrorCode.BAD_STATE)
+        with patch("app.routers.virtual_node.virtual_node", server):
+            overview = await get_virtual_node_overview()
+        entry = next(e for e in overview.recent_commands if e.command == "GET_CONTACTS")
+        assert entry.failed is True
+        assert "RuntimeError: boom" in entry.detail
+
+    @pytest.mark.asyncio
+    async def test_overview_reports_the_channel_slot_map(self, proxy):
+        from app.routers.virtual_node import get_virtual_node_overview
+
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        await server._ensure_channel_slots()
+        with patch("app.routers.virtual_node.virtual_node", server):
+            overview = await get_virtual_node_overview()
+        assert overview.channel_slots[0].index == 0
+        assert overview.channel_slots[0].name == "Public"
 
 
 class TestStatusSurface:

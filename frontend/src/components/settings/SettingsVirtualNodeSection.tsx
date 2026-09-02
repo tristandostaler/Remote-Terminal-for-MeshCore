@@ -25,6 +25,7 @@ export function SettingsVirtualNodeSection({
   const [overview, setOverview] = useState<VirtualNodeOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [failuresOnly, setFailuresOnly] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -229,6 +230,93 @@ export function SettingsVirtualNodeSection({
           <p className="text-sm text-muted-foreground">No app is connected right now.</p>
         )}
       </div>
+
+      {/* Channel slots */}
+      {overview && (overview.channel_slots?.length ?? 0) > 0 ? (
+        <div className="space-y-2">
+          <h4 className="font-medium">Channel slots</h4>
+          <p className="text-[0.8125rem] text-muted-foreground">
+            Apps address channels by slot number, and every MeshCore client treats slot 0 as the
+            public channel. If a channel is missing from an app, or a message lands in the wrong
+            one, compare this against the channel list in the app.
+          </p>
+          <div className="overflow-x-auto rounded-md border border-input">
+            <table className="w-full text-sm" data-testid="virtual-node-slots">
+              <thead className="text-left text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Slot</th>
+                  <th className="px-3 py-2 font-medium">Channel</th>
+                </tr>
+              </thead>
+              <tbody>
+                {overview.channel_slots?.map((slot) => (
+                  <tr key={slot.index} className="border-t border-border/60">
+                    <td className="px-3 py-2">{slot.index}</td>
+                    <td className="px-3 py-2">{slot.name ?? slot.key}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Command trace */}
+      {overview && (overview.recent_commands?.length ?? 0) > 0 ? (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <h4 className="font-medium">Recent activity</h4>
+            <label className="flex items-center gap-2 text-[0.8125rem] text-muted-foreground">
+              <Checkbox
+                id="virtual-node-failures-only"
+                checked={failuresOnly}
+                onCheckedChange={(checked) => setFailuresOnly(checked === true)}
+              />
+              Failures only
+            </label>
+          </div>
+          <p className="text-[0.8125rem] text-muted-foreground">
+            Every command a connected app sent and what it was answered with. An app that will not
+            send usually says only that — this shows whether it sent the command at all, and what it
+            got back.
+          </p>
+          <div className="overflow-x-auto rounded-md border border-input">
+            <table className="w-full text-sm" data-testid="virtual-node-activity">
+              <thead className="text-left text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">When</th>
+                  <th className="px-3 py-2 font-medium">App</th>
+                  <th className="px-3 py-2 font-medium">Command</th>
+                  <th className="px-3 py-2 font-medium">Answer</th>
+                  <th className="px-3 py-2 font-medium">Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {overview.recent_commands
+                  ?.filter((entry) => !failuresOnly || entry.failed)
+                  .slice()
+                  .reverse()
+                  .map((entry, index) => (
+                    <tr key={`${entry.at}-${index}`} className="border-t border-border/60">
+                      <td className="px-3 py-2 whitespace-nowrap">{formatTime(entry.at)}</td>
+                      <td className="px-3 py-2">{entry.app_name || entry.peer}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{entry.command}</td>
+                      <td
+                        className={cn(
+                          'px-3 py-2 font-mono text-xs',
+                          entry.failed ? 'text-destructive' : null
+                        )}
+                      >
+                        {entry.result}
+                      </td>
+                      <td className="px-3 py-2 text-muted-foreground">{entry.detail}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
 
       {/* Remembered apps */}
       <div className="space-y-2">
