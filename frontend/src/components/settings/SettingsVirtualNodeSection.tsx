@@ -163,11 +163,13 @@ export function SettingsVirtualNodeSection({
             Allow connected apps to change radio settings
           </Label>
           <p className="text-[0.8125rem] text-muted-foreground">
-            Off by default. When off, apps can chat, browse contacts and channels, log in to
-            repeaters and request telemetry, but any command that changes the radio itself (name,
-            location, frequency, TX power, tuning, flood scope, path hash mode, signing, contact
-            import) is refused. Turn it on to configure the radio from a phone; it applies to every
-            connected app at once.
+            Off by default. When off, apps can chat, browse contacts and channels, add contacts, log
+            in to repeaters and request telemetry, but a command that reconfigures the radio itself
+            (name, location, frequency, TX power, tuning, device PIN, telemetry modes, custom
+            variables, default flood scope, signing) is refused. Turn it on to configure the radio
+            from a phone; it applies to every connected app at once. Per-send parameters an app sets
+            while sending — the flood scope and path hash mode for that message — are not covered by
+            this and always go through, because refusing them stops the app sending at all.
             {overview?.read_only ? (
               <>
                 {' '}

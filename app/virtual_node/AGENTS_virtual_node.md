@@ -56,9 +56,21 @@ Every host command is one of:
 
 **Admin commands are off by default.** Every `ADMIN_COMMANDS` entry (name,
 location, radio params, TX power, tuning, other params, device PIN, custom
-vars, flood scope, autoadd, path hash mode, default flood scope, signing,
-contact import) is refused with `ERR_CODE_UNSUPPORTED_CMD` unless the app
-setting `virtual_node_allow_admin_commands` (migration 085) is on. It is an
+vars, autoadd, default flood scope, signing) is refused with
+`ERR_CODE_UNSUPPORTED_CMD` unless the app setting
+`virtual_node_allow_admin_commands` (migration 085) is on.
+
+`SEND_SHAPING_COMMANDS` — `SET_FLOOD_SCOPE` and `SET_PATH_HASH_MODE` — are
+deliberately **not** admin commands, even though they write device state. They
+are how a client says "send the next one this way": RemoteTerm's own channel
+send sets both around every send and restores them afterwards
+(`send_channel_message_with_effective_scope`), and MeshCore Open sends
+`SET_FLOOD_SCOPE` immediately before a channel message. Classing them as
+configuration put them behind the switch, and refusing one made the app
+abandon the send — the message never went out, and the app reported only that
+it could not send, with the reason nowhere but the server log. `IMPORT_CONTACT`
+is likewise contact management rather than radio configuration, and sits with
+the other contact writes. All of them are still refused in read-only mode. It is an
 *app* setting rather than an env var so the operator can flip it from
 Settings → Virtual Node while apps are connected; the server reads it per
 command (`admin_commands_allowed`), so a change takes effect on the next

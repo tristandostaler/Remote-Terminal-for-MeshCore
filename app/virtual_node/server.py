@@ -95,13 +95,29 @@ TRANSMIT_COMMANDS = {
     _CMD.SEND_CONTROL_DATA.value,
     _CMD.SEND_ANON_REQ.value,
 }
-# Commands that change the radio's configuration or identity.
+# Parameters for the transmission an app is about to make, not configuration.
+#
+# Both of these are how a client says "send the next one this way": RemoteTerm's
+# own channel send sets the flood scope and the path hash mode around every
+# send and restores them afterwards (`send_channel_message_with_effective_scope`),
+# and MeshCore Open does the same before a channel message. Classing them as
+# radio configuration put them behind the admin switch, where refusing
+# SET_FLOOD_SCOPE made the app abandon the send -- the message never went out
+# and the app only reported that it could not send. They are refused in
+# read-only mode, with everything else that puts a packet on the air.
+SEND_SHAPING_COMMANDS = {
+    _CMD.SET_FLOOD_SCOPE.value,
+    _CMD.SET_PATH_HASH_MODE.value,
+}
+# Commands that change the radio's configuration or identity. The admin switch
+# guards these and only these: what an operator means by "let the app configure
+# my radio" is the node's name, where it says it is, and how it transmits --
+# not the per-send parameters above, and not adding a contact.
 ADMIN_COMMANDS = {
     _CMD.SET_ADVERT_NAME.value,
     _CMD.SET_RADIO_PARAMS.value,
     _CMD.SET_RADIO_TX_POWER.value,
     _CMD.SET_ADVERT_LATLON.value,
-    _CMD.IMPORT_CONTACT.value,
     _CMD.SET_TUNING_PARAMS.value,
     _CMD.SIGN_START.value,
     _CMD.SIGN_DATA.value,
@@ -109,9 +125,7 @@ ADMIN_COMMANDS = {
     _CMD.SET_DEVICE_PIN.value,
     _CMD.SET_OTHER_PARAMS.value,
     _CMD.SET_CUSTOM_VAR.value,
-    _CMD.SET_FLOOD_SCOPE.value,
     _CMD.SET_AUTOADD_CONFIG.value,
-    _CMD.SET_PATH_HASH_MODE.value,
     _CMD.SET_DEFAULT_FLOOD_SCOPE.value,
 }
 # Config writes after which our cached identity frames are stale.
@@ -123,12 +137,15 @@ IDENTITY_CHANGING_COMMANDS = {
     _CMD.SET_OTHER_PARAMS.value,
     _CMD.SET_PATH_HASH_MODE.value,
 }
-# Commands that mutate RemoteTerm's own contact/channel store.
+# Commands that write contact or channel state -- ours, or the radio's in the
+# case of IMPORT_CONTACT (adding a contact from a shared card is contact
+# management, the same as ADD_UPDATE_CONTACT, not radio configuration).
 LOCAL_WRITE_COMMANDS = {
     _CMD.ADD_UPDATE_CONTACT.value,
     _CMD.RESET_PATH.value,
     _CMD.REMOVE_CONTACT.value,
     _CMD.SET_CHANNEL.value,
+    _CMD.IMPORT_CONTACT.value,
 }
 # Never proxied: they would take the radio away from RemoteTerm itself.
 REFUSED_COMMANDS = {
@@ -548,7 +565,10 @@ class VirtualNodeServer:
         if code in REFUSED_COMMANDS:
             raise VirtualNodeError(ErrorCode.UNSUPPORTED_CMD, "refused by virtual node")
         if self.read_only and (
-            code in TRANSMIT_COMMANDS or code in ADMIN_COMMANDS or code in LOCAL_WRITE_COMMANDS
+            code in TRANSMIT_COMMANDS
+            or code in SEND_SHAPING_COMMANDS
+            or code in ADMIN_COMMANDS
+            or code in LOCAL_WRITE_COMMANDS
         ):
             raise VirtualNodeError(ErrorCode.UNSUPPORTED_CMD, "virtual node is read-only")
         if code in ADMIN_COMMANDS and not await self.admin_commands_allowed():

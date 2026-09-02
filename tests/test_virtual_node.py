@@ -884,6 +884,48 @@ class TestAdminCommandGate:
         assert len(radio.meshcore.sent) == 1
 
     @pytest.mark.asyncio
+    async def test_send_shaping_commands_are_not_radio_configuration(self, proxy):
+        """Regression: SET_FLOOD_SCOPE is how an app scopes the send it is making.
+
+        MeshCore Open sends it immediately before a channel message, exactly as
+        RemoteTerm's own channel send does. Gating it behind the admin switch
+        made the app abandon the send: the message never went out and the app
+        reported only that it could not send.
+        """
+        server, radio, connect = proxy
+        radio.meshcore.responses[CMD.SET_FLOOD_SCOPE.value] = protocol.encode_ok()
+        radio.meshcore.responses[CMD.SET_PATH_HASH_MODE.value] = protocol.encode_ok()
+        radio.meshcore.responses[CMD.IMPORT_CONTACT.value] = protocol.encode_ok()
+        client = await connect()
+        assert not (await server.admin_commands_allowed()), "admin stays off for this test"
+
+        scope = bytes([CMD.SET_FLOOD_SCOPE.value, 0]) + bytes(16)
+        assert await client.command(scope) == protocol.encode_ok()
+        assert await client.command(bytes([CMD.SET_PATH_HASH_MODE.value, 1])) == (
+            protocol.encode_ok()
+        )
+        assert await client.command(bytes([CMD.IMPORT_CONTACT.value]) + bytes(32)) == (
+            protocol.encode_ok()
+        )
+        # Genuine radio configuration is still refused.
+        assert await client.command(b"\x08NewName") == protocol.encode_error(
+            ErrorCode.UNSUPPORTED_CMD
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_only_still_refuses_send_shaping(self, proxy):
+        server, radio, connect = proxy
+        server.read_only = True
+        client = await connect()
+        for payload in (
+            bytes([CMD.SET_FLOOD_SCOPE.value, 0]) + bytes(16),
+            bytes([CMD.SET_PATH_HASH_MODE.value, 1]),
+            bytes([CMD.IMPORT_CONTACT.value]) + bytes(32),
+        ):
+            assert await client.command(payload) == protocol.encode_error(ErrorCode.UNSUPPORTED_CMD)
+        assert radio.meshcore.sent == []
+
+    @pytest.mark.asyncio
     async def test_read_only_wins_over_the_admin_setting(self, proxy):
         from app.repository import AppSettingsRepository
 
