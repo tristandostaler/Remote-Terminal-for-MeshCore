@@ -1371,11 +1371,15 @@ class VirtualNodeServer:
         if slot is None:
             logger.debug("No virtual slot for channel %s; not relaying its data", channel_key[:12])
             return
-        frame = (
-            protocol.rewrite_channel_data_index(source_frame, slot)
-            if source_frame is not None
-            else protocol.encode_channel_data_recv(slot, data_type, blob)
-        )
+        app_blob = _relabel_if_ours(data_type, blob)
+        if source_frame is not None:
+            frame = (
+                protocol.rewrite_channel_data_index(source_frame, slot)
+                if app_blob is blob
+                else protocol.rewrite_channel_data(source_frame, channel_index=slot, blob=app_blob)
+            )
+        else:
+            frame = protocol.encode_channel_data_recv(slot, data_type, app_blob)
         waiting = protocol.encode_push_msg_waiting()
         for session in list(self._clients):
             if session is exclude:
@@ -1676,6 +1680,39 @@ class VirtualNodeServer:
                 return None
             return protocol.encode_channel_message(message, slot)
         return None
+
+
+def _relabel_if_ours(data_type: int, blob: bytes) -> bytes:
+    """The copy of an image chunk to hand an app, aliased when we sent it.
+
+    Returns ``blob`` itself -- identity, which the caller tests -- when nothing
+    needs changing, so an inbound frame can still be relayed by rewriting its
+    index in place rather than being rebuilt.
+
+    An app on this node believes its public key is the radio's, because that is
+    what SELF_INFO told it, so MCO Advanced discards every chunk carrying that
+    prefix as its own echo (``ImageChunkStatus.fromSelf``). Both the pictures
+    RemoteTerm sends and the ones one app sends to the others are exactly that,
+    so without an alias neither ever appears. See
+    :data:`app.imaging.aeic.channel_data.LOCAL_ALIAS_PREFIX_XOR`.
+    """
+    from app.imaging.aeic.channel_data import (
+        DATA_TYPE_AEIC_IMAGE,
+        aliased_sender_prefix,
+        parse_chunk_blob,
+        relabel_chunk_sender,
+    )
+    from app.imaging.aeic.channel_data_ingest import self_sender_prefix
+
+    if data_type != DATA_TYPE_AEIC_IMAGE:
+        return blob
+    chunk = parse_chunk_blob(blob)
+    if chunk is None:
+        return blob
+    ours = self_sender_prefix()
+    if ours is None or chunk.sender_prefix != ours:
+        return blob
+    return relabel_chunk_sender(blob, aliased_sender_prefix(chunk.sender_prefix))
 
 
 def _pending_ack_for_message(message_id: int) -> tuple[str | None, int]:

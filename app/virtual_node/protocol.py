@@ -509,6 +509,7 @@ def parse_send_channel_data(payload: bytes) -> OutgoingChannelData | None:
 
 
 CHANNEL_DATA_RECV_INDEX_OFFSET = 4
+CHANNEL_DATA_RECV_HEADER_BYTES = 9
 
 
 def encode_channel_data_recv(
@@ -551,6 +552,22 @@ def rewrite_channel_data_index(frame: bytes, channel_index: int) -> bytes:
     out = bytearray(frame)
     out[CHANNEL_DATA_RECV_INDEX_OFFSET] = int(channel_index) & 0xFF
     return bytes(out)
+
+
+def rewrite_channel_data(frame: bytes, *, channel_index: int, blob: bytes) -> bytes:
+    """Re-address an inbound frame 27 AND replace the blob it carries.
+
+    Used when the payload a client should see is not the one the radio delivered
+    -- today only to relabel the sender prefix of a chunk this node sent, which
+    an app would otherwise discard as its own echo. The SNR and hop bytes are
+    kept from the original frame, because those facts are still true.
+    """
+    if len(frame) < CHANNEL_DATA_RECV_HEADER_BYTES:
+        return frame
+    head = bytearray(frame[:CHANNEL_DATA_RECV_HEADER_BYTES])
+    head[CHANNEL_DATA_RECV_INDEX_OFFSET] = int(channel_index) & 0xFF
+    head[CHANNEL_DATA_RECV_HEADER_BYTES - 1] = len(blob) & 0xFF
+    return bytes(head) + bytes(blob)
 
 
 def _snr_byte(snr: float | None) -> bytes:

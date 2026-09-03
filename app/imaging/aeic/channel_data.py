@@ -174,6 +174,42 @@ def sender_prefix_for(public_key: bytes) -> int:
     return ((public_key[0] & 0xFF) << 8) | (public_key[1] & 0xFF)
 
 
+LOCAL_ALIAS_PREFIX_XOR = 0xFFFF
+"""Complement applied to our own sender prefix in the copy handed to apps.
+
+An app on the virtual companion node has no identity of its own: it reads
+SELF_INFO from this server and so believes its public key *is* the radio's. MCO
+Advanced drops any image chunk whose ``senderPrefix`` equals its own -- upstream
+``image_chunk_transport.dart`` returns ``ImageChunkStatus.fromSelf`` before
+reassembly -- which is correct on a real radio, where the only way to hear your
+own prefix is a repeater re-flooding your own packet, and fatal here, where every
+picture RemoteTerm sends carries exactly that prefix.
+
+So the copy relayed to apps is relabelled. The bytes on air keep the true prefix,
+because that is what the mesh must see; only the local copy is aliased, so the
+app treats it as another node's picture and renders it instead of discarding it.
+A complement is used rather than a random value so all chunks of one image agree
+without carrying any state, and so the alias is reversible by eye in a log.
+"""
+
+
+def aliased_sender_prefix(sender_prefix: int) -> int:
+    """The prefix to show an app for a chunk this node sent. See the constant."""
+    return (sender_prefix ^ LOCAL_ALIAS_PREFIX_XOR) & 0xFFFF
+
+
+def relabel_chunk_sender(blob: bytes, sender_prefix: int) -> bytes:
+    """Rewrite a chunk's 2-byte sender prefix, leaving everything else alone.
+
+    Safe for every chunk of an image, parity included: the XOR parity covers the
+    bodies only, and each chunk carries its own header, so relabelling them all
+    keeps recovery working.
+    """
+    if len(blob) < HEADER_BYTES:
+        return blob
+    return bytes(((sender_prefix >> 8) & 0xFF, sender_prefix & 0xFF)) + bytes(blob[2:])
+
+
 def new_image_id() -> int:
     """A per-image uint8. Random rather than sequential so two senders that both
     restart do not immediately collide on 0."""

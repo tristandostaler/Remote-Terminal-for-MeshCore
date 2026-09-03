@@ -129,6 +129,18 @@ binary transport calls it per chunk; an app's radio *is* this radio, so it never
 hears our transmissions). One blob can reach the relay by more than one of these
 routes, so the last few are remembered and relayed once.
 
+**An app believes its identity is this radio's**, because that is what SELF_INFO
+told it — and MCO Advanced drops any image chunk whose 2-byte sender prefix
+matches its own (`ImageChunkStatus.fromSelf` in `image_chunk_transport.dart`).
+That check is right on a real radio, where the only way to hear your own prefix
+is a repeater re-flooding your packet, and fatal here, where *every* picture an
+app is shown — ours, and one app's relayed to the others — carries exactly that
+prefix. So the copy handed to apps is relabelled with the complement of our
+prefix (`aliased_sender_prefix`); the bytes on air keep the true one, because
+that is what the mesh must see. The app shows the picture as another node's,
+which is the only thing the companion protocol can express: it has no concept of
+"a different client on your own node sent this".
+
 Marker rows (`aeib:`, `mediax:`) are **not** mirrored as messages. They stand in
 for media that never crossed the air as text and are a convention between this
 server and its own web UI; sending one to an app puts the literal string

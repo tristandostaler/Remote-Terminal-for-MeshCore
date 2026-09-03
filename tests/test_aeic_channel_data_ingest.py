@@ -335,6 +335,7 @@ class _StoreSpy:
 
         self.rows: list[dict] = []
         self.session_keys: list[str] = []
+        self.sessions: list[dict] = []
         # Decoding off, which is the case that has to show something rather than
         # quietly hold a bitstream nobody can see.
         monkeypatch.setattr(settings, "enable_aeic", False)
@@ -345,6 +346,7 @@ class _StoreSpy:
 
         async def create_session(**kw):
             self.session_keys.append(kw["key"])
+            self.sessions.append(kw)
 
         async def noop(*_a, **_k):
             return None
@@ -368,6 +370,91 @@ class _StoreSpy:
         monkeypatch.setattr(repo.AeicImageRepository, "store_decode_error", noop)
         monkeypatch.setattr(repo.AeicImageRepository, "enforce_cache_limit", noop)
         monkeypatch.setattr(cdi.reassembler, "_completed", {})
+
+
+class TestWhoSentThePicture:
+    """A GRP_DATA image used to arrive with no sender at all.
+
+    The row was written with ``sender_key=None`` and no name, so the client fell
+    all the way through its sender resolution to the conversation key -- and
+    rendered a channel's shared secret as though it were the author. The 2-byte
+    prefix in every chunk header is upstream's identity field and was there the
+    whole time.
+    """
+
+    OURS = "ccdd" + "00" * 30
+
+    def _ours(self, monkeypatch, name: str = "Proxy"):
+        monkeypatch.setattr(channel_data_ingest, "self_node_identity", lambda: (self.OURS, name))
+
+    def _blob_from(self, prefix: int) -> bytes:
+        return build_image_chunks(bytes(120), META, sender_prefix=prefix, img_id=7)[0]
+
+    async def _absorb(self, blob: bytes) -> None:
+        await handle_channel_data(
+            ParsedChannelData(0, 1, 0xFF, DATA_TYPE_AEIC_IMAGE, blob),
+            conversation_key=CHANNEL,
+            broadcast_fn=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_picture_carrying_our_own_prefix_is_stored_as_ours(self, monkeypatch):
+        """Which is every picture an app on the virtual node sends.
+
+        The app's identity is this radio's -- SELF_INFO told it so -- and the
+        blob leaves on our key, exactly like an app's text message, which the
+        send services already store as outgoing.
+        """
+        sent = _StoreSpy(monkeypatch)
+        self._ours(monkeypatch)
+
+        await self._absorb(self._blob_from(0xCCDD))
+
+        assert sent.rows[-1]["outgoing"] is True
+        assert sent.rows[-1]["sender_key"] == self.OURS
+        assert sent.rows[-1]["sender_name"] == "Proxy"
+        assert sent.sessions[-1]["direction"] == "outgoing"
+
+    @pytest.mark.asyncio
+    async def test_a_picture_from_a_known_peer_carries_their_name(self, monkeypatch):
+        import app.repository as repo
+        from app.models import Contact
+
+        sent = _StoreSpy(monkeypatch)
+        self._ours(monkeypatch)
+        peer = Contact(public_key="12ab" + "00" * 30, name="Alice", type=1)
+
+        async def get_by_key_prefix(prefix):
+            assert prefix == "12ab", "the prefix is two bytes of hex, lowercased"
+            return peer
+
+        monkeypatch.setattr(repo.ContactRepository, "get_by_key_prefix", get_by_key_prefix)
+
+        await self._absorb(self._blob_from(0x12AB))
+
+        assert sent.rows[-1]["sender_key"] == peer.public_key
+        assert sent.rows[-1]["sender_name"] == "Alice"
+        assert sent.rows[-1]["outgoing"] is False
+        assert sent.sessions[-1]["direction"] == "incoming"
+
+    @pytest.mark.asyncio
+    async def test_an_unrecognised_prefix_is_left_unattributed(self, monkeypatch):
+        """Two bytes are ambiguous by design; a guess is worse than a blank."""
+        import app.repository as repo
+
+        sent = _StoreSpy(monkeypatch)
+        self._ours(monkeypatch)
+
+        async def none(_prefix):
+            return None
+
+        monkeypatch.setattr(repo.ContactRepository, "get_by_key_prefix", none)
+
+        await self._absorb(self._blob_from(0x4444))
+
+        assert sent.rows[-1]["sender_key"] is None
+        assert sent.rows[-1]["sender_name"] is None
+        assert sent.rows[-1]["outgoing"] is False
 
 
 class TestCompletingOnlyOnce:

@@ -1316,6 +1316,101 @@ class TestChannelDataToApps:
         assert all(f[protocol.CHANNEL_DATA_RECV_INDEX_OFFSET] == slot for f in relayed)
 
     @pytest.mark.asyncio
+    async def test_our_own_prefix_is_aliased_so_the_app_does_not_drop_it(self, proxy, monkeypatch):
+        """An app discards a chunk that claims to come from itself.
+
+        MCO Advanced answers ``ImageChunkStatus.fromSelf`` before reassembly, and
+        an app on this node believes its key is this radio's -- so every picture
+        we relay carries, from its point of view, its own prefix. Correct on a
+        real radio, where hearing your own prefix means a repeater re-flooded
+        your packet; fatal here, where it is the only way a picture ever arrives.
+        """
+        from app.imaging.aeic import channel_data_ingest
+        from app.imaging.aeic.channel_data import build_image_chunks, parse_chunk_blob
+        from app.imaging.aeic.text_transport import AeicStreamMetadata
+
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        monkeypatch.setattr(channel_data_ingest, "self_node_identity", lambda: ("cc" * 32, "Proxy"))
+        client = await connect()
+        slot = await server._slot_for_channel(DATA_CHANNEL_KEY)
+
+        meta = AeicStreamMetadata(square_size=512, aspect_code=0).encode()
+        blob = build_image_chunks(bytes(120), meta, sender_prefix=0xCCCC, img_id=3)[0]
+        server.mirror_channel_data(DATA_CHANNEL_KEY, 0xAE1C, blob)
+
+        assert await client.read() == protocol.encode_push_msg_waiting()
+        frame = await client.command(b"\x0a")
+        assert frame[protocol.CHANNEL_DATA_RECV_INDEX_OFFSET] == slot
+        relayed = parse_chunk_blob(frame[protocol.CHANNEL_DATA_RECV_HEADER_BYTES :])
+        assert relayed is not None
+        assert relayed.sender_prefix == 0x3333, "the app would drop this as its own echo"
+        # Everything else is the picture, and must be untouched.
+        assert (relayed.img_id, relayed.index, relayed.total, relayed.body) == (3, 0, 1, blob[4:])
+
+    @pytest.mark.asyncio
+    async def test_a_peers_picture_is_relayed_untouched(self, proxy, monkeypatch):
+        from app.imaging.aeic import channel_data_ingest
+        from app.imaging.aeic.channel_data import build_image_chunks
+        from app.imaging.aeic.text_transport import AeicStreamMetadata
+
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        monkeypatch.setattr(channel_data_ingest, "self_node_identity", lambda: ("cc" * 32, "Proxy"))
+        client = await connect()
+        slot = await server._slot_for_channel(DATA_CHANNEL_KEY)
+        radio.note_channel_slot_loaded(DATA_CHANNEL_KEY, 3)
+
+        meta = AeicStreamMetadata(square_size=512, aspect_code=0).encode()
+        blob = build_image_chunks(bytes(120), meta, sender_prefix=0x1234, img_id=3)[0]
+        server.on_radio_frame(protocol.encode_channel_data_recv(3, 0xAE1C, blob))
+
+        assert await client.read() == protocol.encode_push_msg_waiting()
+        assert await client.command(b"\x0a") == protocol.encode_channel_data_recv(
+            slot, 0xAE1C, blob
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_aliased_copy_still_reassembles(self, proxy, monkeypatch):
+        """Relabelling every chunk must not cost the app its parity recovery."""
+        from app.imaging.aeic import channel_data_ingest
+        from app.imaging.aeic.channel_data import build_image_chunks
+        from app.imaging.aeic.channel_data_ingest import ChannelDataReassembler
+        from app.imaging.aeic.text_transport import AeicStreamMetadata
+
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        monkeypatch.setattr(channel_data_ingest, "self_node_identity", lambda: ("cc" * 32, "Proxy"))
+        client = await connect()
+
+        bitstream = bytes(range(255)) * 2
+        meta = AeicStreamMetadata(square_size=512, aspect_code=0).encode()
+        blobs = build_image_chunks(bitstream, meta, sender_prefix=0xCCCC, img_id=3)
+        assert len(blobs) >= 4, "need several data chunks plus parity to test recovery"
+        for blob in blobs:
+            server.mirror_channel_data(DATA_CHANNEL_KEY, 0xAE1C, blob)
+        await asyncio.sleep(0.05)
+        for _ in blobs:
+            assert await client.read() == protocol.encode_push_msg_waiting()
+
+        received = []
+        while True:
+            frame = await client.command(b"\x0a")
+            if frame == protocol.encode_no_more_messages():
+                break
+            received.append(frame[protocol.CHANNEL_DATA_RECV_HEADER_BYTES :])
+        assert len(received) == len(blobs)
+
+        # Reassemble the way the app would, with the first data chunk lost.
+        far_side = ChannelDataReassembler()
+        outcome = None
+        for blob in received[1:]:
+            outcome = far_side.note_chunk("app", blob)
+        assert outcome is not None
+        assert outcome[0] == bitstream
+        assert outcome[2] is True, "parity did not rebuild the missing chunk"
+
+    @pytest.mark.asyncio
     async def test_a_marker_row_is_not_mirrored_as_text(self, proxy):
         """``aeib:`` is a convention between the server and its own UI."""
         server, radio, connect = proxy

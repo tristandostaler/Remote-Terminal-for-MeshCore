@@ -622,20 +622,15 @@ async def _process_group_data(raw_bytes: bytes, *, snr: float | None = None) -> 
 
 
 def _self_sender_prefix() -> int | None:
-    """This node's 2-byte AEIC sender prefix, or None while it is unknown."""
-    from app.services.radio_runtime import radio_runtime
+    """This node's 2-byte AEIC sender prefix, or None while it is unknown.
 
-    try:
-        meshcore = radio_runtime.meshcore
-        self_info = (meshcore.self_info if meshcore else None) or {}
-        public_key = self_info.get("public_key") or ""
-        if isinstance(public_key, str):
-            public_key = bytes.fromhex(public_key)
-        if len(public_key) >= 2:
-            return ((public_key[0] & 0xFF) << 8) | (public_key[1] & 0xFF)
-    except Exception:
-        pass
-    return None
+    One definition, in the module that also uses it to decide whether a picture
+    an app sent through the virtual node is ours: the echo filter here and the
+    attribution there have to agree about what "ours" means.
+    """
+    from app.imaging.aeic.channel_data_ingest import self_sender_prefix
+
+    return self_sender_prefix()
 
 
 async def _process_advertisement(
