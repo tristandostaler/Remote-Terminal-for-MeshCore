@@ -5,6 +5,8 @@ contact/channel sync operations, and default channel management.
 """
 
 import asyncio
+import logging
+import time
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -2242,32 +2244,66 @@ class TestCollectRepeaterTelemetryClockSync:
         contact.to_radio_dict.return_value = {}
         return contact
 
-    async def _collect(self, mc, contact, *, sync_clock):
+    @staticmethod
+    def _reply(text):
+        event = MagicMock()
+        event.payload = {"text": text}
+        return event
+
+    def _patches(self, replies):
+        """Patch the CLI plumbing: no radio drain, canned replies in order."""
+        return (
+            patch("app.radio_sync.drain_pending_messages", new_callable=AsyncMock, return_value=0),
+            patch(
+                "app.routers.server_control.fetch_contact_cli_response",
+                new_callable=AsyncMock,
+                side_effect=list(replies),
+            ),
+        )
+
+    async def _collect(self, mc, contact, *, sync_clock, replies=()):
         from app.radio_sync import _collect_repeater_telemetry
 
         mock_fanout = MagicMock()
         mock_fanout.broadcast_telemetry = AsyncMock()
+        drain, fetch = self._patches(replies)
         with (
             patch(
                 "app.radio_sync.RepeaterTelemetryRepository.record",
                 new_callable=AsyncMock,
             ),
             patch("app.fanout.manager.fanout_manager", mock_fanout),
+            drain,
+            fetch,
         ):
             return await _collect_repeater_telemetry(mc, contact, sync_clock=sync_clock)
+
+    async def _sync(self, mc, contact, replies):
+        from app.radio_sync import _sync_repeater_clock
+
+        drain, fetch = self._patches(replies)
+        with drain, fetch:
+            return await _sync_repeater_clock(mc, contact)
 
     @pytest.mark.asyncio
     async def test_sends_time_command_when_enabled(self):
         mc = self._make_mc()
         contact = self._make_contact()
 
-        result = await self._collect(mc, contact, sync_clock=True)
+        result = await self._collect(
+            mc,
+            contact,
+            sync_clock=True,
+            replies=[self._reply("OK - clock set: 12:00 - 3/9/2026 UTC")],
+        )
 
         assert result is True
         mc.commands.send_cmd.assert_awaited_once()
         args = mc.commands.send_cmd.call_args.args
         assert args[0] == contact.public_key
         assert args[1].startswith("time ")
+        # The epoch pushed is this server's clock, to the second.
+        assert abs(int(args[1].split()[1]) - int(time.time())) < 5
 
     @pytest.mark.asyncio
     async def test_does_not_send_time_command_when_disabled(self):
@@ -2301,6 +2337,119 @@ class TestCollectRepeaterTelemetryClockSync:
         result = await self._collect(mc, contact, sync_clock=True)
 
         assert result is True
+
+    @pytest.mark.asyncio
+    async def test_refused_sync_does_not_fail_collection(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+
+        result = await self._collect(
+            mc,
+            contact,
+            sync_clock=True,
+            replies=[
+                self._reply("(ERR: clock cannot go backwards)"),
+                self._reply("12:00 - 5/9/2026 UTC"),
+            ],
+        )
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_outcome_set_when_firmware_confirms(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+
+        outcome = await self._sync(
+            mc, contact, [self._reply("> OK - clock set: 12:00 - 3/9/2026 UTC")]
+        )
+
+        assert outcome == "set"
+        assert mc.commands.send_cmd.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_refusal_reads_repeater_clock_and_warns_with_offset(self, caplog):
+        """A repeater already ahead is reported, with its clock, not logged as synced.
+
+        This is the exact scenario behind "the sync set my repeater two days
+        into the future": the firmware only moves clocks forward, so whatever
+        pushed it ahead stays, and the old fire-and-forget send logged success
+        while the repeater silently refused.
+        """
+        mc = self._make_mc()
+        contact = self._make_contact()
+        two_days_ahead = int(time.time()) + 2 * 86400
+        from datetime import UTC, datetime
+
+        dt = datetime.fromtimestamp(two_days_ahead, tz=UTC)
+        clock_reply = f"{dt.hour:02d}:{dt.minute:02d} - {dt.day}/{dt.month}/{dt.year} UTC"
+
+        with caplog.at_level(logging.WARNING, logger="app.radio_sync"):
+            outcome = await self._sync(
+                mc,
+                contact,
+                [self._reply("(ERR: clock cannot go backwards)"), self._reply(clock_reply)],
+            )
+
+        assert outcome == "ahead"
+        commands = [call.args[1] for call in mc.commands.send_cmd.await_args_list]
+        assert commands[0].startswith("time ")
+        assert commands[1] == "clock"
+        warning = next(r for r in caplog.records if r.levelno == logging.WARNING)
+        assert "refused clock sync" in warning.getMessage()
+        assert "TestRepeater" in warning.getMessage()
+        assert clock_reply in warning.getMessage()
+        # Offset is signed and positive (ahead), within the clock's minute resolution.
+        assert "+17" in warning.getMessage()
+        assert "+48.0h" in warning.getMessage() or "+47.9h" in warning.getMessage()
+        assert not any("synced clock" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_refusal_still_warns_when_clock_read_fails(self, caplog):
+        mc = self._make_mc()
+        contact = self._make_contact()
+
+        with caplog.at_level(logging.WARNING, logger="app.radio_sync"):
+            outcome = await self._sync(
+                mc, contact, [self._reply("(ERR: clock cannot go backwards)"), None]
+            )
+
+        assert outcome == "ahead"
+        assert any("refused clock sync" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_no_reply_is_not_reported_as_synced(self, caplog):
+        mc = self._make_mc()
+        contact = self._make_contact()
+
+        with caplog.at_level(logging.INFO, logger="app.radio_sync"):
+            outcome = await self._sync(mc, contact, [None])
+
+        assert outcome == "no_reply"
+        assert not any("synced clock" in r.getMessage() for r in caplog.records)
+        assert any("no reply to clock sync" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_unexpected_reply_outcome(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+
+        outcome = await self._sync(mc, contact, [self._reply("Unknown command: time")])
+
+        assert outcome == "unexpected_reply"
+
+    @pytest.mark.asyncio
+    async def test_send_error_outcome(self):
+        mc = self._make_mc()
+        error_result = MagicMock()
+        error_result.type = EventType.ERROR
+        error_result.payload = {"error": "not authenticated"}
+        mc.commands.send_cmd = AsyncMock(return_value=error_result)
+        contact = self._make_contact()
+
+        outcome = await self._sync(mc, contact, [])
+
+        assert outcome == "send_error"
 
 
 class TestRunTelemetryCycleRoutedOnly:

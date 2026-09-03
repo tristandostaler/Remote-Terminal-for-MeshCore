@@ -788,3 +788,26 @@ class TestStepAwareTrend:
         assert summary.step_count >= 1
         assert summary.drift_rate_seconds_per_day is not None
         assert summary.drift_rate_seconds_per_day < -300
+
+
+class TestParseFirmwareClock:
+    """``clock`` and ``time`` replies both carry ``HH:MM - D/M/YYYY UTC``."""
+
+    def test_bare_clock_reply_is_day_first(self):
+        # 3 September, not 9 March.
+        assert clock_drift.parse_firmware_clock("12:34 - 3/9/2026 UTC") == 1788438840
+
+    def test_time_reply_echo_is_accepted(self):
+        assert (
+            clock_drift.parse_firmware_clock("OK - clock set: 12:34 - 3/9/2026 UTC") == 1788438840
+        )
+
+    def test_optional_seconds_and_console_prefix(self):
+        assert clock_drift.parse_firmware_clock("> 00:00:30 - 1/1/2026 UTC") == 1767225630
+
+    def test_garbage_is_none(self):
+        assert clock_drift.parse_firmware_clock("(ERR: clock cannot go backwards)") is None
+        assert clock_drift.parse_firmware_clock("") is None
+
+    def test_impossible_date_is_none(self):
+        assert clock_drift.parse_firmware_clock("12:00 - 31/2/2026 UTC") is None

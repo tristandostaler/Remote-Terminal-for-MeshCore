@@ -57,13 +57,24 @@ describe('formatClockDrift', () => {
     expect(result.text).toBe('0s');
   });
 
-  it('reports large drift (>24h)', () => {
+  it('reports a clock days ahead with direction', () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2025-01-11T12:30:00Z'));
+    vi.setSystemTime(new Date('2026-09-03T12:30:00Z'));
+
+    // The firmware only moves clocks forward, so "ahead" is the case the
+    // Sync Clock button cannot fix -- it has to be visible as such.
+    const result = formatClockDrift('12:30 - 5/9/2026 UTC');
+    expect(result.isLarge).toBe(true);
+    expect(result.text).toBe('2d ahead!');
+  });
+
+  it('reports a clock days behind with leftover hours', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-11T15:30:00Z'));
 
     const result = formatClockDrift('12:30 - 9/1/2025 UTC');
     expect(result.isLarge).toBe(true);
-    expect(result.text).toBe('>24 hours!');
+    expect(result.text).toBe('2d3h behind!');
   });
 
   it('handles invalid date strings', () => {
@@ -72,22 +83,22 @@ describe('formatClockDrift', () => {
     expect(result.isLarge).toBe(false);
   });
 
-  it('formats multi-unit drift', () => {
+  it('formats multi-unit drift behind', () => {
     vi.useFakeTimers();
-    // 1h30m5s drift
+    // repeater reads 1h30m5s behind our clock
     vi.setSystemTime(new Date('2025-01-09T14:00:05Z'));
 
     const result = formatClockDrift('12:30 - 9/1/2025 UTC');
     expect(result.isLarge).toBe(false);
-    expect(result.text).toBe('1h30m5s');
+    expect(result.text).toBe('1h30m5s behind');
   });
 
-  it('formats minutes and seconds drift', () => {
+  it('formats minutes and seconds drift ahead', () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2025-01-09T12:35:10Z'));
+    vi.setSystemTime(new Date('2025-01-09T12:24:50Z'));
 
     const result = formatClockDrift('12:30 - 9/1/2025 UTC');
     expect(result.isLarge).toBe(false);
-    expect(result.text).toBe('5m10s');
+    expect(result.text).toBe('5m10s ahead');
   });
 });

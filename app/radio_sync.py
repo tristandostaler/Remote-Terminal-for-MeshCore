@@ -19,6 +19,7 @@ from typing import Literal
 
 from meshcore import EventType, MeshCore
 
+from app import clock_drift
 from app.channel_constants import PUBLIC_CHANNEL_KEY, PUBLIC_CHANNEL_NAME
 from app.config import settings
 from app.event_handlers import cleanup_expired_acks, on_contact_message
@@ -1814,6 +1815,121 @@ async def sync_recent_contacts_to_radio(force: bool = False, mc: MeshCore | None
 # ---------------------------------------------------------------------------
 
 
+ClockSyncOutcome = Literal["set", "ahead", "no_reply", "send_error", "unexpected_reply", "failed"]
+
+# How long to wait for the repeater's CLI reply to ``time``/``clock``. Same
+# budget as the dashboard's batched CLI fetches (routers/server_control.py).
+_CLOCK_SYNC_REPLY_TIMEOUT = 10.0
+
+
+async def _fetch_cli_reply(mc: MeshCore, contact: Contact, command: str) -> str | None:
+    """Send one CLI command and return its reply text, or ``None`` without one."""
+    # routers.server_control imports this module, so import lazily.
+    from app.routers.server_control import extract_response_text, fetch_contact_cli_response
+
+    # Drop any stale buffered CLI reply so it cannot be mistaken for this one.
+    await drain_pending_messages(mc)
+    send_result = await mc.commands.send_cmd(contact.public_key, command)
+    if send_result.type == EventType.ERROR:
+        logger.debug(
+            "Telemetry collect: '%s' send error for %s: %s",
+            command,
+            contact.public_key[:12],
+            send_result.payload,
+        )
+        raise _CliSendError(str(send_result.payload))
+    reply_event = await fetch_contact_cli_response(
+        mc, contact.public_key[:12], timeout=_CLOCK_SYNC_REPLY_TIMEOUT
+    )
+    if reply_event is None:
+        return None
+    return extract_response_text(reply_event).strip()
+
+
+class _CliSendError(Exception):
+    """The radio refused to send a CLI command (not an error from the repeater)."""
+
+
+async def _sync_repeater_clock(mc: MeshCore, contact: Contact) -> ClockSyncOutcome:
+    """Push this server's time to a repeater and read back what the firmware did.
+
+    The repeater CLI ``time <epoch>`` only ever moves a clock *forward*. A
+    repeater whose clock is already ahead answers ``(ERR: clock cannot go
+    backwards)``, and nothing in the CLI moves it back: a reboot resets a
+    volatile clock, a hardware RTC keeps the wrong time. That ratchet is why
+    the reply matters -- a fire-and-forget send would log "synced" while the
+    repeater stayed wrong, and if this server's clock was ever wrong when a
+    sync ran, the wrong time it pushed is now permanent on the repeater. So
+    the reply is awaited and parsed, and a refusal is logged at WARNING with
+    the repeater's actual clock (fetched with ``clock``) so the offset, and
+    its direction, are visible without logging into the repeater.
+    """
+    key = contact.public_key
+    label = contact.name or key[:12]
+    now = int(time.time())
+    try:
+        reply = await _fetch_cli_reply(mc, contact, f"time {now}")
+    except _CliSendError:
+        return "send_error"
+    except Exception as e:
+        logger.debug("Telemetry collect: clock sync failed for %s (non-fatal): %s", key[:12], e)
+        return "failed"
+
+    if reply is None:
+        logger.info(
+            "Telemetry collect: no reply to clock sync from %s (%s) -- the radio is "
+            "probably not logged in to it as admin; will retry next cycle",
+            label,
+            key[:12],
+        )
+        return "no_reply"
+
+    lowered = reply.lower()
+    if "clock set" in lowered:
+        logger.info("Telemetry collect: synced clock on %s (%s): %s", label, key[:12], reply)
+        return "set"
+
+    if "cannot go backwards" in lowered:
+        offset_note = await _describe_repeater_clock_offset(mc, contact)
+        logger.warning(
+            "Telemetry collect: %s (%s) refused clock sync -- its clock is ahead of this "
+            "server's%s. The firmware never moves a clock backwards, so automatic sync "
+            "cannot fix this: if the repeater is wrong, reboot it (a volatile clock "
+            "restarts unset and takes the next sync); if this server's clock was wrong "
+            "when an earlier sync ran, that is how the offset got there.",
+            label,
+            key[:12],
+            offset_note,
+        )
+        return "ahead"
+
+    logger.warning(
+        "Telemetry collect: unexpected reply to clock sync from %s (%s): %s",
+        label,
+        key[:12],
+        reply,
+    )
+    return "unexpected_reply"
+
+
+async def _describe_repeater_clock_offset(mc: MeshCore, contact: Contact) -> str:
+    """Best-effort `` (reads HH:MM - D/M/YYYY UTC, +Ns)`` suffix for a refusal log."""
+    try:
+        reply = await _fetch_cli_reply(mc, contact, "clock")
+    except Exception as e:
+        logger.debug(
+            "Telemetry collect: could not read clock of %s: %s", contact.public_key[:12], e
+        )
+        return ""
+    if not reply:
+        return ""
+    repeater_epoch = clock_drift.parse_firmware_clock(reply)
+    if repeater_epoch is None:
+        return f" (reads {reply!r})"
+    offset = repeater_epoch - int(time.time())
+    return f" (reads {reply}, {offset:+d}s / {offset / 3600.0:+.1f}h)"
+
+
 async def _collect_repeater_telemetry(
     mc: MeshCore, contact: Contact, *, sync_clock: bool = False
 ) -> bool:
@@ -1894,25 +2010,11 @@ async def _collect_repeater_telemetry(
         )
 
     # Best-effort clock sync, opt-in per repeater. Same CLI command as the
-    # manual "Sync Clock" button; failure (e.g. not currently authenticated
-    # with the repeater) is non-fatal and does not affect telemetry recording.
+    # manual "Sync Clock" button; every failure mode (not currently
+    # authenticated with the repeater, firmware refusal, no reply) is
+    # non-fatal and does not affect telemetry recording.
     if sync_clock:
-        try:
-            sync_result = await mc.commands.send_cmd(contact.public_key, f"time {int(time.time())}")
-            if sync_result.type == EventType.ERROR:
-                logger.debug(
-                    "Telemetry collect: clock sync send error for %s: %s",
-                    contact.public_key[:12],
-                    sync_result.payload,
-                )
-            else:
-                logger.info("Telemetry collect: sent clock sync to %s", contact.public_key[:12])
-        except Exception as e:
-            logger.debug(
-                "Telemetry collect: clock sync failed for %s (non-fatal): %s",
-                contact.public_key[:12],
-                e,
-            )
+        await _sync_repeater_clock(mc, contact)
 
     try:
         timestamp = int(time.time())

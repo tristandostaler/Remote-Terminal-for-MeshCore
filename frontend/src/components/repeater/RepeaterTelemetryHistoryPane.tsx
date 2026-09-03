@@ -762,7 +762,9 @@ export function TelemetryHistoryPane({
                 <span className="text-xs text-muted-foreground leading-relaxed">
                   Also sync this repeater&apos;s clock (CLI <code>time</code> command) each time
                   telemetry is collected. Requires the radio to already be authenticated with the
-                  repeater; if not, the sync silently no-ops until the next successful login.
+                  repeater; if not, the sync silently no-ops until the next successful login. The
+                  firmware only moves a clock forward: a repeater already ahead of this server is
+                  left as-is (the refusal is logged with the offset), and only a reboot resets it.
                 </span>
               </label>
             </div>
