@@ -6,6 +6,7 @@ from unittest.mock import ANY
 
 import pytest
 
+from app.imaging.aeic import channel_data_ingest
 from app.imaging.aeic.channel_data import (
     DATA_TYPE_AEIC_IMAGE,
     DATA_TYPE_MCMP,
@@ -26,6 +27,11 @@ from app.imaging.aeic.channel_data_ingest import (
     handle_channel_data,
     marker_text,
     unsupported_marker_text,
+)
+from app.imaging.aeic.channel_data_text import (
+    MCMP_V3_WIRE_VERSION,
+    carries_text,
+    decode_channel_data_text,
 )
 from app.imaging.aeic.text_transport import AeicStreamMetadata
 from app.imaging.aeic.transport import (
@@ -164,6 +170,119 @@ class TestDataTypeRouting:
         assert "AEIC" in describe_data_type(DATA_TYPE_AEIC_IMAGE)
         assert "MCOimg" in describe_data_type(DATA_TYPE_MCO_IMAGE)
         assert "not supported" in describe_data_type(DATA_TYPE_MCO_IMAGE)
+
+
+class TestMcmpOverChannelData:
+    """MCO Advanced sends compressed channel text as GRP_DATA by default.
+
+    ``channelsSendAsBinary`` is on out of the box, so with MCMP enabled a peer's
+    ordinary chat arrives here as a binary blob rather than as ``mcmp2:`` text.
+    It used to be named in a log line and dropped, which made every compressed
+    message from a current MCO Advanced build invisible.
+    """
+
+    def _legacy(self, text: str, *, name: bytes = b"Phone") -> bytes:
+        from app.compression.mcmp import get_compressor
+
+        return bytes([len(name)]) + name + get_compressor().compress_to_bytes(text)
+
+    def _app(self, text: str, *, name: bytes = b"Phone", timestamp: int = 1_700_000_000) -> bytes:
+        from app.compression.mcmp import encode_v3_body, get_compressor
+
+        body = encode_v3_body(get_compressor(), text, timestamp=timestamp)
+        return (
+            bytes([len(name)])
+            + name
+            + bytes([(MCO_APP_SUBTYPE_MCMP << 4) | MCMP_V3_WIRE_VERSION])
+            + body
+        )
+
+    def test_a_v2_envelope_decodes_to_its_words(self):
+        decoded = decode_channel_data_text(DATA_TYPE_MCMP, self._legacy("meet at the tower"))
+        assert decoded is not None
+        assert (decoded.sender_name, decoded.text, decoded.version) == (
+            "Phone",
+            "meet at the tower",
+            "v2",
+        )
+
+    def test_a_v3_envelope_decodes_with_its_timestamp(self):
+        decoded = decode_channel_data_text(DATA_TYPE_MCO_APP, self._app("on my way"))
+        assert decoded is not None
+        assert decoded.text == "on my way"
+        assert decoded.version == "v3"
+        assert decoded.v3 is not None and decoded.v3.timestamp == 1_700_000_000
+
+    def test_noise_under_the_same_type_is_not_turned_into_a_message(self):
+        """The arithmetic decoder answers anything; a data type is not proof."""
+        assert decode_channel_data_text(DATA_TYPE_MCMP, bytes(50)) is None
+
+    def test_another_subtype_is_left_alone(self):
+        image = _mco_app_body(MCO_APP_SUBTYPE_MCO_IMAGE, 3)
+        assert carries_text(DATA_TYPE_MCO_APP, image) is False
+        assert decode_channel_data_text(DATA_TYPE_MCO_APP, image) is None
+
+    def test_an_unknown_wire_version_is_refused_rather_than_guessed(self):
+        payload = bytearray(self._app("hello"))
+        payload[1 + len(b"Phone")] = (MCO_APP_SUBTYPE_MCMP << 4) | 0x0F
+        assert decode_channel_data_text(DATA_TYPE_MCO_APP, bytes(payload)) is None
+
+    @pytest.mark.asyncio
+    async def test_it_is_stored_as_an_ordinary_channel_message(self, monkeypatch):
+        stored: list[dict] = []
+
+        async def _create(**kwargs):
+            stored.append(kwargs)
+            return None
+
+        monkeypatch.setattr(
+            "app.services.messages.create_fallback_channel_message", _create, raising=True
+        )
+        monkeypatch.setattr(
+            "app.repository.ChannelRepository.get_by_key",
+            _async_none,
+            raising=True,
+        )
+        channel_data_ingest._recent_text_blobs.clear()
+
+        handled = await handle_channel_data(
+            ParsedChannelData(0, 1, 0xFF, DATA_TYPE_MCMP, self._legacy("the repeater is back")),
+            conversation_key=CHANNEL,
+        )
+
+        assert handled is False, "text is not an image chunk"
+        assert len(stored) == 1
+        assert stored[0]["message_text"] == "the repeater is back"
+        assert stored[0]["sender_name"] == "Phone"
+        assert stored[0]["conversation_key"] == CHANNEL
+
+    @pytest.mark.asyncio
+    async def test_the_same_blob_from_both_delivery_paths_stores_one_row(self, monkeypatch):
+        stored: list[dict] = []
+
+        async def _create(**kwargs):
+            stored.append(kwargs)
+            return None
+
+        monkeypatch.setattr(
+            "app.services.messages.create_fallback_channel_message", _create, raising=True
+        )
+        monkeypatch.setattr(
+            "app.repository.ChannelRepository.get_by_key", _async_none, raising=True
+        )
+        channel_data_ingest._recent_text_blobs.clear()
+        blob = self._legacy("heard twice, said once")
+
+        for _ in range(2):
+            await handle_channel_data(
+                ParsedChannelData(0, 1, 0xFF, DATA_TYPE_MCMP, blob), conversation_key=CHANNEL
+            )
+
+        assert len(stored) == 1
+
+
+async def _async_none(*_args, **_kwargs):
+    return None
 
 
 def _mco_app_body(subtype: int, version: int, *, name: bytes = b"Alice") -> bytes:

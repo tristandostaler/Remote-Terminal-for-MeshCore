@@ -72,6 +72,7 @@ stays testable on an install that never opted into the `aeic` extra.
 | `text_transport.py` | the `aei1:` basE91 message framing | stdlib |
 | `channel_data.py` | binary GRP_DATA framing, XOR parity, companion frames | stdlib |
 | `channel_data_ingest.py` | inbound GRP_DATA reassembly and storage | stdlib |
+| `channel_data_text.py` | MCMP text riding the same GRP_DATA envelope | stdlib |
 | `entropy.py` | masks, squeeze, `build_indexes`, the four-stage loop | numpy |
 | `onnx_backend.py` | ORT sessions and tensor marshalling | numpy + ORT |
 | `bundle.py` | the model registry, digests, resumable download | httpx |
@@ -253,10 +254,21 @@ MCO Advanced ships **AEIC** (`0xAE1C`) *and* **MCOimg** (`0xFFF0`), plus MCMP
 text (`0xFFF1`), plus its own official application type **`0x0120`** which
 supersedes the two `0xFFF*` developer types and carries MCOimg (subtype 1) or
 MCMP (subtype 2) inside a `nameLen | name | subtypeVersion | body` envelope. Only
-AEIC is a codec RemoteTerm has. `channel_data_ingest` recognises the others by
-type — reading `0x0120`'s subtype nibble to name it — and reports them as
-unsupported rather than handing them to the AEIC decoder, which would turn them
-confidently into garbage.
+AEIC is the image codec RemoteTerm has. `channel_data_ingest` recognises the
+others by type — reading `0x0120`'s subtype nibble to name it — and reports them
+as unsupported rather than handing them to the AEIC decoder, which would turn
+them confidently into garbage.
+
+**MCMP is the exception, because we do have that codec.** `channel_data_text.py`
+unwraps the envelope (`senderNameLen varuint | senderName | [subtypeVersion] |
+body`) and decodes the body with `app.compression.mcmp` — the same bodies the
+`mcmp2:`/`mcmp3:` text transports carry, without the basE91 wrapper — and
+`handle_channel_data` stores the result as an ordinary channel message. This is
+not a corner: `channelsSendAsBinary` is **on by default** in MCO Advanced, so
+until this landed every compressed channel message from a current build was
+named in a log line and dropped. The arithmetic decoder is not self-checking, so
+a body that decodes to something that is not prose is refused and the blob falls
+back to being kept as unsupported media.
 
 **AEIC did not move into `0x0120`.** Upstream's `channel_app_data_helper.dart`
 defines subtypes for MCOimg and MCMP only, and `image_chunk_transport.dart` still

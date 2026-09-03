@@ -74,6 +74,14 @@ RECENT_DM_SEND_TTL_SECONDS = 120.0
 CURSOR_PERSIST_DELAY_SECONDS = 1.0
 # ``CMD_APP_START`` layout: [ver][6 reserved][app name...]; name starts here.
 APP_START_NAME_OFFSET = 7
+# How long a relayed GRP_DATA blob is remembered so two delivery paths (or a
+# repeater's re-flood) do not put the same picture in an app's chat twice.
+RELAY_DEDUP_SECONDS = 60.0
+MAX_REMEMBERED_RELAYED_BLOBS = 128
+# Message texts that are local markers rather than anything that was on the air:
+# ``channel_data_ingest.MARKER_PREFIX`` and ``MARKER_UNSUPPORTED_PREFIX``, spelled
+# out here so the companion protocol does not import the imaging package.
+LOCAL_MARKER_PREFIXES = ("aeib:", "mediax:")
 
 _CMD = CommandType
 _RESP = PacketType
@@ -98,6 +106,7 @@ TRANSMIT_COMMANDS = {
     _CMD.PATH_DISCOVERY.value,
     _CMD.SEND_CONTROL_DATA.value,
     _CMD.SEND_ANON_REQ.value,
+    protocol.CMD_SEND_CHANNEL_DATA,
 }
 # Parameters for the transmission an app is about to make. Acknowledged, never
 # applied -- RemoteTerm shapes its own sends.
@@ -338,6 +347,8 @@ class VirtualNodeServer:
         # Newest RESP_CODE_SENT the radio produced, with the monotonic time it
         # arrived, so an app's send can be answered with the radio's own frame.
         self._last_msg_sent: tuple[float, bytes] | None = None
+        # (channel key, data type, blob) -> monotonic time it went to the apps.
+        self._relayed_data: dict[tuple[str, int, bytes], float] = {}
         self._recent_commands: deque[dict[str, Any]] = deque(maxlen=MAX_RECENT_COMMANDS)
         self.host = settings.virtual_node_host
         self.port = settings.virtual_node_port
@@ -645,6 +656,8 @@ class VirtualNodeServer:
             return [await self._send_text_message(session, payload)]
         if code == _CMD.SEND_CHANNEL_TXT_MSG.value:
             return [await self._send_channel_message(session, payload)]
+        if code == protocol.CMD_SEND_CHANNEL_DATA:
+            return [await self._send_channel_data(session, payload)]
         if code == _CMD.GET_BATT_AND_STORAGE.value:
             cached = self._battery_from_stats()
             if cached is not None:
@@ -1203,6 +1216,186 @@ class VirtualNodeServer:
         # The firmware answers a channel send with a plain OK.
         return protocol.encode_ok()
 
+    async def _send_channel_data(self, session: ClientSession, payload: bytes) -> bytes:
+        """Put an app's binary channel payload -- a picture, a compressed message -- on air.
+
+        ``CMD_SEND_CHANNEL_DATA`` is not an exotic command: MCO Advanced sends
+        every image with it, and every MCMP-compressed channel message too while
+        its ``channelsSendAsBinary`` setting is on, which is the default. Left to
+        the generic forwarder it went to the radio verbatim -- with the app's
+        *virtual* channel index in it. That index means nothing to the radio,
+        which holds a handful of slots RemoteTerm re-uses as it sends, so the
+        blob was refused outright or, worse, encrypted for whatever channel
+        happened to occupy that slot. From the app both look the same: an image
+        or a compressed message that will not send, while plain text does.
+
+        So the slot is resolved here the same way a channel *text* send resolves
+        it, the channel is loaded into a radio slot by the same planner the AEIC
+        binary transport uses, and the blob goes out addressed to that slot.
+
+        The blob is passed on verbatim rather than decoded and re-sent as text:
+        the app signed and framed it, and rewriting a peer's payload is not
+        something a radio does. A copy is absorbed locally so the operator sees
+        what went out, and relayed to the *other* apps on this node, which are
+        the only ones that will not hear it on the air.
+        """
+        from app.imaging.aeic.channel_data import ChannelDataFormatError, build_send_command
+        from app.imaging.aeic.channel_data_ingest import describe_data_type
+        from app.imaging.aeic.transport import load_channel_for_binary_send
+
+        outgoing = protocol.parse_send_channel_data(payload)
+        if outgoing is None:
+            return protocol.encode_error(ErrorCode.ILLEGAL_ARG)
+        slots = await self._ensure_channel_slots()
+        key = slots[outgoing.channel_index] if outgoing.channel_index < len(slots) else None
+        channel = await ChannelRepository.get_by_key(key) if key else None
+        if channel is None:
+            raise VirtualNodeError(ErrorCode.NOT_FOUND, "no channel in that slot")
+
+        description = describe_data_type(outgoing.data_type, outgoing.blob)
+        session.command_note = (
+            f"slot {outgoing.channel_index} -> {channel.name}: {description}, "
+            f"{len(outgoing.blob)} bytes"
+        )[:200]
+
+        channel_key = channel.key.upper()
+        try:
+            # An image is several blobs in a row, each its own command with its
+            # own five-second deadline in the app. Once the channel is resident,
+            # reusing the slot keeps the rest of them to a single radio round
+            # trip each instead of three.
+            radio_slot = self._radio().get_cached_channel_slot(channel_key)
+            if radio_slot is None:
+                radio_slot, _self_key = await load_channel_for_binary_send(
+                    self._radio(), channel_key
+                )
+            command = build_send_command(radio_slot, outgoing.data_type, outgoing.blob)
+        except ChannelDataFormatError as exc:
+            logger.info("Virtual node refused a GRP_DATA blob: %s", exc)
+            return protocol.encode_error(ErrorCode.ILLEGAL_ARG)
+        except Exception as exc:
+            logger.info("Virtual node could not prepare a GRP_DATA send: %s", exc)
+            return protocol.encode_error(ErrorCode.BAD_STATE)
+
+        # The firmware answers this one with a plain OK, not RESP_CODE_SENT:
+        # a GRP_DATA blob is fire-and-forget and there is nothing to ACK.
+        response = await self._forward(command, expected=frozenset({OK, ERR}))
+        if response and response[0] == ERR:
+            return response
+        self._radio().note_channel_slot_used(channel_key)
+        self._spawn(
+            self._absorb_channel_data(
+                channel_key, outgoing.data_type, outgoing.blob, sender=session
+            )
+        )
+        return response
+
+    async def _absorb_channel_data(
+        self,
+        channel_key: str,
+        data_type: int,
+        blob: bytes,
+        *,
+        sender: ClientSession | None = None,
+    ) -> None:
+        """Store what an app just sent and show it to the other apps on this node.
+
+        Nothing hands a sender its own transmission back -- not the radio, not
+        the mesh -- so without this the blob leaves and RemoteTerm's own
+        conversation stays empty, which is exactly how a working send and a
+        dropped one look the same.
+        """
+        from app.imaging.aeic.channel_data import OUT_PATH_UNKNOWN, ParsedChannelData
+        from app.imaging.aeic.channel_data_ingest import handle_channel_data
+        from app.websocket import broadcast_event
+
+        await self._relay_channel_data(channel_key, data_type, blob, exclude=sender)
+        try:
+            await handle_channel_data(
+                ParsedChannelData(
+                    snr_raw=0,
+                    channel_index=0,
+                    path_len_byte=OUT_PATH_UNKNOWN,
+                    data_type=data_type,
+                    payload=blob,
+                ),
+                conversation_key=channel_key,
+                broadcast_fn=broadcast_event,
+            )
+        except Exception:
+            logger.exception("Virtual node could not absorb an app's GRP_DATA blob")
+
+    def _already_relayed(self, key: tuple[str, int, bytes]) -> bool:
+        """Whether this exact blob was just handed to the clients.
+
+        One blob can reach the relay from more than one place: companion frame
+        27, the raw-RF decode of the same packet (firmware permitting, both
+        fire), and a repeater's re-flood a moment later. Relaying it twice puts
+        the same picture in an app's conversation twice, so the last few are
+        remembered -- the same answer the image reassembler and the GRP_DATA
+        text ingest already give the same problem.
+        """
+        now = time.monotonic()
+        for stale in [
+            k for k, seen in self._relayed_data.items() if now - seen > RELAY_DEDUP_SECONDS
+        ]:
+            del self._relayed_data[stale]
+        if key in self._relayed_data:
+            return True
+        self._relayed_data[key] = now
+        while len(self._relayed_data) > MAX_REMEMBERED_RELAYED_BLOBS:
+            del self._relayed_data[min(self._relayed_data, key=lambda k: self._relayed_data[k])]
+        return False
+
+    async def _relay_channel_data(
+        self,
+        channel_key: str,
+        data_type: int,
+        blob: bytes,
+        *,
+        exclude: ClientSession | None = None,
+        source_frame: bytes | None = None,
+    ) -> None:
+        """Hand one GRP_DATA blob to connected apps as a frame 27, on their slot.
+
+        ``source_frame`` is the radio's own frame when there is one; it is
+        re-addressed rather than rebuilt so the SNR and hop count the app shows
+        against a received picture are the real ones.
+        """
+        if not self._clients:
+            return
+        channel_key = channel_key.upper()
+        if self._already_relayed((channel_key, data_type, blob)):
+            return
+        slot = await self._slot_for_channel(channel_key)
+        if slot is None:
+            logger.debug("No virtual slot for channel %s; not relaying its data", channel_key[:12])
+            return
+        frame = (
+            protocol.rewrite_channel_data_index(source_frame, slot)
+            if source_frame is not None
+            else protocol.encode_channel_data_recv(slot, data_type, blob)
+        )
+        waiting = protocol.encode_push_msg_waiting()
+        for session in list(self._clients):
+            if session is exclude:
+                continue
+            session.inbox.append((None, frame))
+            self._spawn(self._send_quietly(session, waiting))
+
+    def mirror_channel_data(self, channel_key: str, data_type: int, blob: bytes) -> None:
+        """Show a GRP_DATA blob to the apps on this node.
+
+        Called for the blobs RemoteTerm itself sends (the AEIC binary transport)
+        and for those decoded off the RF log, neither of which reaches an app any
+        other way: the app's radio *is* this radio, so it never hears our
+        transmissions, and a picture decoded off RF arrives as a marker row the
+        companion protocol has no way to express.
+        """
+        if not self._clients:
+            return
+        self._spawn(self._relay_channel_data(channel_key, data_type, blob))
+
     # ------------------------------------------------------------------ forwarding
 
     def _cached_response(self, command: bytes) -> bytes | None:
@@ -1383,10 +1576,37 @@ class VirtualNodeServer:
             if code not in _UNRELAYED_PUSH_CODES:
                 self._broadcast_frame(bytes(frame))
             return
+        if code == protocol.RESP_CODE_CHANNEL_DATA_RECV:
+            # A picture (or a compressed message) from a peer. RemoteTerm's own
+            # channel-data adapter consumes this frame -- it never reaches the
+            # library -- so relaying it here is the only way an app on this node
+            # sees GRP_DATA at all, and the index has to be re-addressed to the
+            # app's slot table on the way (see _relay_inbound_channel_data).
+            self._spawn(self._relay_inbound_channel_data(bytes(frame)))
+            return
         if protocol.pulled_message_txt_type(frame) == 1:
             # A repeater's CLI reply. RemoteTerm's auto-fetch pulled it and its
             # own handler drops it, so this is the only way an app sees it.
             self._enqueue_for_all(bytes(frame))
+
+    async def _relay_inbound_channel_data(self, frame: bytes) -> None:
+        """Re-address an inbound frame 27 to the virtual slots and queue it."""
+        from app.event_handlers import _resolve_channel_data_key
+        from app.imaging.aeic.channel_data import parse_channel_data_frame
+
+        parsed = parse_channel_data_frame(frame)
+        if parsed is None:
+            return
+        channel_key = await _resolve_channel_data_key(parsed.channel_index, self._radio())
+        if channel_key is None:
+            logger.debug(
+                "Not relaying GRP_DATA on radio slot %d: no channel resolved for it",
+                parsed.channel_index,
+            )
+            return
+        await self._relay_channel_data(
+            channel_key, parsed.data_type, parsed.payload, source_frame=frame
+        )
 
     def _broadcast_frame(self, frame: bytes) -> None:
         for session in list(self._clients):
@@ -1437,6 +1657,15 @@ class VirtualNodeServer:
 
     async def _frame_for_message(self, message: dict) -> bytes | None:
         """The companion frame for a stored message payload, or None if it has no wire form."""
+        text = str(message.get("text") or "")
+        if text.startswith(LOCAL_MARKER_PREFIXES):
+            # A marker row stands in for media that never crossed the air as
+            # text -- a picture received as GRP_DATA, or one this build cannot
+            # decode. It is a convention between this server and its own web UI;
+            # sending it to an app puts the literal string "aeib:17" in someone's
+            # conversation. The app gets the picture as the GRP_DATA blobs it
+            # already understands, relayed by mirror_channel_data.
+            return None
         msg_type = message.get("type")
         if msg_type == "PRIV":
             return protocol.encode_contact_message(message)

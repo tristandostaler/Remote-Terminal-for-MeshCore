@@ -130,6 +130,34 @@ class TestFeedingTheIngest:
         assert parsed.data_type == DATA_TYPE_AEIC_IMAGE
         assert len(parsed.payload) == 128
 
+    async def test_the_packet_is_mirrored_to_the_apps_on_the_virtual_node(
+        self, channels, monkeypatch
+    ):
+        """Some firmware never queues GRP_DATA for a companion at all.
+
+        On those radios frame 27 never arrives, so this decode is the only place
+        an app using this server as its radio can be handed the picture.
+        """
+        import app.imaging.aeic.channel_data_ingest as cdi
+        import app.packet_processor as pp
+        from app.virtual_node.server import virtual_node
+
+        monkeypatch.setattr(cdi, "handle_channel_data", AsyncMock())
+        mirrored: list[tuple] = []
+        monkeypatch.setattr(
+            virtual_node,
+            "mirror_channel_data",
+            lambda key, data_type, blob: mirrored.append((key, data_type, blob)),
+        )
+
+        await pp._process_group_data(GOLDEN_PACKET, snr=12.0)
+
+        assert len(mirrored) == 1
+        key, data_type, blob = mirrored[0]
+        assert key == hashtag_channel_key("#bots")
+        assert data_type == DATA_TYPE_AEIC_IMAGE
+        assert len(blob) == 128
+
     async def test_the_echo_of_our_own_send_is_not_ingested(self, channels, monkeypatch):
         """Repeaters re-flood our own packets and the RF log hears the copy.
 

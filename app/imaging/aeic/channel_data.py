@@ -397,29 +397,78 @@ class ParsedChannelData:
         return (self.path_len_byte & 0x3F) if self.arrived_by_flood else None
 
 
+MAX_ENVELOPE_NAME_BYTES = 127
+"""Longest sender name read out of an envelope.
+
+The length is a varuint and only the one-byte form is accepted: the field holds
+a radio name, the continuation form starts at 128 bytes, and a two-byte length
+is far likelier to mean this is not the envelope we think than to mean somebody
+has a 200-character name.
+"""
+
+
+@dataclass(frozen=True)
+class ChannelDataEnvelope:
+    """The sender-named envelope both GRP_DATA payload families start with.
+
+    ``senderNameLen(varuint) senderName(utf8) [subtypeVersion(u8)] body`` --
+    MCO Advanced's ``channel_binary_data_helper.dart`` (legacy ``0xFFF*``
+    types, no subtype byte) and ``channel_app_data_helper.dart``
+    (:data:`DATA_TYPE_MCO_APP`, which adds it). ``subtype`` and ``version`` are
+    None for the legacy shape.
+    """
+
+    sender_name: str
+    body: bytes
+    subtype: int | None = None
+    version: int | None = None
+
+
+def parse_envelope(payload: bytes, *, with_subtype: bool) -> ChannelDataEnvelope | None:
+    """Split a GRP_DATA payload into its sender name and body.
+
+    Returns None when the payload cannot be that envelope -- too short, an
+    implausible name length, or a name that is not UTF-8 -- so a frame from
+    another application is reported as unreadable rather than described (or
+    decoded) confidently.
+    """
+    if not payload:
+        return None
+    name_len = payload[0]
+    if name_len & 0x80 or name_len > MAX_ENVELOPE_NAME_BYTES:
+        return None
+    body_at = 1 + name_len
+    if body_at > len(payload):
+        return None
+    try:
+        sender_name = payload[1:body_at].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not with_subtype:
+        return ChannelDataEnvelope(sender_name=sender_name, body=bytes(payload[body_at:]))
+    if body_at >= len(payload):
+        return None
+    packed = payload[body_at]
+    return ChannelDataEnvelope(
+        sender_name=sender_name,
+        body=bytes(payload[body_at + 1 :]),
+        subtype=packed >> 4,
+        version=packed & 0x0F,
+    )
+
+
 def mco_app_subtype(payload: bytes) -> tuple[int, int] | None:
     """Read ``(subtype, version)`` out of a :data:`DATA_TYPE_MCO_APP` body.
 
-    Enough of the envelope to *name* the content and no more -- there is no
-    decoder for any of it here, so a wrong guess costs a log line rather than a
-    picture. Returns None when the body is too short or the name length is not
-    credible, which keeps a malformed frame from being described confidently.
-
-    The leading name length is a varuint. Only the one-byte form is read: the
-    name is a radio name, the continuation form starts at 128 bytes, and a
-    two-byte length is far likelier to mean this is not the envelope we think
-    than to mean someone has a 200-character name.
+    Enough of the envelope to *name* the content and no more; the decoders live
+    elsewhere (:mod:`app.imaging.aeic.channel_data_text` for MCMP). Returns
+    None when the payload is not that envelope, which keeps a malformed frame
+    from being described confidently.
     """
-    if len(payload) < 2:
+    envelope = parse_envelope(payload, with_subtype=True)
+    if envelope is None or envelope.subtype is None or envelope.version is None:
         return None
-    name_len = payload[0]
-    if name_len & 0x80:
-        return None
-    subtype_at = 1 + name_len
-    if subtype_at >= len(payload):
-        return None
-    packed = payload[subtype_at]
-    return packed >> 4, packed & 0x0F
+    return envelope.subtype, envelope.version
 
 
 def parse_channel_data_frame(frame: bytes) -> ParsedChannelData | None:

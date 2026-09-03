@@ -37,6 +37,15 @@ PUSH_CODE_NEW_ADVERT = PacketType.PUSH_CODE_NEW_ADVERT.value
 
 # Command codes the library's ``CommandType`` leaves out.
 CMD_GET_CUSTOM_VARS = CommandType.GET_CUSTOM_VARS.value
+CMD_SEND_CHANNEL_DATA = 62
+"""``CMD_SEND_CHANNEL_DATA`` -- a channel message that is a binary blob.
+
+Not in ``CommandType``, and not a niche command: MCO Advanced puts every image
+on the air with it, and every compressed channel message too while its
+``channelsSendAsBinary`` setting is on -- which is the default. Same value as
+:data:`app.imaging.aeic.channel_data.CMD_SEND_CHANNEL_DATA`, which owns the
+blob framing; this side only needs the command envelope.
+"""
 
 
 class ErrorCode(IntEnum):
@@ -423,6 +432,14 @@ class OutgoingTextMessage:
 
 
 def parse_send_txt_msg(payload: bytes) -> OutgoingTextMessage | None:
+    """Decode the body of ``CMD_SEND_TXT_MSG`` (code byte excluded).
+
+    The text is NUL-terminated on this command (and only this one): apps append
+    the byte because the firmware reads the field as a C string and drops it
+    again. Nothing downstream here does -- the text is stored as a message and
+    re-encoded for the radio -- so it is stripped at the parse, where the wire
+    format is already the subject.
+    """
     if len(payload) < 1 + 1 + 4 + 6:
         return None
     return OutgoingTextMessage(
@@ -430,7 +447,7 @@ def parse_send_txt_msg(payload: bytes) -> OutgoingTextMessage | None:
         attempt=payload[1],
         timestamp=int.from_bytes(payload[2:6], "little"),
         pubkey_prefix=payload[6:12].hex(),
-        text=payload[12:].decode("utf-8", "ignore"),
+        text=payload[12:].split(b"\x00", 1)[0].decode("utf-8", "ignore"),
     )
 
 
@@ -453,6 +470,87 @@ def parse_send_channel_txt_msg(payload: bytes) -> OutgoingChannelMessage | None:
         timestamp=int.from_bytes(payload[2:6], "little"),
         text=payload[6:].decode("utf-8", "ignore"),
     )
+
+
+@dataclass(slots=True)
+class OutgoingChannelData:
+    """Decoded ``CMD_SEND_CHANNEL_DATA`` -- an app's binary channel payload.
+
+    ``[channel_idx][path_len][path?][data_type u16][blob]``. ``path`` is
+    normally absent (``path_len`` 0xFF asks the firmware to flood), and
+    RemoteTerm re-sends the blob under its own routing anyway, so it is kept
+    only so the trace can say the app asked for something else.
+    """
+
+    channel_index: int
+    path_len_byte: int
+    path: bytes
+    data_type: int
+    blob: bytes
+
+
+def parse_send_channel_data(payload: bytes) -> OutgoingChannelData | None:
+    """Decode the body of ``CMD_SEND_CHANNEL_DATA`` (code byte excluded)."""
+    if len(payload) < 2:
+        return None
+    channel_index = payload[0]
+    path_len_byte = payload[1]
+    path_bytes = 0 if path_len_byte == 0xFF else path_len_byte
+    type_at = 2 + path_bytes
+    if len(payload) < type_at + 2:
+        return None
+    return OutgoingChannelData(
+        channel_index=channel_index,
+        path_len_byte=path_len_byte,
+        path=bytes(payload[2:type_at]),
+        data_type=payload[type_at] | (payload[type_at + 1] << 8),
+        blob=bytes(payload[type_at + 2 :]),
+    )
+
+
+CHANNEL_DATA_RECV_INDEX_OFFSET = 4
+
+
+def encode_channel_data_recv(
+    channel_index: int, data_type: int, blob: bytes, *, snr: float | None = None
+) -> bytes:
+    """Build a ``RESP_CODE_CHANNEL_DATA_RECV`` (27) frame for a client.
+
+    ``[27][snr][2 reserved][channel_idx][path_len][type u16][len][blob]`` -- the
+    inverse of ``channel_data.parse_channel_data_frame``. Used for the blobs
+    RemoteTerm itself puts on the air, which no radio hands back: without it an
+    image sent from the web UI is invisible to every app on the node.
+    """
+    return (
+        bytes([RESP_CODE_CHANNEL_DATA_RECV])
+        + _snr_byte(snr)
+        + b"\x00\x00"
+        + bytes(
+            [
+                int(channel_index) & 0xFF,
+                0xFF,
+                data_type & 0xFF,
+                (data_type >> 8) & 0xFF,
+                len(blob) & 0xFF,
+            ]
+        )
+        + blob
+    )
+
+
+def rewrite_channel_data_index(frame: bytes, channel_index: int) -> bytes:
+    """Re-address an inbound frame 27 to a client's virtual channel slot.
+
+    The frame names the RADIO's slot, and apps on the node address channels by
+    the virtual slot table, so relaying it unchanged points the image at
+    whatever the app has at that index -- the same class of mistake as sending a
+    channel message to the wrong slot, and just as invisible.
+    """
+    if len(frame) <= CHANNEL_DATA_RECV_INDEX_OFFSET:
+        return frame
+    out = bytearray(frame)
+    out[CHANNEL_DATA_RECV_INDEX_OFFSET] = int(channel_index) & 0xFF
+    return bytes(out)
 
 
 def _snr_byte(snr: float | None) -> bytes:

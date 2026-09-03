@@ -246,6 +246,40 @@ class TestMessageFrames:
         assert events[0].payload["text"] == "Alice: hi all"
         assert events[0].payload["path_len"] == 255, "no path info reads as direct"
 
+    def test_the_apps_trailing_nul_is_not_part_of_the_text(self):
+        """``CMD_SEND_TXT_MSG`` is NUL-terminated; the firmware drops the byte."""
+        payload = b"\x00\x00" + (1_700_000_000).to_bytes(4, "little") + bytes.fromhex(KEY_A[:12])
+        parsed = protocol.parse_send_txt_msg(payload + b"mcmp2:body\x00")
+        assert parsed is not None
+        assert parsed.text == "mcmp2:body"
+
+    def test_channel_data_command_parses_with_and_without_a_path(self):
+        flood = protocol.parse_send_channel_data(bytes([4, 0xFF, 0x1C, 0xAE]) + b"blob")
+        assert flood is not None
+        assert (flood.channel_index, flood.data_type, flood.blob) == (4, 0xAE1C, b"blob")
+        routed = protocol.parse_send_channel_data(bytes([4, 2, 0xAB, 0xCD, 0x1C, 0xAE]) + b"blob")
+        assert routed is not None
+        assert routed.path == b"\xab\xcd"
+        assert routed.blob == b"blob"
+        assert protocol.parse_send_channel_data(b"\x04") is None
+
+    @pytest.mark.asyncio
+    async def test_channel_data_frames_round_trip_through_the_real_parser(self):
+        from app.imaging.aeic.channel_data import parse_channel_data_frame
+
+        frame = protocol.encode_channel_data_recv(5, 0xAE1C, b"\x01\x02\x03", snr=-2.5)
+        parsed = parse_channel_data_frame(frame)
+        assert parsed is not None
+        assert (parsed.channel_index, parsed.data_type, parsed.payload) == (
+            5,
+            0xAE1C,
+            b"\x01\x02\x03",
+        )
+        assert parsed.snr_db == pytest.approx(-2.5)
+        moved = parse_channel_data_frame(protocol.rewrite_channel_data_index(frame, 9))
+        assert moved is not None and moved.channel_index == 9
+        assert moved.payload == parsed.payload
+
     def test_pulled_message_txt_type(self):
         v3 = (
             bytes([RESP.CONTACT_MSG_RECV_V3.value, 0, 0, 0]) + bytes(6) + bytes([255, 1]) + bytes(4)
@@ -1073,6 +1107,232 @@ class TestPushRelay:
             await reader.handle_rx(bytearray(raw))
         assert seen == [raw]
         assert server._self_info_frame == raw
+
+
+DATA_CHANNEL_KEY = ("ab" * 16).upper()
+
+
+class TestChannelDataSends:
+    """``CMD_SEND_CHANNEL_DATA`` (62): images, and compressed channel messages.
+
+    MCO Advanced sends every picture this way, and every MCMP message too while
+    its ``channelsSendAsBinary`` setting is on -- the default -- so this is the
+    difference between an app that can send pictures and compressed text through
+    the node and one that can only send plain text.
+    """
+
+    def _command(self, slot: int, data_type: int, blob: bytes) -> bytes:
+        return (
+            bytes([protocol.CMD_SEND_CHANNEL_DATA, slot, 0xFF, data_type & 0xFF, data_type >> 8])
+            + blob
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_blob_is_re_addressed_to_the_radios_own_slot(self, proxy):
+        """The app names its virtual slot; the radio holds a different table."""
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        radio.meshcore.responses[protocol.CMD_SEND_CHANNEL_DATA] = protocol.encode_ok()
+        client = await connect()
+        slot = await server._slot_for_channel(DATA_CHANNEL_KEY)
+        assert slot != 0  # the public channel owns slot 0, so this proves a remap
+
+        blob = b"\xaa\xbb" + bytes(20)
+        answer = await client.command(self._command(slot, 0xAE1C, blob))
+
+        assert answer == protocol.encode_ok()
+        sent = [f for f in radio.meshcore.sent if f[0] == protocol.CMD_SEND_CHANNEL_DATA]
+        assert len(sent) == 1
+        assert sent[0][1] == radio.get_cached_channel_slot(DATA_CHANNEL_KEY) != slot
+        assert sent[0][3:5] == b"\x1c\xae"
+        assert sent[0][5:] == blob
+
+    @pytest.mark.asyncio
+    async def test_an_empty_slot_is_refused_rather_than_sent_to_the_wrong_channel(self, proxy):
+        server, radio, connect = proxy
+        client = await connect()
+        answer = await client.command(self._command(200, 0xAE1C, b"blob"))
+        assert answer == protocol.encode_error(ErrorCode.NOT_FOUND)
+        assert [f for f in radio.meshcore.sent if f[0] == protocol.CMD_SEND_CHANNEL_DATA] == []
+
+    @pytest.mark.asyncio
+    async def test_a_radio_refusal_is_passed_back_to_the_app(self, proxy):
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        radio.meshcore.responses[protocol.CMD_SEND_CHANNEL_DATA] = protocol.encode_error(
+            ErrorCode.UNSUPPORTED_CMD
+        )
+        client = await connect()
+        slot = await server._slot_for_channel(DATA_CHANNEL_KEY)
+        answer = await client.command(self._command(slot, 0xAE1C, b"blob"))
+        assert answer == protocol.encode_error(ErrorCode.UNSUPPORTED_CMD)
+
+    @pytest.mark.asyncio
+    async def test_a_compressed_message_from_an_app_is_stored_as_text(self, proxy):
+        """The blob goes out verbatim; RemoteTerm keeps the words, not basE91."""
+        from app.compression.mcmp import get_compressor
+        from app.imaging.aeic.channel_data import DATA_TYPE_MCMP
+
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        radio.meshcore.responses[protocol.CMD_SEND_CHANNEL_DATA] = protocol.encode_ok()
+        client = await connect()
+        slot = await server._slot_for_channel(DATA_CHANNEL_KEY)
+
+        text = "the pictures are working again, and so is the compression"
+        name = b"Phone"
+        body = get_compressor().compress_to_bytes(text)
+        blob = bytes([len(name)]) + name + body
+
+        assert await client.command(self._command(slot, DATA_TYPE_MCMP, blob)) == (
+            protocol.encode_ok()
+        )
+        sent = [f for f in radio.meshcore.sent if f[0] == protocol.CMD_SEND_CHANNEL_DATA]
+        assert sent[0][5:] == blob, "the app's own bytes go on the air, not a re-encoding"
+
+        for _ in range(50):
+            messages = await MessageRepository.get_all(
+                msg_type="CHAN", conversation_key=DATA_CHANNEL_KEY
+            )
+            if messages:
+                break
+            await asyncio.sleep(0.01)
+        assert [m.text for m in messages] == [f"Phone: {text}"]
+
+    @pytest.mark.asyncio
+    async def test_the_other_apps_see_the_blob_and_the_sender_does_not(self, proxy):
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        radio.meshcore.responses[protocol.CMD_SEND_CHANNEL_DATA] = protocol.encode_ok()
+        sender = await connect()
+        listener = await connect()
+        slot = await server._slot_for_channel(DATA_CHANNEL_KEY)
+
+        blob = b"\x01\x02" + bytes(10)
+        assert await sender.command(self._command(slot, 0xAE1C, blob)) == protocol.encode_ok()
+
+        assert await listener.read() == protocol.encode_push_msg_waiting()
+        queued = await listener.command(b"\x0a")
+        assert queued == protocol.encode_channel_data_recv(slot, 0xAE1C, blob)
+        assert await sender.command(b"\x0a") == protocol.encode_no_more_messages()
+
+
+class TestChannelDataToApps:
+    """Apps on this node have no other route to a GRP_DATA blob."""
+
+    @pytest.mark.asyncio
+    async def test_an_inbound_frame_is_re_addressed_to_the_virtual_slot(self, proxy):
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        client = await connect()
+        virtual_slot = await server._slot_for_channel(DATA_CHANNEL_KEY)
+        radio_slot = 3
+        assert radio_slot != virtual_slot
+        radio.note_channel_slot_loaded(DATA_CHANNEL_KEY, radio_slot)
+
+        blob = b"\x09\x08" + bytes(8)
+        server.on_radio_frame(protocol.encode_channel_data_recv(radio_slot, 0xAE1C, blob))
+
+        assert await client.read() == protocol.encode_push_msg_waiting()
+        assert await client.command(b"\x0a") == protocol.encode_channel_data_recv(
+            virtual_slot, 0xAE1C, blob
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_same_blob_is_not_relayed_twice(self, proxy):
+        """Frame 27 and the raw-RF decode of the same packet both reach here."""
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        client = await connect()
+        slot = await server._slot_for_channel(DATA_CHANNEL_KEY)
+        radio.note_channel_slot_loaded(DATA_CHANNEL_KEY, 3)
+
+        blob = b"\x07\x06" + bytes(6)
+        server.on_radio_frame(protocol.encode_channel_data_recv(3, 0xAE1C, blob))
+        assert await client.read() == protocol.encode_push_msg_waiting()
+        server.mirror_channel_data(DATA_CHANNEL_KEY, 0xAE1C, blob)
+        await asyncio.sleep(0.05)
+
+        assert await client.command(b"\x0a") == protocol.encode_channel_data_recv(
+            slot, 0xAE1C, blob
+        )
+        assert await client.command(b"\x0a") == protocol.encode_no_more_messages()
+
+    @pytest.mark.asyncio
+    async def test_our_own_send_is_mirrored_to_the_apps(self, proxy):
+        """A picture sent from the web UI never crosses an app's radio."""
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        client = await connect()
+        slot = await server._slot_for_channel(DATA_CHANNEL_KEY)
+
+        blob = b"\x05\x04" + bytes(4)
+        server.mirror_channel_data(DATA_CHANNEL_KEY, 0xAE1C, blob)
+
+        assert await client.read() == protocol.encode_push_msg_waiting()
+        assert await client.command(b"\x0a") == protocol.encode_channel_data_recv(
+            slot, 0xAE1C, blob
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_image_sent_from_the_web_ui_reaches_the_apps(self, proxy):
+        """End to end: the AEIC binary transport feeds the apps on this node."""
+        from app.imaging.aeic.text_transport import AeicStreamMetadata
+        from app.imaging.aeic.transport import AeicTarget, ChannelDataTransport
+
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(PUBLIC_CHANNEL_KEY, "Public")
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        radio.meshcore.commands.send = AsyncMock(return_value=Event(EventType.OK, {}))
+        client = await connect()
+        slot = await server._slot_for_channel(DATA_CHANNEL_KEY)
+
+        with patch("app.virtual_node.server.virtual_node", server):
+            result = await ChannelDataTransport().send(
+                bytes(range(120)),
+                AeicStreamMetadata(square_size=512, aspect_code=0),
+                AeicTarget(
+                    conversation_type="CHAN",
+                    conversation_key=DATA_CHANNEL_KEY,
+                    radio_manager=radio,
+                ),
+            )
+        await asyncio.sleep(0.05)
+
+        assert result.chunk_count == 2  # one data blob and its parity
+        relayed = []
+        for _ in range(result.chunk_count):
+            assert await client.read() == protocol.encode_push_msg_waiting()
+        while True:
+            frame = await client.command(b"\x0a")
+            if frame == protocol.encode_no_more_messages():
+                break
+            relayed.append(frame)
+        assert len(relayed) == result.chunk_count
+        assert all(f[0] == protocol.RESP_CODE_CHANNEL_DATA_RECV for f in relayed)
+        assert all(f[protocol.CHANNEL_DATA_RECV_INDEX_OFFSET] == slot for f in relayed)
+
+    @pytest.mark.asyncio
+    async def test_a_marker_row_is_not_mirrored_as_text(self, proxy):
+        """``aeib:`` is a convention between the server and its own UI."""
+        server, radio, connect = proxy
+        await ChannelRepository.upsert(DATA_CHANNEL_KEY, "#pics", is_hashtag=True)
+        client = await connect()
+
+        server.on_app_event(
+            "message",
+            {
+                "type": "CHAN",
+                "conversation_key": DATA_CHANNEL_KEY,
+                "text": "aeib:chan-1-abc",
+                "sender_timestamp": 1_700_000_000,
+            },
+        )
+        await asyncio.sleep(0.05)
+        assert await client.command(b"\x0a") == protocol.encode_no_more_messages()
 
 
 class TestSendsGoThroughTheServiceLayer:
