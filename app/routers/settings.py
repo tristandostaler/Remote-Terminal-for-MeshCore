@@ -5,9 +5,11 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app import host_clock
 from app.models import (
     CONTACT_TYPE_REPEATER,
     AppSettings,
+    HostClockStatus,
     ImageCodecSelectionRequest,
     ImageCodecSelectionResponse,
     McmpEnabledRequest,
@@ -201,6 +203,13 @@ class TrackedTelemetryResponse(BaseModel):
             "collection (subset of tracked_telemetry_repeaters)"
         ),
     )
+    clock_autofix_repeaters: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Current list of repeaters that may be rebooted and re-synced when their "
+            "clock is ahead (subset of clock_sync_repeaters)"
+        ),
+    )
 
 
 class ClockSyncRepeaterRequest(BaseModel):
@@ -210,6 +219,21 @@ class ClockSyncRepeaterRequest(BaseModel):
 class ClockSyncRepeaterResponse(BaseModel):
     clock_sync_repeaters: list[str] = Field(
         description="Current list of repeaters opted into clock sync during telemetry collection"
+    )
+
+
+class ClockAutofixRepeaterRequest(BaseModel):
+    public_key: str = Field(
+        description="Public key of the repeater to toggle automatic forward-clock fixing for"
+    )
+
+
+class ClockAutofixRepeaterResponse(BaseModel):
+    clock_autofix_repeaters: list[str] = Field(
+        description=(
+            "Current list of clock-synced repeaters that may be rebooted (clkreboot) and "
+            "re-synced when their clock is found ahead of this server's"
+        )
     )
 
 
@@ -572,10 +596,12 @@ async def toggle_tracked_telemetry(request: TrackedTelemetryRequest) -> TrackedT
         # on telemetry collection, so it cannot outlive that tracking.
         new_list = [k for k in current if k != key]
         new_clock_sync = [k for k in settings.clock_sync_repeaters if k != key]
+        new_clock_autofix = [k for k in settings.clock_autofix_repeaters if k != key]
         logger.info("Removing repeater %s from tracked telemetry", key[:12])
         await AppSettingsRepository.update(
             tracked_telemetry_repeaters=new_list,
             clock_sync_repeaters=new_clock_sync,
+            clock_autofix_repeaters=new_clock_autofix,
         )
         return TrackedTelemetryResponse(
             tracked_telemetry_repeaters=new_list,
@@ -586,6 +612,7 @@ async def toggle_tracked_telemetry(request: TrackedTelemetryRequest) -> TrackedT
                 settings.telemetry_routed_hourly,
             ),
             clock_sync_repeaters=new_clock_sync,
+            clock_autofix_repeaters=new_clock_autofix,
         )
 
     # Validate it's a repeater
@@ -618,6 +645,7 @@ async def toggle_tracked_telemetry(request: TrackedTelemetryRequest) -> TrackedT
             settings.telemetry_routed_hourly,
         ),
         clock_sync_repeaters=settings.clock_sync_repeaters,
+        clock_autofix_repeaters=settings.clock_autofix_repeaters,
     )
 
 
@@ -640,8 +668,12 @@ async def toggle_clock_sync_repeater(
 
     if key in current:
         new_list = [k for k in current if k != key]
+        # Cascade-clear auto-fix too: it only ever runs off a refused sync.
+        new_autofix = [k for k in settings.clock_autofix_repeaters if k != key]
         logger.info("Disabling clock sync for repeater %s", key[:12])
-        await AppSettingsRepository.update(clock_sync_repeaters=new_list)
+        await AppSettingsRepository.update(
+            clock_sync_repeaters=new_list, clock_autofix_repeaters=new_autofix
+        )
         return ClockSyncRepeaterResponse(clock_sync_repeaters=new_list)
 
     if key not in settings.tracked_telemetry_repeaters:
@@ -662,6 +694,59 @@ async def toggle_clock_sync_repeater(
     logger.info("Enabling clock sync for repeater %s", key[:12])
     await AppSettingsRepository.update(clock_sync_repeaters=new_list)
     return ClockSyncRepeaterResponse(clock_sync_repeaters=new_list)
+
+
+@router.post("/clock-autofix-repeaters/toggle", response_model=ClockAutofixRepeaterResponse)
+async def toggle_clock_autofix_repeater(
+    request: ClockAutofixRepeaterRequest,
+) -> ClockAutofixRepeaterResponse:
+    """Toggle automatic forward-clock fixing for a clock-synced repeater.
+
+    The firmware never moves a repeater clock backwards, so a periodic sync that
+    is refused with ``clock cannot go backwards`` cannot fix a repeater whose
+    clock is ahead. With this on, that refusal (when the repeater reads more
+    than ``radio_sync.AUTOFIX_MIN_AHEAD_SECONDS`` ahead, at most once per
+    ``AUTOFIX_COOLDOWN_SECONDS``) triggers ``clkreboot`` -- reset the clock and
+    reboot -- followed by a fresh ``time`` sync once the repeater is back. It is
+    gated on the server's own clock passing ``host_clock.check_host_clock``,
+    exactly like the sync itself. Requires ``clock_sync_repeaters`` membership.
+    """
+    key = request.public_key.lower()
+    settings = await AppSettingsRepository.get()
+    current = settings.clock_autofix_repeaters
+
+    if key in current:
+        new_list = [k for k in current if k != key]
+        logger.info("Disabling clock auto-fix for repeater %s", key[:12])
+        await AppSettingsRepository.update(clock_autofix_repeaters=new_list)
+        return ClockAutofixRepeaterResponse(clock_autofix_repeaters=new_list)
+
+    if key not in settings.clock_sync_repeaters:
+        raise HTTPException(
+            status_code=400,
+            detail="Repeater must be opted into clock sync before auto-fix can be enabled",
+        )
+
+    contact = await ContactRepository.get_by_key(key)
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    if contact.type != CONTACT_TYPE_REPEATER:
+        raise HTTPException(status_code=400, detail="Contact is not a repeater")
+
+    new_list = current + [key]
+    logger.info("Enabling clock auto-fix for repeater %s", key[:12])
+    await AppSettingsRepository.update(clock_autofix_repeaters=new_list)
+    return ClockAutofixRepeaterResponse(clock_autofix_repeaters=new_list)
+
+
+@router.get("/host-clock", response_model=HostClockStatus)
+async def get_host_clock(force: bool = False) -> HostClockStatus:
+    """Whether this server's own clock is trusted to be pushed to repeaters.
+
+    Cached for ten minutes; ``force=true`` re-queries the time reference now.
+    See ``app/host_clock.py`` for what is checked and why.
+    """
+    return await host_clock.check_host_clock(force=force)
 
 
 @router.get("/tracked-telemetry/schedule", response_model=TelemetrySchedule)

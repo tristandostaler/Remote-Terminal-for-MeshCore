@@ -551,6 +551,7 @@ export interface AppSettings {
   tracked_telemetry_repeaters: string[];
   tracked_telemetry_contacts: string[];
   clock_sync_repeaters: string[];
+  clock_autofix_repeaters: string[];
   auto_resend_channel: boolean;
   max_message_retries: number;
   telemetry_interval_hours: number;
@@ -656,10 +657,51 @@ export interface TrackedTelemetryResponse {
   names: Record<string, string>;
   schedule: TelemetrySchedule;
   clock_sync_repeaters: string[];
+  clock_autofix_repeaters: string[];
 }
 
 export interface ClockSyncRepeaterResponse {
   clock_sync_repeaters: string[];
+}
+
+export interface ClockAutofixRepeaterResponse {
+  clock_autofix_repeaters: string[];
+}
+
+/** Whether this server's own clock may be pushed to repeaters (see app/host_clock.py). */
+export interface HostClockStatus {
+  checked_at: number;
+  trusted: boolean;
+  verified: boolean;
+  /** Host minus reference, seconds; positive = server ahead. */
+  offset_seconds: number | null;
+  source: 'ntp' | 'http' | 'none';
+  reference: string;
+  step_seconds: number;
+  threshold_seconds: number;
+  message: string;
+}
+
+export interface RepeaterSyncClockResponse {
+  status: string;
+  command: string;
+  reply: string | null;
+  repeater_clock: string | null;
+  /** Repeater minus server, seconds; positive = repeater ahead. */
+  offset_seconds: number | null;
+  message: string;
+  host_clock: HostClockStatus;
+}
+
+export interface RepeaterFixClockResponse {
+  status: string;
+  message: string;
+  steps: string[];
+  before_clock: string | null;
+  before_offset_seconds: number | null;
+  after_clock: string | null;
+  after_offset_seconds: number | null;
+  host_clock: HostClockStatus;
 }
 
 /** Contact type constants */

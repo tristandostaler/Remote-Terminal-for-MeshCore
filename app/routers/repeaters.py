@@ -4,16 +4,20 @@ import time
 
 from fastapi import APIRouter, HTTPException
 
+from app import host_clock
 from app.models import (
     CONTACT_TYPE_REPEATER,
     AclEntry,
     CommandRequest,
     CommandResponse,
     Contact,
+    HostClockStatus,
     LppSensor,
     NeighborInfo,
     RepeaterAclResponse,
     RepeaterAdvertIntervalsResponse,
+    RepeaterFixClockRequest,
+    RepeaterFixClockResponse,
     RepeaterLoginRequest,
     RepeaterLoginResponse,
     RepeaterLppTelemetryResponse,
@@ -24,8 +28,10 @@ from app.models import (
     RepeaterRegionEntry,
     RepeaterRegionsResponse,
     RepeaterStatusResponse,
+    RepeaterSyncClockResponse,
     TelemetryHistoryEntry,
 )
+from app.radio_sync import ClockSyncResult, _sync_repeater_clock, fix_forward_clock
 from app.repository import ContactRepository, RepeaterTelemetryRepository
 from app.routers.contacts import _ensure_on_radio, _resolve_contact_or_404
 from app.routers.server_control import (
@@ -564,6 +570,90 @@ async def repeater_regions(public_key: str) -> RepeaterRegionsResponse:
     # Nothing usable from either path (unsupported firmware, guest with no anon
     # support, or out of range) -> empty, not a truncated dump.
     return RepeaterRegionsResponse(regions=[], raw=raw, truncated=False, source="cli")
+
+
+def _sync_response(sync: ClockSyncResult, host: HostClockStatus) -> RepeaterSyncClockResponse:
+    return RepeaterSyncClockResponse(
+        status=sync.outcome,
+        command=sync.command,
+        reply=sync.reply,
+        repeater_clock=sync.repeater_clock,
+        offset_seconds=sync.offset_seconds,
+        message=sync.message,
+        host_clock=host,
+    )
+
+
+@router.post("/{public_key}/repeater/sync-clock", response_model=RepeaterSyncClockResponse)
+async def repeater_sync_clock(public_key: str) -> RepeaterSyncClockResponse:
+    """Push this server's clock to a repeater (CLI ``time <epoch>``) and report the reply.
+
+    Uses the server's clock, not the browser's, so the automatic sync and this
+    button agree -- and so both are gated on the same ``host_clock`` check: a
+    server whose clock disagrees with its time reference refuses to push it
+    (``server_clock_untrusted``), because the firmware only ever moves a
+    repeater clock forward and a wrong push cannot be undone.
+    """
+    radio_manager.require_connected()
+    contact = await _resolve_contact_or_404(public_key)
+    _require_repeater(contact)
+
+    host = await host_clock.check_host_clock()
+    if not host.trusted:
+        return RepeaterSyncClockResponse(
+            status="server_clock_untrusted", message=host.message, host_clock=host
+        )
+
+    async with radio_manager.radio_operation(
+        "repeater_sync_clock",
+        pause_polling=True,
+        suspend_auto_fetch=True,
+    ) as mc:
+        await _ensure_on_radio(mc, contact)
+        await asyncio.sleep(1.0)
+        sync = await _sync_repeater_clock(mc, contact)
+    return _sync_response(sync, host)
+
+
+@router.post("/{public_key}/repeater/fix-clock", response_model=RepeaterFixClockResponse)
+async def repeater_fix_clock(
+    public_key: str, request: RepeaterFixClockRequest
+) -> RepeaterFixClockResponse:
+    """Reset a repeater clock that is ahead: ``clkreboot``, wait, then ``time``.
+
+    The firmware never moves a clock backwards, so this is the only remote fix
+    for a repeater in the future. Refuses to reboot a repeater that is not
+    actually ahead (``not_ahead``), and is gated on ``host_clock`` like every
+    clock push. Holds the radio for the whole sequence, about half a minute.
+    """
+    radio_manager.require_connected()
+    contact = await _resolve_contact_or_404(public_key)
+    _require_repeater(contact)
+
+    host = await host_clock.check_host_clock()
+    if not host.trusted:
+        return RepeaterFixClockResponse(
+            status="server_clock_untrusted", message=host.message, host_clock=host
+        )
+
+    async with radio_manager.radio_operation(
+        "repeater_fix_clock",
+        pause_polling=True,
+        suspend_auto_fetch=True,
+    ) as mc:
+        await _ensure_on_radio(mc, contact)
+        await asyncio.sleep(1.0)
+        result = await fix_forward_clock(mc, contact, password=request.password)
+    return RepeaterFixClockResponse(
+        status=result.status,
+        message=result.message,
+        steps=result.steps,
+        before_clock=result.before_clock,
+        before_offset_seconds=result.before_offset_seconds,
+        after_clock=result.after_clock,
+        after_offset_seconds=result.after_offset_seconds,
+        host_clock=host,
+    )
 
 
 @router.post("/{public_key}/command", response_model=CommandResponse)

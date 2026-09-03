@@ -1245,6 +1245,90 @@ class CommandResponse(BaseModel):
     )
 
 
+class HostClockStatus(BaseModel):
+    """Whether this server's own wall clock can be trusted to push to repeaters.
+
+    See ``app/host_clock.py``. ``offset_seconds`` is host minus reference:
+    positive means this server is ahead. ``trusted`` is the only field the
+    clock-push paths act on; the rest explains it.
+    """
+
+    checked_at: int = Field(description="Unix timestamp of this check (server clock)")
+    trusted: bool = Field(description="Clock pushes to repeaters are allowed")
+    verified: bool = Field(description="An external time reference was reachable")
+    offset_seconds: float | None = Field(
+        default=None,
+        description="Host clock minus reference clock, seconds (positive = host ahead)",
+    )
+    source: Literal["ntp", "http", "none"] = Field(description="Which reference answered")
+    reference: str = Field(default="", description="The server or URL that answered")
+    step_seconds: float = Field(
+        default=0.0,
+        description=(
+            "How far the wall clock moved against the monotonic clock since the last "
+            "verified check (positive = jumped forward)"
+        ),
+    )
+    threshold_seconds: int = Field(description="Largest |offset| still considered trusted")
+    message: str = Field(description="Human-readable summary")
+
+
+class RepeaterSyncClockResponse(BaseModel):
+    """Outcome of pushing this server's time to a repeater (CLI ``time <epoch>``)."""
+
+    status: str = Field(
+        description=(
+            "set | ahead | no_reply | send_error | unexpected_reply | failed | "
+            "server_clock_untrusted"
+        )
+    )
+    command: str = Field(default="", description="The CLI command sent, if any")
+    reply: str | None = Field(default=None, description="The repeater's reply text, if any")
+    repeater_clock: str | None = Field(
+        default=None, description="The repeater's clock as it reported it, when read"
+    )
+    offset_seconds: int | None = Field(
+        default=None,
+        description="Repeater clock minus server clock (positive = repeater ahead), when known",
+    )
+    message: str = Field(description="Human-readable summary")
+    host_clock: HostClockStatus = Field(description="The server clock check that gated this")
+
+
+class RepeaterFixClockRequest(BaseModel):
+    """Optional credential so the fix can log back in after the reboot."""
+
+    password: str | None = Field(
+        default=None,
+        description=(
+            "Admin password to re-login with if the repeater no longer answers CLI "
+            "after rebooting. Omit to rely on the repeater's persisted ACL."
+        ),
+    )
+
+
+class RepeaterFixClockResponse(BaseModel):
+    """Outcome of resetting a repeater clock that is ahead: ``clkreboot`` then ``time``."""
+
+    status: str = Field(
+        description=(
+            "fixed | not_ahead | still_ahead | rebooted_no_reply | login_failed | "
+            "no_reply | send_error | failed | server_clock_untrusted"
+        )
+    )
+    message: str = Field(description="Human-readable summary")
+    steps: list[str] = Field(default_factory=list, description="What happened, in order")
+    before_clock: str | None = Field(default=None, description="Repeater clock before the fix")
+    before_offset_seconds: int | None = Field(
+        default=None, description="Repeater minus server before the fix, when known"
+    )
+    after_clock: str | None = Field(default=None, description="Repeater clock after the fix")
+    after_offset_seconds: int | None = Field(
+        default=None, description="Repeater minus server after the fix, when known"
+    )
+    host_clock: HostClockStatus = Field(description="The server clock check that gated this")
+
+
 class RadioDiscoveryRequest(BaseModel):
     """Request to discover nearby mesh nodes from the local radio."""
 
@@ -1435,6 +1519,15 @@ class AppSettings(BaseModel):
             "Public keys of tracked repeaters that also have their clock synced "
             "(CLI 'time' command) during periodic telemetry collection. A repeater "
             "must be in tracked_telemetry_repeaters to appear here."
+        ),
+    )
+    clock_autofix_repeaters: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Public keys of clock-synced repeaters that may also be rebooted "
+            "(CLI 'clkreboot', which resets the clock) and re-synced when a sync is "
+            "refused because the repeater's clock is ahead. A repeater must be in "
+            "clock_sync_repeaters to appear here."
         ),
     )
     telemetry_interval_hours: int = Field(

@@ -62,6 +62,8 @@ interface SettingsModalBaseProps {
   onToggleTrackedTelemetry?: (publicKey: string) => Promise<void>;
   clockSyncRepeaters?: string[];
   onToggleClockSyncRepeater?: (publicKey: string) => Promise<void>;
+  clockAutofixRepeaters?: string[];
+  onToggleClockAutofixRepeater?: (publicKey: string) => Promise<void>;
   trackedTelemetryContacts?: string[];
   onToggleTrackedTelemetryContact?: (publicKey: string) => Promise<void>;
 }
@@ -107,6 +109,8 @@ export function SettingsModal(props: SettingsModalProps) {
     onToggleTrackedTelemetry,
     clockSyncRepeaters,
     onToggleClockSyncRepeater,
+    clockAutofixRepeaters,
+    onToggleClockAutofixRepeater,
     trackedTelemetryContacts,
     onToggleTrackedTelemetryContact,
   } = props;
@@ -279,6 +283,8 @@ export function SettingsModal(props: SettingsModalProps) {
                 onToggleTrackedTelemetry={onToggleTrackedTelemetry}
                 clockSyncRepeaters={clockSyncRepeaters}
                 onToggleClockSyncRepeater={onToggleClockSyncRepeater}
+                clockAutofixRepeaters={clockAutofixRepeaters}
+                onToggleClockAutofixRepeater={onToggleClockAutofixRepeater}
                 trackedTelemetryContacts={trackedTelemetryContacts}
                 onToggleTrackedTelemetryContact={onToggleTrackedTelemetryContact}
                 className={sectionContentClass}

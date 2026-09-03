@@ -58,6 +58,17 @@ class Settings(BaseSettings):
         validation_alias="__CLOWNTOWN_DO_CLOCK_WRAPAROUND",
     )
     enable_local_private_key_export: bool = False
+    # Is this server's own clock right? Before pushing the wall clock to a
+    # repeater (CLI ``time``, which the firmware only ever applies *forward*),
+    # app/host_clock.py asks something that is not this machine: an SNTP
+    # server first, then the ``Date`` header of an HTTPS reference. Set either
+    # to "" to disable it; with both disabled or unreachable the clock is
+    # "unverified" and pushes proceed as before. A host found further than
+    # ``host_clock_max_offset_seconds`` from the reference has every clock push
+    # (automatic sync, auto-fix, the dashboard buttons) refused until it agrees.
+    host_clock_ntp_server: str = "pool.ntp.org"
+    host_clock_http_reference: str = "https://www.cloudflare.com"
+    host_clock_max_offset_seconds: int = 60
     load_with_autoevict: bool = False
     skip_post_connect_sync: bool = False
     basic_auth_username: str = ""

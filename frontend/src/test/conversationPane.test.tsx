@@ -167,6 +167,8 @@ function createProps(overrides: Partial<React.ComponentProps<typeof Conversation
     onToggleTrackedTelemetry: vi.fn(async () => {}),
     clockSyncRepeaters: [],
     onToggleClockSyncRepeater: vi.fn(async () => {}),
+    clockAutofixRepeaters: [],
+    onToggleClockAutofixRepeater: vi.fn(async () => {}),
     repeaterAutoLoginKey: null,
     onClearRepeaterAutoLogin: vi.fn(),
     ...overrides,

@@ -59,10 +59,18 @@ export function formatClockDrift(
   }
   if (isNaN(parsed.getTime())) return { text: '(invalid)', isLarge: false };
 
-  const driftMs = Math.abs(referenceTimeMs - parsed.getTime());
-  const driftSec = Math.floor(driftMs / 1000);
+  // Signed: positive means the repeater's clock is ahead of ours. The direction
+  // matters because the firmware only ever moves a clock forward -- a repeater
+  // that is behind will take the next "Sync Clock", one that is ahead will not.
+  const signedSec = Math.trunc((parsed.getTime() - referenceTimeMs) / 1000);
+  const driftSec = Math.abs(signedSec);
+  const direction = signedSec > 0 ? ' ahead' : signedSec < 0 ? ' behind' : '';
 
-  if (driftSec >= 86400) return { text: '>24 hours!', isLarge: true };
+  if (driftSec >= 86400) {
+    const d = Math.floor(driftSec / 86400);
+    const h = Math.floor((driftSec % 86400) / 3600);
+    return { text: `${d}d${h > 0 ? `${h}h` : ''}${direction}!`, isLarge: true };
+  }
 
   const h = Math.floor(driftSec / 3600);
   const m = Math.floor((driftSec % 3600) / 60);
@@ -73,7 +81,7 @@ export function formatClockDrift(
   if (m > 0) parts.push(`${m}m`);
   parts.push(`${s}s`);
 
-  return { text: parts.join(''), isLarge: false };
+  return { text: parts.join('') + direction, isLarge: false };
 }
 
 export function formatAdvertInterval(

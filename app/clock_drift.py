@@ -26,7 +26,9 @@ Two biases are inherent to the measurement and are handled rather than hidden:
   amount is ours.
 """
 
+import re
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Literal
 
 # Samples are folded into hourly buckets on write. A node advertising every few
@@ -148,6 +150,34 @@ def classify_drift(drift_seconds: int | float) -> DriftSeverity:
 def is_unset_clock(advert_timestamp: int) -> bool:
     """True when the advert's clock was never set rather than merely wrong."""
     return advert_timestamp < UNSET_CLOCK_BEFORE
+
+
+# The repeater CLI prints its clock as ``HH:MM - D/M/YYYY UTC`` (``clock``), and
+# ``time <epoch>`` echoes the same shape after ``OK - clock set: ``. Day comes
+# before month, and there are no leading zeroes on either.
+_FIRMWARE_CLOCK_RE = re.compile(
+    r"(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*UTC"
+)
+
+
+def parse_firmware_clock(text: str) -> int | None:
+    """Epoch seconds for a repeater CLI clock string, or ``None`` if unparseable.
+
+    Accepts the bare ``clock`` reply and the ``OK - clock set: ...`` echo alike,
+    so the same helper reads both ends of a sync exchange. Minute resolution is
+    all the firmware gives, so the result is exact to the minute.
+    """
+    match = _FIRMWARE_CLOCK_RE.search(text)
+    if match is None:
+        return None
+    hour, minute, second, day, month, year = match.groups()
+    try:
+        moment = datetime(
+            int(year), int(month), int(day), int(hour), int(minute), int(second or 0), tzinfo=UTC
+        )
+    except (ValueError, OverflowError):
+        return None
+    return int(moment.timestamp())
 
 
 def histogram_labels() -> tuple[str, ...]:

@@ -113,6 +113,8 @@ interface ConversationPaneProps {
   onToggleTrackedTelemetry: (publicKey: string) => Promise<void>;
   clockSyncRepeaters: string[];
   onToggleClockSyncRepeater: (publicKey: string) => Promise<void>;
+  clockAutofixRepeaters: string[];
+  onToggleClockAutofixRepeater: (publicKey: string) => Promise<void>;
   repeaterAutoLoginKey: string | null;
   onClearRepeaterAutoLogin: () => void;
   blockedKeys?: string[];
@@ -204,6 +206,8 @@ export function ConversationPane({
   onToggleTrackedTelemetry,
   clockSyncRepeaters,
   onToggleClockSyncRepeater,
+  clockAutofixRepeaters,
+  onToggleClockAutofixRepeater,
   repeaterAutoLoginKey,
   onClearRepeaterAutoLogin,
   blockedKeys,
@@ -378,6 +382,8 @@ export function ConversationPane({
           onToggleTrackedTelemetry={onToggleTrackedTelemetry}
           clockSyncRepeaters={clockSyncRepeaters}
           onToggleClockSyncRepeater={onToggleClockSyncRepeater}
+          clockAutofixRepeaters={clockAutofixRepeaters}
+          onToggleClockAutofixRepeater={onToggleClockAutofixRepeater}
           autoLoginAndLoadAll={repeaterAutoLoginKey === activeConversation.id}
           onAutoLoginConsumed={onClearRepeaterAutoLogin}
         />

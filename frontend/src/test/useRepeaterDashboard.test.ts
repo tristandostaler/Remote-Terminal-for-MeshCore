@@ -21,6 +21,19 @@ vi.mock('../api', () => ({
     repeaterLppTelemetry: vi.fn(),
     repeaterRegions: vi.fn(),
     sendRepeaterCommand: vi.fn(),
+    repeaterSyncClock: vi.fn(),
+    repeaterFixClock: vi.fn(),
+    getHostClock: vi.fn(async () => ({
+      checked_at: 0,
+      trusted: true,
+      verified: true,
+      offset_seconds: 0.1,
+      source: 'ntp',
+      reference: 'pool.ntp.org',
+      step_seconds: 0,
+      threshold_seconds: 60,
+      message: 'Server clock verified via NTP: 0.1s ahead of the reference.',
+    })),
   },
 }));
 
@@ -306,12 +319,33 @@ describe('useRepeaterDashboard', () => {
     expect(mockApi.sendRepeaterCommand).toHaveBeenCalledWith(REPEATER_KEY, 'reboot');
   });
 
-  it('syncClock sends "time <epoch>" command', async () => {
-    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
-    mockApi.sendRepeaterCommand.mockResolvedValueOnce({
+  const hostClockFixture = {
+    checked_at: 0,
+    trusted: true,
+    verified: true,
+    offset_seconds: 0.1,
+    source: 'ntp' as const,
+    reference: 'pool.ntp.org',
+    step_seconds: 0,
+    threshold_seconds: 60,
+    message: 'Server clock verified via NTP: 0.1s ahead of the reference.',
+  };
+
+  it('syncClock uses the server-side sync and records the verdict in the console', async () => {
+    mockApi.repeaterSyncClock.mockResolvedValueOnce({
+      status: 'set',
       command: 'time 1700000000',
-      response: 'ok',
-      sender_timestamp: 1000,
+      reply: 'OK - clock set: 12:00 - 3/9/2026 UTC',
+      repeater_clock: null,
+      offset_seconds: null,
+      message: 'Clock set: OK - clock set: 12:00 - 3/9/2026 UTC',
+      host_clock: hostClockFixture,
+    });
+    mockApi.repeaterNodeInfo.mockResolvedValue({
+      name: 'R',
+      lat: null,
+      lon: null,
+      clock_utc: '12:00 - 3/9/2026 UTC',
     });
 
     const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
@@ -320,8 +354,80 @@ describe('useRepeaterDashboard', () => {
       await result.current.syncClock();
     });
 
-    expect(mockApi.sendRepeaterCommand).toHaveBeenCalledWith(REPEATER_KEY, 'time 1700000000');
-    dateNowSpy.mockRestore();
+    // The browser's clock is never pushed: the server decides what time it is.
+    expect(mockApi.repeaterSyncClock).toHaveBeenCalledWith(REPEATER_KEY);
+    expect(mockApi.sendRepeaterCommand).not.toHaveBeenCalled();
+    const last = result.current.consoleHistory[result.current.consoleHistory.length - 1];
+    expect(last.outgoing).toBe(false);
+    expect(last.response).toContain('time 1700000000');
+    expect(last.response).toContain('Clock set');
+    expect(result.current.hostClock?.trusted).toBe(true);
+  });
+
+  it('fixForwardClock passes the last login password and records every step', async () => {
+    mockApi.repeaterLogin.mockResolvedValueOnce({
+      status: 'ok',
+      authenticated: true,
+      message: null,
+    });
+    mockApi.repeaterFixClock.mockResolvedValueOnce({
+      status: 'fixed',
+      message: 'Rebooted and re-synced.',
+      steps: ['clock reads 12:00 - 5/9/2026 UTC (+172800s vs this server)', 'sent clkreboot'],
+      before_clock: '12:00 - 5/9/2026 UTC',
+      before_offset_seconds: 172800,
+      after_clock: '12:00 - 3/9/2026 UTC',
+      after_offset_seconds: 0,
+      host_clock: hostClockFixture,
+    });
+    mockApi.repeaterNodeInfo.mockResolvedValue({
+      name: 'R',
+      lat: null,
+      lon: null,
+      clock_utc: '12:00 - 3/9/2026 UTC',
+    });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.login('secret');
+    });
+    await act(async () => {
+      await result.current.fixForwardClock();
+    });
+
+    expect(mockApi.repeaterFixClock).toHaveBeenCalledWith(REPEATER_KEY, 'secret');
+    const last = result.current.consoleHistory[result.current.consoleHistory.length - 1];
+    expect(last.response).toContain('[fixed]');
+    expect(last.response).toContain('sent clkreboot');
+  });
+
+  it('a refused sync surfaces the host clock verdict', async () => {
+    mockApi.repeaterSyncClock.mockResolvedValueOnce({
+      status: 'server_clock_untrusted',
+      command: '',
+      reply: null,
+      repeater_clock: null,
+      offset_seconds: null,
+      message: 'Server clock is 172800s ahead of the reference.',
+      host_clock: { ...hostClockFixture, trusted: false, offset_seconds: 172800 },
+    });
+    mockApi.repeaterNodeInfo.mockResolvedValue({
+      name: 'R',
+      lat: null,
+      lon: null,
+      clock_utc: null,
+    });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.syncClock();
+    });
+
+    expect(result.current.hostClock?.trusted).toBe(false);
+    const last = result.current.consoleHistory[result.current.consoleHistory.length - 1];
+    expect(last.response).toContain('ahead of the reference');
   });
 
   it('loadAll calls refreshPane for all panes serially', async () => {

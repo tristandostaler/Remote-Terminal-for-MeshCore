@@ -14,11 +14,13 @@ import logging
 import math
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from meshcore import EventType, MeshCore
 
+from app import clock_drift, host_clock
 from app.channel_constants import PUBLIC_CHANNEL_KEY, PUBLIC_CHANNEL_NAME
 from app.config import settings
 from app.event_handlers import cleanup_expired_acks, on_contact_message
@@ -1814,8 +1816,426 @@ async def sync_recent_contacts_to_radio(force: bool = False, mc: MeshCore | None
 # ---------------------------------------------------------------------------
 
 
+ClockSyncOutcome = Literal["set", "ahead", "no_reply", "send_error", "unexpected_reply", "failed"]
+
+# How long to wait for the repeater's CLI reply to ``time``/``clock``. Same
+# budget as the dashboard's batched CLI fetches (routers/server_control.py).
+_CLOCK_SYNC_REPLY_TIMEOUT = 10.0
+
+# Forward-clock fix (``clkreboot`` then ``time``): how long to give the board to
+# come back before talking to it again. Boot is a few seconds; the rest is
+# margin for the first packet to route.
+FIX_CLOCK_REBOOT_WAIT_SECONDS = 20.0
+# The ``clock`` reading is minute-resolution, so an in-sync repeater legitimately
+# reads up to a minute off. Only a clearly-ahead repeater earns a reboot.
+FIX_CLOCK_MIN_AHEAD_SECONDS = 60
+# Automatic fixes are stricter, and never more than once a day per repeater:
+# a reboot drops the repeater's neighbour table and briefly takes it off air.
+AUTOFIX_MIN_AHEAD_SECONDS = 120
+AUTOFIX_COOLDOWN_SECONDS = 24 * 3600
+_last_autofix_at: dict[str, float] = {}
+
+
+@dataclass
+class ClockSyncResult:
+    """What one ``time <epoch>`` push did, as the firmware reported it."""
+
+    outcome: ClockSyncOutcome
+    command: str = ""
+    reply: str | None = None
+    # Filled in on refusal: the repeater's ``clock`` reading and how far ahead
+    # of this server it is (positive), when it could be read and parsed.
+    repeater_clock: str | None = None
+    offset_seconds: int | None = None
+
+    @property
+    def message(self) -> str:
+        if self.outcome == "set":
+            return f"Clock set: {self.reply}"
+        if self.outcome == "ahead":
+            detail = ""
+            if self.repeater_clock:
+                detail = f" It reads {self.repeater_clock}"
+                if self.offset_seconds is not None:
+                    detail += f" ({self.offset_seconds:+d}s vs this server)"
+                detail += "."
+            return (
+                "Refused: the repeater's clock is ahead of this server's and the firmware "
+                "never moves a clock backwards." + detail + " Use Fix Forward Clock to reset it."
+            )
+        if self.outcome == "no_reply":
+            return "No reply. The radio is probably not logged in to this repeater as admin."
+        if self.outcome == "send_error":
+            return "The radio could not send the command."
+        if self.outcome == "unexpected_reply":
+            return f"Unexpected reply: {self.reply}"
+        return "The sync failed before a reply could be read."
+
+
+ClockFixStatus = Literal[
+    "fixed",
+    "not_ahead",
+    "still_ahead",
+    "rebooted_no_reply",
+    "login_failed",
+    "no_reply",
+    "send_error",
+    "failed",
+]
+
+
+@dataclass
+class ClockFixResult:
+    """What ``fix_forward_clock`` did, step by step."""
+
+    status: ClockFixStatus
+    message: str
+    steps: list[str] = field(default_factory=list)
+    before_clock: str | None = None
+    before_offset_seconds: int | None = None
+    after_clock: str | None = None
+    after_offset_seconds: int | None = None
+
+
+async def _fetch_cli_reply(mc: MeshCore, contact: Contact, command: str) -> str | None:
+    """Send one CLI command and return its reply text, or ``None`` without one."""
+    # routers.server_control imports this module, so import lazily.
+    from app.routers.server_control import extract_response_text, fetch_contact_cli_response
+
+    # Drop any stale buffered CLI reply so it cannot be mistaken for this one.
+    await drain_pending_messages(mc)
+    send_result = await mc.commands.send_cmd(contact.public_key, command)
+    if send_result.type == EventType.ERROR:
+        logger.debug(
+            "Telemetry collect: '%s' send error for %s: %s",
+            command,
+            contact.public_key[:12],
+            send_result.payload,
+        )
+        raise _CliSendError(str(send_result.payload))
+    reply_event = await fetch_contact_cli_response(
+        mc, contact.public_key[:12], timeout=_CLOCK_SYNC_REPLY_TIMEOUT
+    )
+    if reply_event is None:
+        return None
+    return extract_response_text(reply_event).strip()
+
+
+class _CliSendError(Exception):
+    """The radio refused to send a CLI command (not an error from the repeater)."""
+
+
+def _clock_offset(reading: str | None) -> int | None:
+    """Repeater-minus-server seconds for a firmware clock string, if parseable."""
+    if not reading:
+        return None
+    epoch = clock_drift.parse_firmware_clock(reading)
+    if epoch is None:
+        return None
+    return epoch - int(time.time())
+
+
+async def _sync_repeater_clock(mc: MeshCore, contact: Contact) -> ClockSyncResult:
+    """Push this server's time to a repeater and read back what the firmware did.
+
+    The repeater CLI ``time <epoch>`` only ever moves a clock *forward*. A
+    repeater whose clock is already ahead answers ``(ERR: clock cannot go
+    backwards)``, and nothing in the CLI moves it back: a reboot resets a
+    volatile clock, a hardware RTC keeps the wrong time. That ratchet is why
+    the reply matters -- a fire-and-forget send would log "synced" while the
+    repeater stayed wrong, and if this server's clock was ever wrong when a
+    sync ran, the wrong time it pushed is now permanent on the repeater. So
+    the reply is awaited and parsed, and a refusal is logged at WARNING with
+    the repeater's actual clock (fetched with ``clock``) so the offset, and
+    its direction, are visible without logging into the repeater.
+
+    Callers are expected to have passed ``host_clock.check_host_clock`` first;
+    this function pushes whatever ``time.time()`` says.
+    """
+    key = contact.public_key
+    label = contact.name or key[:12]
+    command = f"time {int(time.time())}"
+    try:
+        reply = await _fetch_cli_reply(mc, contact, command)
+    except _CliSendError:
+        return ClockSyncResult("send_error", command=command)
+    except Exception as e:
+        logger.debug("Telemetry collect: clock sync failed for %s (non-fatal): %s", key[:12], e)
+        return ClockSyncResult("failed", command=command)
+
+    if reply is None:
+        logger.info(
+            "Telemetry collect: no reply to clock sync from %s (%s) -- the radio is "
+            "probably not logged in to it as admin; will retry next cycle",
+            label,
+            key[:12],
+        )
+        return ClockSyncResult("no_reply", command=command)
+
+    lowered = reply.lower()
+    if "clock set" in lowered:
+        logger.info("Telemetry collect: synced clock on %s (%s): %s", label, key[:12], reply)
+        return ClockSyncResult("set", command=command, reply=reply)
+
+    if "cannot go backwards" in lowered:
+        reading = await _read_repeater_clock(mc, contact)
+        offset = _clock_offset(reading)
+        offset_note = ""
+        if reading and offset is not None:
+            offset_note = f" (reads {reading}, {offset:+d}s / {offset / 3600.0:+.1f}h)"
+        elif reading:
+            offset_note = f" (reads {reading!r})"
+        logger.warning(
+            "Telemetry collect: %s (%s) refused clock sync -- its clock is ahead of this "
+            "server's%s. The firmware never moves a clock backwards, so a plain sync "
+            "cannot fix this: reboot it (clkreboot resets the clock; auto-fix does this "
+            "when enabled for the repeater); if this server's clock was wrong when an "
+            "earlier sync ran, that is how the offset got there.",
+            label,
+            key[:12],
+            offset_note,
+        )
+        return ClockSyncResult(
+            "ahead", command=command, reply=reply, repeater_clock=reading, offset_seconds=offset
+        )
+
+    logger.warning(
+        "Telemetry collect: unexpected reply to clock sync from %s (%s): %s",
+        label,
+        key[:12],
+        reply,
+    )
+    return ClockSyncResult("unexpected_reply", command=command, reply=reply)
+
+
+async def _read_repeater_clock(mc: MeshCore, contact: Contact) -> str | None:
+    """Best-effort ``clock`` reading (``HH:MM - D/M/YYYY UTC``), or ``None``."""
+    try:
+        return await _fetch_cli_reply(mc, contact, "clock")
+    except Exception as e:
+        logger.debug(
+            "Telemetry collect: could not read clock of %s: %s", contact.public_key[:12], e
+        )
+        return None
+
+
+async def fix_forward_clock(
+    mc: MeshCore,
+    contact: Contact,
+    *,
+    password: str | None = None,
+    before_clock: str | None = None,
+    min_ahead_seconds: int = FIX_CLOCK_MIN_AHEAD_SECONDS,
+) -> ClockFixResult:
+    """Reset a repeater clock that is ahead: ``clkreboot``, wait, then ``time``.
+
+    ``clkreboot`` sets the repeater clock to a fixed 2024 epoch and reboots the
+    board; the following ``time`` then moves it forward to this server's clock.
+    The repeater persists its admin ACL, so the app is normally still admin
+    after the reboot and no login is needed; if the repeater does not answer
+    CLI afterwards and *password* was given, one re-login is attempted.
+
+    *before_clock* lets a caller that already read the repeater's clock skip the
+    read. Unless it is ahead by at least *min_ahead_seconds* the reboot is
+    skipped (``not_ahead``) and a plain sync is done instead, so a mis-click
+    never reboots a healthy repeater.
+
+    The caller holds the radio operation for the whole sequence, including the
+    ``FIX_CLOCK_REBOOT_WAIT_SECONDS`` wait.
+    """
+    key = contact.public_key
+    label = contact.name or key[:12]
+    steps: list[str] = []
+
+    if before_clock is None:
+        try:
+            before_clock = await _fetch_cli_reply(mc, contact, "clock")
+        except _CliSendError:
+            return ClockFixResult("send_error", "The radio could not send the command.")
+        except Exception as e:
+            logger.debug("Fix clock: reading clock of %s failed: %s", key[:12], e)
+            return ClockFixResult("failed", "Reading the repeater's clock failed.")
+        if before_clock is None:
+            return ClockFixResult(
+                "no_reply",
+                "No reply to `clock`. Log in to the repeater as admin first.",
+            )
+    before_offset = _clock_offset(before_clock)
+    steps.append(
+        f"clock reads {before_clock}"
+        + (f" ({before_offset:+d}s vs this server)" if before_offset is not None else "")
+    )
+
+    if before_offset is not None and before_offset < min_ahead_seconds:
+        sync = await _sync_repeater_clock(mc, contact)
+        steps.append(f"not ahead, plain sync instead: {sync.message}")
+        after = _parse_set_reply(sync.reply) if sync.outcome == "set" else None
+        return ClockFixResult(
+            "not_ahead",
+            "The repeater's clock is not ahead of this server's, so nothing was rebooted. "
+            + sync.message,
+            steps,
+            before_clock,
+            before_offset,
+            after,
+            _clock_offset(after),
+        )
+
+    logger.warning(
+        "Fix clock: rebooting %s (%s) with clkreboot -- clock reads %s%s",
+        label,
+        key[:12],
+        before_clock,
+        f" ({before_offset:+d}s ahead)" if before_offset is not None else "",
+    )
+    try:
+        await drain_pending_messages(mc)
+        send_result = await mc.commands.send_cmd(key, "clkreboot")
+    except Exception as e:
+        logger.debug("Fix clock: clkreboot send to %s failed: %s", key[:12], e)
+        return ClockFixResult(
+            "failed", "Sending clkreboot failed.", steps, before_clock, before_offset
+        )
+    if send_result.type == EventType.ERROR:
+        return ClockFixResult(
+            "send_error",
+            "The radio could not send clkreboot.",
+            steps,
+            before_clock,
+            before_offset,
+        )
+    steps.append("sent clkreboot (clock reset to 15 May 2024, rebooting)")
+
+    await asyncio.sleep(FIX_CLOCK_REBOOT_WAIT_SECONDS)
+    steps.append(f"waited {FIX_CLOCK_REBOOT_WAIT_SECONDS:.0f}s for the reboot")
+
+    sync = await _sync_repeater_clock(mc, contact)
+    if sync.outcome == "no_reply" and password is not None:
+        from app.routers.server_control import prepare_authenticated_contact_connection
+
+        steps.append("no reply after reboot, logging in again")
+        login = await prepare_authenticated_contact_connection(
+            mc, contact, password, label="repeater"
+        )
+        if not login.authenticated:
+            steps.append(f"login {login.status}: {login.message or 'not confirmed'}")
+            return ClockFixResult(
+                "login_failed",
+                "The repeater rebooted but the re-login was not confirmed; its clock now "
+                "reads May 2024 until a sync reaches it. Log in and use Sync Clock.",
+                steps,
+                before_clock,
+                before_offset,
+            )
+        steps.append("logged in")
+        sync = await _sync_repeater_clock(mc, contact)
+    steps.append(f"{sync.command}: {sync.message}")
+
+    if sync.outcome == "set":
+        after = _parse_set_reply(sync.reply)
+        logger.info("Fix clock: %s (%s) rebooted and re-synced: %s", label, key[:12], sync.reply)
+        return ClockFixResult(
+            "fixed",
+            "Rebooted and re-synced. Other nodes ignore adverts older than the last one "
+            "they heard, so the repeater may look silent to them until their clocks pass "
+            "the old (future) advert time.",
+            steps,
+            before_clock,
+            before_offset,
+            after,
+            _clock_offset(after),
+        )
+    if sync.outcome == "ahead":
+        return ClockFixResult(
+            "still_ahead",
+            "The repeater came back with its clock still ahead -- clkreboot did not reset "
+            "it (a hardware RTC?), so it cannot be fixed remotely.",
+            steps,
+            before_clock,
+            before_offset,
+            sync.repeater_clock,
+            sync.offset_seconds,
+        )
+    if sync.outcome == "no_reply":
+        return ClockFixResult(
+            "rebooted_no_reply",
+            "The repeater rebooted but did not answer the sync; its clock now reads May "
+            "2024 until a sync reaches it. Log in again and use Sync Clock.",
+            steps,
+            before_clock,
+            before_offset,
+        )
+    return ClockFixResult("failed", sync.message, steps, before_clock, before_offset)
+
+
+def _parse_set_reply(reply: str | None) -> str | None:
+    """The clock string inside ``OK - clock set: HH:MM - D/M/YYYY UTC``."""
+    if not reply:
+        return None
+    marker = "clock set:"
+    index = reply.lower().find(marker)
+    return reply[index + len(marker) :].strip() if index >= 0 else None
+
+
+async def _maybe_autofix_clock(mc: MeshCore, contact: Contact, sync: ClockSyncResult) -> None:
+    """Run ``fix_forward_clock`` for an opted-in repeater whose sync was refused."""
+    key = contact.public_key
+    label = contact.name or key[:12]
+    if sync.offset_seconds is None:
+        logger.info(
+            "Telemetry collect: auto-fix skipped for %s (%s): could not read how far "
+            "ahead its clock is",
+            label,
+            key[:12],
+        )
+        return
+    if sync.offset_seconds < AUTOFIX_MIN_AHEAD_SECONDS:
+        logger.info(
+            "Telemetry collect: auto-fix skipped for %s (%s): only %+ds ahead (threshold %ds)",
+            label,
+            key[:12],
+            sync.offset_seconds,
+            AUTOFIX_MIN_AHEAD_SECONDS,
+        )
+        return
+    last = _last_autofix_at.get(key)
+    now = time.monotonic()
+    if last is not None and now - last < AUTOFIX_COOLDOWN_SECONDS:
+        logger.info(
+            "Telemetry collect: auto-fix skipped for %s (%s): last attempt %.0f minutes ago",
+            label,
+            key[:12],
+            (now - last) / 60,
+        )
+        return
+    _last_autofix_at[key] = now
+    try:
+        result = await fix_forward_clock(
+            mc,
+            contact,
+            before_clock=sync.repeater_clock,
+            min_ahead_seconds=AUTOFIX_MIN_AHEAD_SECONDS,
+        )
+    except Exception as e:
+        logger.warning("Telemetry collect: auto-fix of %s (%s) failed: %s", label, key[:12], e)
+        return
+    log = logger.info if result.status == "fixed" else logger.warning
+    log(
+        "Telemetry collect: auto-fix of %s (%s) -> %s: %s [%s]",
+        label,
+        key[:12],
+        result.status,
+        result.message,
+        "; ".join(result.steps),
+    )
+
+
 async def _collect_repeater_telemetry(
-    mc: MeshCore, contact: Contact, *, sync_clock: bool = False
+    mc: MeshCore,
+    contact: Contact,
+    *,
+    sync_clock: bool = False,
+    autofix_clock: bool = False,
 ) -> bool:
     """Fetch status telemetry from a single repeater and record it.
 
@@ -1823,7 +2243,8 @@ async def _collect_repeater_telemetry(
     the repeater -- identical to the manual "Sync Clock" action in the
     repeater dashboard. This is best-effort: it silently no-ops if the radio
     isn't currently authenticated with the repeater, and never fails the
-    overall telemetry collection.
+    overall telemetry collection. With *autofix_clock* as well, a sync refused
+    because the repeater is ahead triggers ``_maybe_autofix_clock``.
 
     Returns True on success, False on failure (logged, not raised).
     """
@@ -1894,25 +2315,13 @@ async def _collect_repeater_telemetry(
         )
 
     # Best-effort clock sync, opt-in per repeater. Same CLI command as the
-    # manual "Sync Clock" button; failure (e.g. not currently authenticated
-    # with the repeater) is non-fatal and does not affect telemetry recording.
+    # manual "Sync Clock" button; every failure mode (not currently
+    # authenticated with the repeater, firmware refusal, no reply) is
+    # non-fatal and does not affect telemetry recording.
     if sync_clock:
-        try:
-            sync_result = await mc.commands.send_cmd(contact.public_key, f"time {int(time.time())}")
-            if sync_result.type == EventType.ERROR:
-                logger.debug(
-                    "Telemetry collect: clock sync send error for %s: %s",
-                    contact.public_key[:12],
-                    sync_result.payload,
-                )
-            else:
-                logger.info("Telemetry collect: sent clock sync to %s", contact.public_key[:12])
-        except Exception as e:
-            logger.debug(
-                "Telemetry collect: clock sync failed for %s (non-fatal): %s",
-                contact.public_key[:12],
-                e,
-            )
+        sync = await _sync_repeater_clock(mc, contact)
+        if autofix_clock and sync.outcome == "ahead":
+            await _maybe_autofix_clock(mc, contact, sync)
 
     try:
         timestamp = int(time.time())
@@ -2051,13 +2460,14 @@ async def _run_telemetry_cycle(
     tracked_repeaters = app_settings.tracked_telemetry_repeaters if collect_repeaters else []
     tracked_contacts = app_settings.tracked_telemetry_contacts if collect_contacts else []
     clock_sync_repeaters = set(app_settings.clock_sync_repeaters)
+    clock_autofix_repeaters = set(app_settings.clock_autofix_repeaters)
     if not tracked_repeaters and not tracked_contacts:
         return
 
     # Build repeater candidates
     candidates: list[
-        tuple[str, Contact, bool, bool]
-    ] = []  # (key, contact, is_repeater, sync_clock)
+        tuple[str, Contact, bool, bool, bool]
+    ] = []  # (key, contact, is_repeater, sync_clock, autofix_clock)
     for pub_key in tracked_repeaters:
         contact = await ContactRepository.get_by_key(pub_key)
         if not contact or contact.type != 2:
@@ -2068,7 +2478,15 @@ async def _run_telemetry_cycle(
             continue
         if routed_only and (not contact.effective_route or contact.effective_route.path_len < 0):
             continue
-        candidates.append((pub_key, contact, True, pub_key in clock_sync_repeaters))
+        candidates.append(
+            (
+                pub_key,
+                contact,
+                True,
+                pub_key in clock_sync_repeaters,
+                pub_key in clock_autofix_repeaters,
+            )
+        )
 
     # Build contact (non-repeater) candidates
     for pub_key in tracked_contacts:
@@ -2081,7 +2499,7 @@ async def _run_telemetry_cycle(
             continue
         if routed_only and (not contact.effective_route or contact.effective_route.path_len < 0):
             continue
-        candidates.append((pub_key, contact, False, False))
+        candidates.append((pub_key, contact, False, False, False))
 
     if not candidates:
         if routed_only:
@@ -2096,7 +2514,19 @@ async def _run_telemetry_cycle(
     )
     collected = 0
 
-    for _pub_key, contact, is_repeater, sync_clock in candidates:
+    # Never push this server's clock to anyone while it cannot be trusted: the
+    # firmware ratchet makes a wrong push permanent (see app/host_clock.py).
+    clock_push_allowed = True
+    if any(sync_clock for _, _, _, sync_clock, _ in candidates):
+        host = await host_clock.check_host_clock()
+        if not host.trusted:
+            clock_push_allowed = False
+            logger.warning(
+                "Telemetry collect: skipping clock sync for every repeater this cycle -- %s",
+                host.message,
+            )
+
+    for _pub_key, contact, is_repeater, sync_clock, autofix_clock in candidates:
         try:
             async with radio_manager.radio_operation(
                 "telemetry_collect",
@@ -2104,7 +2534,12 @@ async def _run_telemetry_cycle(
                 suspend_auto_fetch=True,
             ) as mc:
                 if is_repeater:
-                    success = await _collect_repeater_telemetry(mc, contact, sync_clock=sync_clock)
+                    success = await _collect_repeater_telemetry(
+                        mc,
+                        contact,
+                        sync_clock=sync_clock and clock_push_allowed,
+                        autofix_clock=autofix_clock and clock_push_allowed,
+                    )
                 else:
                     success = await _collect_contact_telemetry(mc, contact)
                 if success:
