@@ -257,7 +257,7 @@ class ChannelDataTransport(AeicTransport):
         channel_key = target.conversation_key.upper()
         img_id = new_image_id() if session_id is None else (session_id & 0xFF)
 
-        slot, self_key = await _load_channel_for_binary_send(radio_manager, channel_key)
+        slot, self_key = await load_channel_for_binary_send(radio_manager, channel_key)
         blobs = build_image_chunks(
             bitstream,
             metadata.encode(),
@@ -272,6 +272,10 @@ class ChannelDataTransport(AeicTransport):
                 # GRP_DATA blob is fire-and-forget and there is nothing to ACK.
                 result = await mc.commands.send(frame, [EventType.OK, EventType.ERROR])
                 if result is not None and result.type != EventType.ERROR:
+                    # Apps using this server as their radio never hear our own
+                    # transmissions, so a picture sent from the web UI would be
+                    # invisible to every one of them without this.
+                    _mirror_to_virtual_node(channel_key, DATA_TYPE_AEIC_IMAGE, blob)
                     continue
                 detail = getattr(result, "payload", "no response")
                 if position == 0:
@@ -306,12 +310,32 @@ class ChannelDataTransport(AeicTransport):
         )
 
 
-async def _load_channel_for_binary_send(radio_manager, channel_key: str) -> tuple[int, bytes]:
+def _mirror_to_virtual_node(channel_key: str, data_type: int, blob: bytes) -> None:
+    """Hand one blob we just sent to the apps connected to the virtual node.
+
+    Best effort and never fatal: the picture is already on air, and an app that
+    misses a chunk is a worse outcome than an exception here, but not by enough
+    to risk the send.
+    """
+    try:
+        from app.virtual_node.server import virtual_node
+
+        virtual_node.mirror_channel_data(channel_key, data_type, blob)
+    except Exception:
+        logger.debug("Could not mirror a GRP_DATA blob to the virtual node", exc_info=True)
+
+
+async def load_channel_for_binary_send(radio_manager, channel_key: str) -> tuple[int, bytes]:
     """``(radio slot, our public key)`` ready for a GRP_DATA send.
 
     GRP_DATA addresses a channel by radio SLOT, so the channel has to be resident
     in one before the blobs go out. This reuses the same slot planner the text
     channel send uses, so the two cannot disagree about which slot holds what.
+
+    Public because the virtual companion node needs the same preparation for the
+    blobs an *app* sends through it: an app addresses a channel by its virtual
+    slot, which is not the radio's, and resolving that in a second place is how
+    a picture ends up encrypted for the wrong channel.
     """
     from app.repository import ChannelRepository
 

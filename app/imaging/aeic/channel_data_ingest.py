@@ -359,6 +359,105 @@ async def _place_unsupported_marker(
         await _announce_marker_row(message_id, broadcast_fn)
 
 
+TEXT_BLOB_DEDUP_SECONDS = 60.0
+"""How long a text blob is remembered so the same one is stored once.
+
+The same GRP_DATA blob reaches :func:`handle_channel_data` from both delivery
+paths (raw RF and companion frame 27) and again from a repeater's re-flood, all
+within seconds of each other -- the image reassembler absorbs that idempotently
+and text needs its own answer. A v2 blob carries no timestamp of its own, so
+there is nothing to dedup a repeat against; a minute is far longer than the gap
+between the paths and short enough that genuinely re-sending the same words a
+little later still lands in the conversation.
+"""
+
+MAX_REMEMBERED_TEXT_BLOBS = 256
+
+_recent_text_blobs: dict[tuple[str, int, bytes], float] = {}
+
+
+def _already_stored_text(key: tuple[str, int, bytes], *, now: float) -> bool:
+    """Whether this exact blob was stored moments ago (and remember it if not)."""
+    for stale in [
+        k for k, seen in _recent_text_blobs.items() if now - seen > TEXT_BLOB_DEDUP_SECONDS
+    ]:
+        del _recent_text_blobs[stale]
+    if key in _recent_text_blobs:
+        return True
+    _recent_text_blobs[key] = now
+    while len(_recent_text_blobs) > MAX_REMEMBERED_TEXT_BLOBS:
+        del _recent_text_blobs[min(_recent_text_blobs, key=lambda k: _recent_text_blobs[k])]
+    return False
+
+
+async def _store_text_message(
+    parsed: ParsedChannelData,
+    *,
+    conversation_key: str,
+    broadcast_fn=None,
+) -> bool:
+    """Store a GRP_DATA blob that carries a message rather than media.
+
+    MCO Advanced sends channel messages as GRP_DATA whenever its
+    ``channelsSendAsBinary`` setting is on, which is the default, so this is
+    ordinary chat traffic and not an edge case: without it every compressed
+    message from a current MCO Advanced peer was reported as an unsupported
+    payload and dropped.
+
+    The row goes through the same fallback-channel-message writer the ``get_msg``
+    drain uses, so dedup, reactions, bots and fanout see it exactly as they would
+    the text form. Returns False when the blob is not text this build reads, so
+    the caller can fall back to keeping it as undecodable media.
+    """
+    from app.imaging.aeic.channel_data_text import carries_text, decode_channel_data_text
+
+    if not carries_text(parsed.data_type, parsed.payload):
+        return False
+    decoded = decode_channel_data_text(parsed.data_type, parsed.payload)
+    if decoded is None:
+        return False
+
+    now = int(time.time())
+    if _already_stored_text(
+        (conversation_key.upper(), parsed.data_type, parsed.payload), now=time.time()
+    ):
+        logger.debug("Skipping a GRP_DATA text blob already stored on %s", conversation_key[:12])
+        return True
+
+    from app.repository import ChannelRepository
+    from app.services.messages import create_fallback_channel_message
+
+    channel = await ChannelRepository.get_by_key(conversation_key.upper())
+    # The v3 container carries the sender's own clock; v2 carries nothing, so
+    # arrival time is the best available -- and it is what the dedup index keys
+    # on, which is why the same blob is remembered above rather than relying on
+    # two arrivals landing in the same second.
+    sender_timestamp = decoded.v3.timestamp if decoded.v3 is not None else now
+    await create_fallback_channel_message(
+        conversation_key=conversation_key,
+        message_text=decoded.text,
+        sender_timestamp=sender_timestamp,
+        received_at=now,
+        path=None,
+        path_len=parsed.hop_count,
+        txt_type=0,
+        sender_name=decoded.sender_name or None,
+        channel_name=channel.name if channel is not None else None,
+        broadcast_fn=broadcast_fn if broadcast_fn is not None else _ignore_broadcast,
+    )
+    logger.info(
+        "Stored an MCMP %s message from GRP_DATA on %s (%d payload bytes)",
+        decoded.version,
+        conversation_key[:12],
+        decoded.payload_bytes,
+    )
+    return True
+
+
+def _ignore_broadcast(_event: str, _data) -> None:
+    """Broadcast sink for callers that pass none (tests, and the raw-RF path)."""
+
+
 async def handle_channel_data(
     parsed: ParsedChannelData,
     *,
@@ -371,9 +470,19 @@ async def handle_channel_data(
     a peer must not take the link down.
     """
     if parsed.data_type != DATA_TYPE_AEIC_IMAGE:
-        await _note_undecodable(
-            parsed, conversation_key=conversation_key, broadcast_fn=broadcast_fn
-        )
+        try:
+            stored = await _store_text_message(
+                parsed, conversation_key=conversation_key, broadcast_fn=broadcast_fn
+            )
+        except Exception:
+            # This runs on the inbound frame path; a failed write costs a log
+            # line, not the link.
+            logger.exception("Failed to store a GRP_DATA text message")
+            stored = False
+        if not stored:
+            await _note_undecodable(
+                parsed, conversation_key=conversation_key, broadcast_fn=broadcast_fn
+            )
         return False
 
     try:

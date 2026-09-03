@@ -358,7 +358,7 @@ def install_full_raw_data_adapter(meshcore) -> None:
     reader._remoteterm_full_raw_data = True
 
 
-async def _resolve_channel_data_key(channel_index: int) -> str | None:
+async def _resolve_channel_data_key(channel_index: int, radio=None) -> str | None:
     """Map an inbound GRP_DATA frame's radio slot to a channel key.
 
     Cheap caches first, then the radio. The radio query is the only path that
@@ -373,16 +373,24 @@ async def _resolve_channel_data_key(channel_index: int) -> str | None:
     so waiting on a command reply does not stall the frame that carries it.
     ``_resolve_channel_for_pending_message`` also remembers what it learns, so
     only the first chunk of an image pays for the round trip.
+
+    ``radio`` names the radio manager to ask; it defaults to the process-wide
+    one and is passed explicitly by the virtual companion node, which holds its
+    own reference.
     """
     from app.radio_sync import _resolve_channel_for_pending_message
-    from app.services.radio_runtime import radio_runtime
 
-    cached = radio_runtime.channel_key_for_slot(channel_index)
+    if radio is None:
+        from app.services.radio_runtime import radio_runtime
+
+        radio = radio_runtime
+
+    cached = radio.channel_key_for_slot(channel_index)
     if cached is not None:
         return cached
 
     try:
-        async with radio_runtime.radio_operation("aeic_channel_data_slot") as mc:
+        async with radio.radio_operation("aeic_channel_data_slot") as mc:
             key, _name = await _resolve_channel_for_pending_message(mc, channel_index)
     except Exception:
         # A busy or disconnected radio is not worth an exception here; the next

@@ -36,6 +36,7 @@ LIGHT_MODULES = (
     "bundle",
     "channel_data",
     "channel_data_ingest",
+    "channel_data_text",
     # The decode worker is spawned as `python -m`, so it is a fresh interpreter
     # rather than something the app imports -- but it stays light anyway: its
     # heavy imports live inside `decode()`, which means a base install can still

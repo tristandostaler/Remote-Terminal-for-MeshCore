@@ -589,6 +589,16 @@ async def _process_group_data(raw_bytes: bytes, *, snr: float | None = None) -> 
             decrypted.data_type,
             len(decrypted.data),
         )
+        # Apps on the virtual companion node have no other route to this blob:
+        # some firmware never queues GRP_DATA for a companion at all, so frame
+        # 27 may never arrive, and RemoteTerm's own marker row is a local
+        # convention the companion protocol cannot express.
+        try:
+            from app.virtual_node.server import virtual_node
+
+            virtual_node.mirror_channel_data(channel.key, decrypted.data_type, decrypted.data)
+        except Exception:
+            logger.exception("Could not mirror a GRP_DATA packet to the virtual node")
         try:
             await handle_channel_data(
                 ParsedChannelData(
