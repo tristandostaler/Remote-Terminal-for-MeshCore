@@ -170,7 +170,7 @@ frontend/src/
 │   │   ├── RepeaterLppTelemetryPane.tsx # CayenneLPP sensor data
 │   │   ├── RepeaterOwnerInfoPane.tsx    # Owner info + guest password
 │   │   ├── RepeaterTelemetryHistoryPane.tsx # Historical telemetry chart/table
-│   │   ├── RepeaterActionsPane.tsx      # Send Advert, Sync Clock, Reboot
+│   │   ├── RepeaterActionsPane.tsx      # Send Advert, Sync Clock, Fix Forward Clock, Reboot
 │   │   └── RepeaterConsolePane.tsx      # CLI console with history
 │   └── ui/                     # shadcn/ui primitives
 ├── types/
@@ -521,7 +521,7 @@ For repeater contacts (`type=2`), `ConversationPane.tsx` renders `RepeaterDashbo
 
 **Dashboard panes** (after login): Telemetry, Node Info, Neighbors, ACL, Radio Settings, Regions, Advert Intervals, Owner Info — each fetched via granular `POST /api/contacts/{key}/repeater/{pane}` endpoints. The Regions pane prefers the admin CLI hierarchy and falls back to the guest anon flood-allowed names, so its payload carries a `source` of `cli` or `anon`. Panes retry up to 3 times client-side. `Neighbors` depends on the smaller `node-info` fetch for repeater GPS, not the heavier radio-settings batch. "Load All" fetches all panes serially (parallel would queue behind the radio lock).
 
-**Actions pane**: Send Advert, Sync Clock, Reboot — all send CLI commands via `POST /api/contacts/{key}/command`.
+**Actions pane**: Send Advert and Reboot send CLI commands via `POST /api/contacts/{key}/command`. Sync Clock calls `POST /api/contacts/{key}/repeater/sync-clock` (the *server's* clock, with the firmware's reply shown in the console); Fix Forward Clock (two-click confirm) calls `POST .../repeater/fix-clock` — `clkreboot` then re-sync, for a repeater whose clock is ahead — passing the last password typed into the login form so the backend can re-login after the reboot if needed. Both responses carry `host_clock` (`HostClockStatus`); the pane shows its message and disables both buttons while the server's own clock is untrusted. The telemetry-history pane and Settings → Radio-App Management carry the per-repeater "auto-fix" checkbox (`clock_autofix_repeaters`), shown only while clock sync is on.
 
 **Console pane**: Full CLI access via the same command endpoint. History is ephemeral (not persisted to DB).
 

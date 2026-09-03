@@ -2364,7 +2364,8 @@ class TestCollectRepeaterTelemetryClockSync:
             mc, contact, [self._reply("> OK - clock set: 12:00 - 3/9/2026 UTC")]
         )
 
-        assert outcome == "set"
+        assert outcome.outcome == "set"
+        assert outcome.reply == "OK - clock set: 12:00 - 3/9/2026 UTC"
         assert mc.commands.send_cmd.await_count == 1
 
     @pytest.mark.asyncio
@@ -2391,7 +2392,10 @@ class TestCollectRepeaterTelemetryClockSync:
                 [self._reply("(ERR: clock cannot go backwards)"), self._reply(clock_reply)],
             )
 
-        assert outcome == "ahead"
+        assert outcome.outcome == "ahead"
+        assert outcome.repeater_clock == clock_reply
+        assert outcome.offset_seconds is not None
+        assert 2 * 86400 - 120 <= outcome.offset_seconds <= 2 * 86400
         commands = [call.args[1] for call in mc.commands.send_cmd.await_args_list]
         assert commands[0].startswith("time ")
         assert commands[1] == "clock"
@@ -2414,7 +2418,8 @@ class TestCollectRepeaterTelemetryClockSync:
                 mc, contact, [self._reply("(ERR: clock cannot go backwards)"), None]
             )
 
-        assert outcome == "ahead"
+        assert outcome.outcome == "ahead"
+        assert outcome.repeater_clock is None
         assert any("refused clock sync" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
@@ -2425,7 +2430,7 @@ class TestCollectRepeaterTelemetryClockSync:
         with caplog.at_level(logging.INFO, logger="app.radio_sync"):
             outcome = await self._sync(mc, contact, [None])
 
-        assert outcome == "no_reply"
+        assert outcome.outcome == "no_reply"
         assert not any("synced clock" in r.getMessage() for r in caplog.records)
         assert any("no reply to clock sync" in r.getMessage() for r in caplog.records)
 
@@ -2436,7 +2441,7 @@ class TestCollectRepeaterTelemetryClockSync:
 
         outcome = await self._sync(mc, contact, [self._reply("Unknown command: time")])
 
-        assert outcome == "unexpected_reply"
+        assert outcome.outcome == "unexpected_reply"
 
     @pytest.mark.asyncio
     async def test_send_error_outcome(self):
@@ -2449,7 +2454,367 @@ class TestCollectRepeaterTelemetryClockSync:
 
         outcome = await self._sync(mc, contact, [])
 
-        assert outcome == "send_error"
+        assert outcome.outcome == "send_error"
+
+
+class TestFixForwardClock:
+    """``fix_forward_clock``: clkreboot, wait, time -- and when not to."""
+
+    def _make_mc(self):
+        mc = MagicMock()
+        mc.commands.send_cmd = AsyncMock()
+        return mc
+
+    def _make_contact(self):
+        contact = MagicMock()
+        contact.public_key = "aabbccddeeff11223344"
+        contact.name = "TestRepeater"
+        return contact
+
+    @staticmethod
+    def _reply(text):
+        event = MagicMock()
+        event.payload = {"text": text}
+        return event
+
+    @staticmethod
+    def _clock_string(epoch):
+        from datetime import UTC, datetime
+
+        dt = datetime.fromtimestamp(epoch, tz=UTC)
+        return f"{dt.hour:02d}:{dt.minute:02d} - {dt.day}/{dt.month}/{dt.year} UTC"
+
+    async def _fix(self, mc, contact, replies, **kwargs):
+        from app.radio_sync import fix_forward_clock
+
+        with (
+            patch("app.radio_sync.drain_pending_messages", new_callable=AsyncMock, return_value=0),
+            patch(
+                "app.routers.server_control.fetch_contact_cli_response",
+                new_callable=AsyncMock,
+                side_effect=list(replies),
+            ),
+            patch("app.radio_sync.asyncio.sleep", new_callable=AsyncMock) as sleep,
+        ):
+            result = await fix_forward_clock(mc, contact, **kwargs)
+        return result, sleep
+
+    @pytest.mark.asyncio
+    async def test_ahead_repeater_is_rebooted_and_resynced(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+        ahead = self._clock_string(int(time.time()) + 2 * 86400)
+        now_str = self._clock_string(int(time.time()))
+
+        result, sleep = await self._fix(
+            mc,
+            contact,
+            [self._reply(ahead), self._reply(f"OK - clock set: {now_str}")],
+        )
+
+        assert result.status == "fixed"
+        commands = [call.args[1] for call in mc.commands.send_cmd.await_args_list]
+        assert commands[0] == "clock"
+        assert commands[1] == "clkreboot"
+        assert commands[2].startswith("time ")
+        sleep.assert_awaited_once()
+        assert result.before_clock == ahead
+        assert result.before_offset_seconds is not None and result.before_offset_seconds > 0
+        assert result.after_clock == now_str
+        assert result.after_offset_seconds is not None
+        assert abs(result.after_offset_seconds) <= 60
+        assert any("clkreboot" in step for step in result.steps)
+
+    @pytest.mark.asyncio
+    async def test_healthy_repeater_is_not_rebooted(self):
+        """A mis-click must never reboot a repeater whose clock is fine."""
+        mc = self._make_mc()
+        contact = self._make_contact()
+        now_str = self._clock_string(int(time.time()))
+
+        result, sleep = await self._fix(
+            mc,
+            contact,
+            [self._reply(now_str), self._reply(f"OK - clock set: {now_str}")],
+        )
+
+        assert result.status == "not_ahead"
+        commands = [call.args[1] for call in mc.commands.send_cmd.await_args_list]
+        assert "clkreboot" not in commands
+        assert commands[1].startswith("time ")  # plain sync happened instead
+        sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_caller_supplied_reading_skips_the_clock_read(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+        ahead = self._clock_string(int(time.time()) + 3600)
+        now_str = self._clock_string(int(time.time()))
+
+        result, _ = await self._fix(
+            mc,
+            contact,
+            [self._reply(f"OK - clock set: {now_str}")],
+            before_clock=ahead,
+        )
+
+        assert result.status == "fixed"
+        commands = [call.args[1] for call in mc.commands.send_cmd.await_args_list]
+        assert commands[0] == "clkreboot"
+
+    @pytest.mark.asyncio
+    async def test_no_reply_after_reboot_logs_in_again_when_password_given(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+        ahead = self._clock_string(int(time.time()) + 3600)
+        now_str = self._clock_string(int(time.time()))
+        login = MagicMock(authenticated=True, status="ok", message=None)
+
+        with patch(
+            "app.routers.server_control.prepare_authenticated_contact_connection",
+            new_callable=AsyncMock,
+            return_value=login,
+        ) as prepare:
+            result, _ = await self._fix(
+                mc,
+                contact,
+                [None, self._reply(f"OK - clock set: {now_str}")],
+                password="secret",
+                before_clock=ahead,
+            )
+
+        assert result.status == "fixed"
+        prepare.assert_awaited_once()
+        assert prepare.await_args.args[2] == "secret"
+        assert any("logging in again" in step for step in result.steps)
+
+    @pytest.mark.asyncio
+    async def test_no_reply_after_reboot_without_password(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+        ahead = self._clock_string(int(time.time()) + 3600)
+
+        result, _ = await self._fix(mc, contact, [None], before_clock=ahead)
+
+        assert result.status == "rebooted_no_reply"
+        assert "Sync Clock" in result.message
+
+    @pytest.mark.asyncio
+    async def test_failed_login_after_reboot(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+        ahead = self._clock_string(int(time.time()) + 3600)
+        login = MagicMock(authenticated=False, status="rejected", message="bad password")
+
+        with patch(
+            "app.routers.server_control.prepare_authenticated_contact_connection",
+            new_callable=AsyncMock,
+            return_value=login,
+        ):
+            result, _ = await self._fix(mc, contact, [None], password="x", before_clock=ahead)
+
+        assert result.status == "login_failed"
+
+    @pytest.mark.asyncio
+    async def test_still_ahead_after_reboot(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+        ahead = self._clock_string(int(time.time()) + 3600)
+
+        result, _ = await self._fix(
+            mc,
+            contact,
+            [self._reply("(ERR: clock cannot go backwards)"), self._reply(ahead)],
+            before_clock=ahead,
+        )
+
+        assert result.status == "still_ahead"
+        assert result.after_clock == ahead
+
+    @pytest.mark.asyncio
+    async def test_clock_unreadable_means_not_logged_in(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+
+        result, _ = await self._fix(mc, contact, [None])
+
+        assert result.status == "no_reply"
+        commands = [call.args[1] for call in mc.commands.send_cmd.await_args_list]
+        assert commands == ["clock"]
+
+    @pytest.mark.asyncio
+    async def test_clkreboot_send_error(self):
+        mc = self._make_mc()
+        contact = self._make_contact()
+        ahead = self._clock_string(int(time.time()) + 3600)
+        error_result = MagicMock()
+        error_result.type = EventType.ERROR
+        error_result.payload = {"error": "busy"}
+        mc.commands.send_cmd = AsyncMock(return_value=error_result)
+
+        result, _ = await self._fix(mc, contact, [], before_clock=ahead)
+
+        assert result.status == "send_error"
+
+
+class TestMaybeAutofixClock:
+    """The automatic path: thresholds, cooldown, and delegation to the fix."""
+
+    def _contact(self, key="aabbccddeeff11223344"):
+        contact = MagicMock()
+        contact.public_key = key
+        contact.name = "TestRepeater"
+        return contact
+
+    def _sync(self, offset, reading="12:00 - 5/9/2026 UTC"):
+        from app.radio_sync import ClockSyncResult
+
+        return ClockSyncResult(
+            "ahead", command="time 1", reply="(ERR)", repeater_clock=reading, offset_seconds=offset
+        )
+
+    @pytest.fixture(autouse=True)
+    def _clear_cooldowns(self):
+        import app.radio_sync as rs
+
+        rs._last_autofix_at.clear()
+        yield
+        rs._last_autofix_at.clear()
+
+    @pytest.mark.asyncio
+    async def test_runs_fix_when_clearly_ahead(self):
+        from app.radio_sync import _maybe_autofix_clock
+
+        contact = self._contact()
+        fixed = MagicMock(status="fixed", message="ok", steps=["a"])
+        with patch(
+            "app.radio_sync.fix_forward_clock", new_callable=AsyncMock, return_value=fixed
+        ) as fix:
+            await _maybe_autofix_clock(MagicMock(), contact, self._sync(2 * 86400))
+
+        fix.assert_awaited_once()
+        assert fix.await_args.kwargs["before_clock"] == "12:00 - 5/9/2026 UTC"
+
+    @pytest.mark.asyncio
+    async def test_skips_when_barely_ahead(self):
+        from app.radio_sync import AUTOFIX_MIN_AHEAD_SECONDS, _maybe_autofix_clock
+
+        with patch("app.radio_sync.fix_forward_clock", new_callable=AsyncMock) as fix:
+            await _maybe_autofix_clock(
+                MagicMock(), self._contact(), self._sync(AUTOFIX_MIN_AHEAD_SECONDS - 1)
+            )
+
+        fix.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_offset_unknown(self):
+        from app.radio_sync import _maybe_autofix_clock
+
+        with patch("app.radio_sync.fix_forward_clock", new_callable=AsyncMock) as fix:
+            await _maybe_autofix_clock(MagicMock(), self._contact(), self._sync(None, None))
+
+        fix.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cooldown_prevents_a_second_reboot(self):
+        from app.radio_sync import _maybe_autofix_clock
+
+        contact = self._contact()
+        fixed = MagicMock(status="still_ahead", message="hm", steps=[])
+        with patch(
+            "app.radio_sync.fix_forward_clock", new_callable=AsyncMock, return_value=fixed
+        ) as fix:
+            await _maybe_autofix_clock(MagicMock(), contact, self._sync(7200))
+            await _maybe_autofix_clock(MagicMock(), contact, self._sync(7200))
+
+        assert fix.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fix_exception_is_contained(self):
+        from app.radio_sync import _maybe_autofix_clock
+
+        with patch(
+            "app.radio_sync.fix_forward_clock",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("radio gone"),
+        ):
+            await _maybe_autofix_clock(MagicMock(), self._contact(), self._sync(7200))
+
+
+class TestTelemetryCycleHostClockGuard:
+    """An untrusted server clock disables every clock push for the cycle."""
+
+    def _contact(self, key):
+        from app.models import Contact
+
+        return Contact(public_key=key, name="R", type=2, flags=0)
+
+    async def _run(self, trusted):
+        from app.models import AppSettings, HostClockStatus
+        from app.radio_sync import _run_telemetry_cycle
+
+        key = "aa" * 32
+        settings = AppSettings(
+            tracked_telemetry_repeaters=[key],
+            clock_sync_repeaters=[key],
+            clock_autofix_repeaters=[key],
+        )
+        status = HostClockStatus(
+            checked_at=0,
+            trusted=trusted,
+            verified=True,
+            offset_seconds=0.0 if trusted else 172800.0,
+            source="ntp",
+            reference="pool.ntp.org",
+            threshold_seconds=60,
+            message="m",
+        )
+        mock_rm = MagicMock()
+        mock_rm.is_connected = True
+
+        @asynccontextmanager
+        async def _op(*_args, **_kwargs):
+            yield MagicMock()
+
+        mock_rm.radio_operation = _op
+        with (
+            patch("app.radio_sync.radio_manager", mock_rm),
+            patch(
+                "app.radio_sync.AppSettingsRepository.get",
+                new_callable=AsyncMock,
+                return_value=settings,
+            ),
+            patch(
+                "app.radio_sync.ContactRepository.get_by_key",
+                new_callable=AsyncMock,
+                return_value=self._contact(key),
+            ),
+            patch(
+                "app.radio_sync.host_clock.check_host_clock",
+                new_callable=AsyncMock,
+                return_value=status,
+            ) as check,
+            patch(
+                "app.radio_sync._collect_repeater_telemetry",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as collect,
+        ):
+            await _run_telemetry_cycle(collect_contacts=False)
+        return check, collect
+
+    @pytest.mark.asyncio
+    async def test_trusted_clock_syncs_and_may_autofix(self):
+        check, collect = await self._run(trusted=True)
+
+        check.assert_awaited_once()
+        assert collect.await_args.kwargs == {"sync_clock": True, "autofix_clock": True}
+
+    @pytest.mark.asyncio
+    async def test_untrusted_clock_pushes_nothing(self):
+        _, collect = await self._run(trusted=False)
+
+        assert collect.await_args.kwargs == {"sync_clock": False, "autofix_clock": False}
 
 
 class TestRunTelemetryCycleRoutedOnly:

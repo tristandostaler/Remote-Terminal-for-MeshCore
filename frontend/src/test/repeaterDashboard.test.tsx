@@ -45,6 +45,9 @@ const mockHook: {
   sendFloodAdvert: vi.fn(),
   rebootRepeater: vi.fn(),
   syncClock: vi.fn(),
+  fixForwardClock: vi.fn(async () => {}),
+  hostClock: null,
+  refreshHostClock: vi.fn(async () => {}),
 };
 
 vi.mock('../hooks/useRepeaterDashboard', () => ({
@@ -126,6 +129,8 @@ const defaultProps = {
   onToggleTrackedTelemetry: vi.fn(async () => {}),
   clockSyncRepeaters: [] as string[],
   onToggleClockSyncRepeater: vi.fn(async () => {}),
+  clockAutofixRepeaters: [] as string[],
+  onToggleClockAutofixRepeater: vi.fn(async () => {}),
 };
 
 function createDeferred<T>() {
@@ -583,13 +588,13 @@ describe('RepeaterDashboard', () => {
       };
 
       const firstRender = render(<RepeaterDashboard {...defaultProps} />);
-      expect(screen.getByText(/\(drift: 30s\)/)).toBeInTheDocument();
+      expect(screen.getByText(/\(drift: 30s behind\)/)).toBeInTheDocument();
 
       vi.setSystemTime(fetchedAt + 10 * 60 * 1000);
       firstRender.unmount();
 
       render(<RepeaterDashboard {...defaultProps} />);
-      expect(screen.getByText(/\(drift: 30s\)/)).toBeInTheDocument();
+      expect(screen.getByText(/\(drift: 30s behind\)/)).toBeInTheDocument();
       expect(screen.queryByText(/\(drift: 10m30s\)/)).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();

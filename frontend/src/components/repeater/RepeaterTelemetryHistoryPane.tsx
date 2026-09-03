@@ -305,6 +305,8 @@ interface TelemetryHistoryPaneProps {
   trackedTelemetryRepeaters: string[];
   onToggleTrackedTelemetry: (publicKey: string) => Promise<void>;
   clockSyncRepeaters: string[];
+  clockAutofixRepeaters: string[];
+  onToggleClockAutofixRepeater: (publicKey: string) => Promise<void>;
   onToggleClockSyncRepeater: (publicKey: string) => Promise<void>;
 }
 
@@ -316,11 +318,14 @@ export function TelemetryHistoryPane({
   onToggleTrackedTelemetry,
   clockSyncRepeaters,
   onToggleClockSyncRepeater,
+  clockAutofixRepeaters,
+  onToggleClockAutofixRepeater,
 }: TelemetryHistoryPaneProps) {
   const { distanceUnit } = useDistanceUnit();
   const [metric, setMetric] = useState<string>('battery_volts');
   const [toggling, setToggling] = useState(false);
   const [clockSyncToggling, setClockSyncToggling] = useState(false);
+  const [clockAutofixToggling, setClockAutofixToggling] = useState(false);
   const [brushRange, setBrushRange] = useState<{ start: number; end: number } | null>(null);
 
   // Reset the zoom window when switching to a different repeater.
@@ -331,6 +336,16 @@ export function TelemetryHistoryPane({
   const isTracked = trackedTelemetryRepeaters.includes(publicKey);
   const slotsFull = trackedTelemetryRepeaters.length >= MAX_TRACKED && !isTracked;
   const isClockSyncEnabled = clockSyncRepeaters.includes(publicKey);
+  const isClockAutofixEnabled = clockAutofixRepeaters.includes(publicKey);
+
+  const handleToggleClockAutofix = async () => {
+    setClockAutofixToggling(true);
+    try {
+      await onToggleClockAutofixRepeater(publicKey);
+    } finally {
+      setClockAutofixToggling(false);
+    }
+  };
 
   // Discover unique LPP sensors across all history entries
   const lppMetrics = useMemo(() => {
@@ -767,6 +782,24 @@ export function TelemetryHistoryPane({
                   left as-is (the refusal is logged with the offset), and only a reboot resets it.
                 </span>
               </label>
+              {isClockSyncEnabled && (
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={isClockAutofixEnabled}
+                    disabled={clockAutofixToggling}
+                    onChange={handleToggleClockAutofix}
+                    className="w-4 h-4 rounded border-input accent-primary mt-0.5"
+                  />
+                  <span className="text-xs text-muted-foreground leading-relaxed">
+                    Auto-fix a clock that is ahead: when the sync is refused and the repeater reads
+                    more than two minutes ahead, send <code>clkreboot</code> (resets the clock and
+                    reboots the repeater) and sync again once it is back. At most once a day per
+                    repeater, and only while this server&apos;s own clock passes its time-reference
+                    check.
+                  </span>
+                </label>
+              )}
             </div>
           ) : slotsFull ? (
             <div className="space-y-2">

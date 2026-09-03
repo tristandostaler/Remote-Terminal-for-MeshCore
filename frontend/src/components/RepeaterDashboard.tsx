@@ -51,6 +51,8 @@ interface RepeaterDashboardProps {
   onToggleTrackedTelemetry: (publicKey: string) => Promise<void>;
   clockSyncRepeaters: string[];
   onToggleClockSyncRepeater: (publicKey: string) => Promise<void>;
+  clockAutofixRepeaters: string[];
+  onToggleClockAutofixRepeater: (publicKey: string) => Promise<void>;
   autoLoginAndLoadAll?: boolean;
   onAutoLoginConsumed?: () => void;
 }
@@ -74,6 +76,8 @@ export function RepeaterDashboard({
   onToggleTrackedTelemetry,
   clockSyncRepeaters,
   onToggleClockSyncRepeater,
+  clockAutofixRepeaters,
+  onToggleClockAutofixRepeater,
   autoLoginAndLoadAll,
   onAutoLoginConsumed,
 }: RepeaterDashboardProps) {
@@ -98,6 +102,9 @@ export function RepeaterDashboard({
     sendFloodAdvert,
     rebootRepeater,
     syncClock,
+    fixForwardClock,
+    hostClock,
+    refreshHostClock,
   } = useRepeaterDashboard(conversation, { hasAdvertLocation });
   const { password, setPassword, rememberPassword, setRememberPassword, persistAfterLogin } =
     useRememberedServerPassword('repeater', conversation.id);
@@ -404,8 +411,11 @@ export function RepeaterDashboard({
                   onSendZeroHopAdvert={sendZeroHopAdvert}
                   onSendFloodAdvert={sendFloodAdvert}
                   onSyncClock={syncClock}
+                  onFixForwardClock={fixForwardClock}
                   onReboot={rebootRepeater}
                   consoleLoading={consoleLoading}
+                  hostClock={hostClock}
+                  onRefreshHostClock={refreshHostClock}
                 />
               </div>
             </div>
@@ -426,6 +436,8 @@ export function RepeaterDashboard({
               onToggleTrackedTelemetry={onToggleTrackedTelemetry}
               clockSyncRepeaters={clockSyncRepeaters}
               onToggleClockSyncRepeater={onToggleClockSyncRepeater}
+              clockAutofixRepeaters={clockAutofixRepeaters}
+              onToggleClockAutofixRepeater={onToggleClockAutofixRepeater}
             />
           </div>
         )}

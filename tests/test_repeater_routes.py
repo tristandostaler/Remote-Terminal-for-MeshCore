@@ -6,7 +6,14 @@ import pytest
 from fastapi import HTTPException
 from meshcore import EventType
 
-from app.models import CommandRequest, Contact, RepeaterLoginRequest, RepeaterLoginResponse
+from app.models import (
+    CommandRequest,
+    Contact,
+    HostClockStatus,
+    RepeaterFixClockRequest,
+    RepeaterLoginRequest,
+    RepeaterLoginResponse,
+)
 from app.radio import radio_manager
 from app.repository import ContactRepository
 from app.routers.contacts import request_trace
@@ -17,6 +24,7 @@ from app.routers.repeaters import (
     prepare_repeater_connection,
     repeater_acl,
     repeater_advert_intervals,
+    repeater_fix_clock,
     repeater_login,
     repeater_lpp_telemetry,
     repeater_neighbors,
@@ -25,6 +33,7 @@ from app.routers.repeaters import (
     repeater_radio_settings,
     repeater_regions,
     repeater_status,
+    repeater_sync_clock,
     send_repeater_command,
 )
 from app.routers.server_control import fetch_contact_cli_response
@@ -1937,3 +1946,160 @@ class TestRepeaterAddContactError:
 
         assert exc.value.status_code == 422
         assert "Failed to add contact to radio" in exc.value.detail
+
+
+def _host_status(trusted: bool) -> HostClockStatus:
+    return HostClockStatus(
+        checked_at=0,
+        trusted=trusted,
+        verified=True,
+        offset_seconds=0.1 if trusted else 172800.0,
+        source="ntp",
+        reference="pool.ntp.org",
+        threshold_seconds=60,
+        message="verified" if trusted else "Server clock is 172800s ahead of the reference.",
+    )
+
+
+class TestRepeaterClockRoutes:
+    """sync-clock and fix-clock: gated on the host clock, delegating to radio_sync."""
+
+    @pytest.mark.asyncio
+    async def test_sync_clock_refuses_when_server_clock_untrusted(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.repeaters.host_clock.check_host_clock",
+                new_callable=AsyncMock,
+                return_value=_host_status(False),
+            ),
+            patch("app.routers.repeaters._sync_repeater_clock", new_callable=AsyncMock) as sync,
+        ):
+            response = await repeater_sync_clock(KEY_A)
+
+        assert response.status == "server_clock_untrusted"
+        assert response.host_clock.trusted is False
+        assert "ahead of the reference" in response.message
+        sync.assert_not_awaited()
+        mc.commands.send_cmd.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_clock_reports_the_firmware_verdict(self, test_db):
+        from app.radio_sync import ClockSyncResult
+
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        result = ClockSyncResult(
+            "ahead",
+            command="time 1700000000",
+            reply="(ERR: clock cannot go backwards)",
+            repeater_clock="12:00 - 5/9/2026 UTC",
+            offset_seconds=172800,
+        )
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.repeaters.host_clock.check_host_clock",
+                new_callable=AsyncMock,
+                return_value=_host_status(True),
+            ),
+            patch("app.routers.repeaters._ensure_on_radio", new_callable=AsyncMock),
+            patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "app.routers.repeaters._sync_repeater_clock",
+                new_callable=AsyncMock,
+                return_value=result,
+            ) as sync,
+        ):
+            response = await repeater_sync_clock(KEY_A)
+
+        sync.assert_awaited_once()
+        assert response.status == "ahead"
+        assert response.command == "time 1700000000"
+        assert response.repeater_clock == "12:00 - 5/9/2026 UTC"
+        assert response.offset_seconds == 172800
+        assert "Fix Forward Clock" in response.message
+        assert response.host_clock.trusted is True
+
+    @pytest.mark.asyncio
+    async def test_fix_clock_refuses_when_server_clock_untrusted(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.repeaters.host_clock.check_host_clock",
+                new_callable=AsyncMock,
+                return_value=_host_status(False),
+            ),
+            patch("app.routers.repeaters.fix_forward_clock", new_callable=AsyncMock) as fix,
+        ):
+            response = await repeater_fix_clock(KEY_A, RepeaterFixClockRequest(password="pw"))
+
+        assert response.status == "server_clock_untrusted"
+        fix.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fix_clock_passes_password_and_reports_steps(self, test_db):
+        from app.radio_sync import ClockFixResult
+
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        result = ClockFixResult(
+            "fixed",
+            "Rebooted and re-synced.",
+            steps=["clock reads 12:00 - 5/9/2026 UTC (+172800s vs this server)", "sent clkreboot"],
+            before_clock="12:00 - 5/9/2026 UTC",
+            before_offset_seconds=172800,
+            after_clock="12:00 - 3/9/2026 UTC",
+            after_offset_seconds=0,
+        )
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.repeaters.host_clock.check_host_clock",
+                new_callable=AsyncMock,
+                return_value=_host_status(True),
+            ),
+            patch("app.routers.repeaters._ensure_on_radio", new_callable=AsyncMock),
+            patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "app.routers.repeaters.fix_forward_clock",
+                new_callable=AsyncMock,
+                return_value=result,
+            ) as fix,
+        ):
+            response = await repeater_fix_clock(KEY_A, RepeaterFixClockRequest(password="pw"))
+
+        fix.assert_awaited_once()
+        assert fix.await_args.kwargs["password"] == "pw"
+        assert response.status == "fixed"
+        assert response.before_offset_seconds == 172800
+        assert response.after_clock == "12:00 - 3/9/2026 UTC"
+        assert len(response.steps) == 2
+
+    @pytest.mark.asyncio
+    async def test_clock_routes_reject_non_repeaters(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Companion", contact_type=1)
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await repeater_sync_clock(KEY_A)
+            assert exc_info.value.status_code == 400
+            with pytest.raises(HTTPException) as exc_info:
+                await repeater_fix_clock(KEY_A, RepeaterFixClockRequest())
+            assert exc_info.value.status_code == 400

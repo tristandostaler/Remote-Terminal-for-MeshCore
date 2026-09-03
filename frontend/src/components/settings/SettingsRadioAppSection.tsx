@@ -29,6 +29,8 @@ export function SettingsRadioAppSection({
   onToggleTrackedTelemetry,
   clockSyncRepeaters = [],
   onToggleClockSyncRepeater,
+  clockAutofixRepeaters = [],
+  onToggleClockAutofixRepeater,
   trackedTelemetryContacts = [],
   onToggleTrackedTelemetryContact,
   className,
@@ -45,6 +47,8 @@ export function SettingsRadioAppSection({
   onToggleTrackedTelemetry?: (publicKey: string) => Promise<void>;
   clockSyncRepeaters?: string[];
   onToggleClockSyncRepeater?: (publicKey: string) => Promise<void>;
+  clockAutofixRepeaters?: string[];
+  onToggleClockAutofixRepeater?: (publicKey: string) => Promise<void>;
   trackedTelemetryContacts?: string[];
   onToggleTrackedTelemetryContact?: (publicKey: string) => Promise<void>;
   className?: string;
@@ -323,6 +327,22 @@ export function SettingsRadioAppSection({
                       />
                       <span className="text-[0.6875rem] text-muted-foreground">
                         Sync clock on each collection
+                      </span>
+                    </label>
+                  )}
+                  {onToggleClockAutofixRepeater && clockSyncRepeaters.includes(key) && (
+                    <label
+                      className="mt-1 flex items-center gap-1.5 cursor-pointer"
+                      title="If the sync is refused because the repeater's clock is ahead (the firmware never moves a clock backwards), reset it with clkreboot and sync again. Reboots the repeater, at most once a day."
+                    >
+                      <input
+                        type="checkbox"
+                        checked={clockAutofixRepeaters.includes(key)}
+                        onChange={() => onToggleClockAutofixRepeater(key)}
+                        className="w-3.5 h-3.5 rounded border-input accent-primary"
+                      />
+                      <span className="text-[0.6875rem] text-muted-foreground">
+                        Auto-fix a clock that is ahead (clkreboot + sync)
                       </span>
                     </label>
                   )}

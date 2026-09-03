@@ -10,10 +10,12 @@ from app.models import CONTACT_TYPE_REPEATER, AppSettings, ContactUpsert
 from app.repository import AppSettingsRepository, ContactRepository
 from app.routers.settings import (
     AppSettingsUpdate,
+    ClockAutofixRepeaterRequest,
     ClockSyncRepeaterRequest,
     FavoriteRequest,
     TrackedTelemetryRequest,
     get_telemetry_schedule,
+    toggle_clock_autofix_repeater,
     toggle_clock_sync_repeater,
     toggle_favorite,
     toggle_tracked_telemetry,
@@ -509,3 +511,82 @@ class TestRoutedHourlySetting:
 
         assert result.schedule.routed_hourly is True
         assert result.schedule.next_routed_run_at is not None
+
+
+class TestToggleClockAutofixRepeater:
+    """Tests for POST /settings/clock-autofix-repeaters/toggle."""
+
+    async def _create_repeater(self, key: str, name: str = "TestRepeater") -> None:
+        await ContactRepository.upsert(
+            ContactUpsert(public_key=key, name=name, type=CONTACT_TYPE_REPEATER)
+        )
+
+    @pytest.mark.asyncio
+    async def test_rejects_repeater_without_clock_sync(self, test_db):
+        key = "aa" * 32
+        await self._create_repeater(key)
+        await AppSettingsRepository.update(tracked_telemetry_repeaters=[key])
+
+        with pytest.raises(HTTPException) as exc_info:
+            await toggle_clock_autofix_repeater(ClockAutofixRepeaterRequest(public_key=key))
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_enables_for_clock_synced_repeater(self, test_db):
+        key = "bb" * 32
+        await self._create_repeater(key)
+        await AppSettingsRepository.update(
+            tracked_telemetry_repeaters=[key], clock_sync_repeaters=[key]
+        )
+
+        result = await toggle_clock_autofix_repeater(ClockAutofixRepeaterRequest(public_key=key))
+
+        assert key in result.clock_autofix_repeaters
+        settings = await AppSettingsRepository.get()
+        assert key in settings.clock_autofix_repeaters
+
+    @pytest.mark.asyncio
+    async def test_disables(self, test_db):
+        key = "cc" * 32
+        await self._create_repeater(key)
+        await AppSettingsRepository.update(
+            tracked_telemetry_repeaters=[key],
+            clock_sync_repeaters=[key],
+            clock_autofix_repeaters=[key],
+        )
+
+        result = await toggle_clock_autofix_repeater(ClockAutofixRepeaterRequest(public_key=key))
+
+        assert key not in result.clock_autofix_repeaters
+
+    @pytest.mark.asyncio
+    async def test_disabling_clock_sync_cascades(self, test_db):
+        key = "dd" * 32
+        await self._create_repeater(key)
+        await AppSettingsRepository.update(
+            tracked_telemetry_repeaters=[key],
+            clock_sync_repeaters=[key],
+            clock_autofix_repeaters=[key],
+        )
+
+        await toggle_clock_sync_repeater(ClockSyncRepeaterRequest(public_key=key))
+
+        settings = await AppSettingsRepository.get()
+        assert key not in settings.clock_sync_repeaters
+        assert key not in settings.clock_autofix_repeaters
+
+    @pytest.mark.asyncio
+    async def test_removing_telemetry_tracking_cascades(self, test_db):
+        key = "ee" * 32
+        await self._create_repeater(key)
+        await AppSettingsRepository.update(
+            tracked_telemetry_repeaters=[key],
+            clock_sync_repeaters=[key],
+            clock_autofix_repeaters=[key],
+        )
+
+        result = await toggle_tracked_telemetry(TrackedTelemetryRequest(public_key=key))
+
+        assert result.clock_autofix_repeaters == []
+        settings = await AppSettingsRepository.get()
+        assert key not in settings.clock_autofix_repeaters

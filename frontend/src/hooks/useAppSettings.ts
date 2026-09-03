@@ -148,6 +148,35 @@ export function useAppSettings() {
     }
   }, []);
 
+  const handleToggleClockAutofixRepeater = useCallback(async (publicKey: string) => {
+    const key = publicKey.toLowerCase();
+    setAppSettings((prev) => {
+      if (!prev) return prev;
+      const current = prev.clock_autofix_repeaters ?? [];
+      const wasEnabled = current.includes(key);
+      const optimistic = wasEnabled ? current.filter((k) => k !== key) : [...current, key];
+      return { ...prev, clock_autofix_repeaters: optimistic };
+    });
+
+    try {
+      const result = await api.toggleClockAutofixRepeater(publicKey);
+      setAppSettings((prev) =>
+        prev ? { ...prev, clock_autofix_repeaters: result.clock_autofix_repeaters } : prev
+      );
+    } catch (err) {
+      console.error('Failed to toggle repeater clock auto-fix:', err);
+      try {
+        const settings = await api.getSettings();
+        setAppSettings(settings);
+      } catch {
+        // If refetch also fails, leave optimistic state
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const detail = (err as any)?.body?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Failed to update repeater clock auto-fix');
+    }
+  }, []);
+
   const handleToggleTrackedTelemetryContact = useCallback(async (publicKey: string) => {
     const key = publicKey.toLowerCase();
     setAppSettings((prev) => {
@@ -222,6 +251,7 @@ export function useAppSettings() {
     handleToggleBlockedName,
     handleToggleTrackedTelemetry,
     handleToggleClockSyncRepeater,
+    handleToggleClockAutofixRepeater,
     handleToggleTrackedTelemetryContact,
   };
 }

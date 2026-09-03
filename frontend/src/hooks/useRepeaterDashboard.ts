@@ -2,6 +2,9 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { api } from '../api';
 import { toast } from '../components/ui/sonner';
 import type {
+  HostClockStatus,
+  RepeaterFixClockResponse,
+  RepeaterSyncClockResponse,
   Conversation,
   PaneName,
   PaneState,
@@ -202,6 +205,11 @@ export interface UseRepeaterDashboardResult {
   sendFloodAdvert: () => Promise<void>;
   rebootRepeater: () => Promise<void>;
   syncClock: () => Promise<void>;
+  /** clkreboot (resets the clock) then sync again -- for a repeater whose clock is ahead. */
+  fixForwardClock: () => Promise<void>;
+  /** Whether the server's own clock may be pushed; null until fetched. */
+  hostClock: HostClockStatus | null;
+  refreshHostClock: () => Promise<void>;
 }
 
 interface UseRepeaterDashboardOptions {
@@ -243,6 +251,10 @@ export function useRepeaterDashboard(
   // unmount. Initialised from activeConversation because the parent renders
   // <RepeaterDashboard key={id}>, so this hook only ever sees one conversation.
   const activeIdRef = useRef(activeConversation?.id ?? null);
+  // The last password used to log in, kept in memory only, so a forward-clock
+  // fix can log back in after the reboot if the repeater forgot us.
+  const lastPasswordRef = useRef<string | null>(null);
+  const [hostClock, setHostClock] = useState<HostClockStatus | null>(null);
 
   // Guard against setting state after unmount (retry timers firing late)
   const mountedRef = useRef(true);
@@ -296,6 +308,7 @@ export function useRepeaterDashboard(
       if (!publicKey) return;
       const conversationId = publicKey;
       const method = password.trim().length > 0 ? 'password' : 'blank';
+      lastPasswordRef.current = password;
 
       setLoginLoading(true);
       setLoginError(null);
@@ -498,10 +511,100 @@ export function useRepeaterDashboard(
     await sendConsoleCommand('reboot');
   }, [sendConsoleCommand]);
 
+  const refreshHostClock = useCallback(async () => {
+    try {
+      setHostClock(await api.getHostClock(true));
+    } catch (err) {
+      console.error('Failed to check the server clock:', err);
+    }
+  }, []);
+
+  // Learn whether the server's clock is trusted as soon as the dashboard is
+  // usable, so the clock buttons can be disabled before anyone clicks them.
+  useEffect(() => {
+    if (!loggedIn) return;
+    let cancelled = false;
+    api
+      .getHostClock()
+      .then((status) => {
+        if (!cancelled) setHostClock(status);
+      })
+      .catch((err) => console.error('Failed to check the server clock:', err));
+    return () => {
+      cancelled = true;
+    };
+  }, [loggedIn]);
+
+  // Runs a server-side clock action and records it in the console history.
+  const runClockAction = useCallback(
+    async (
+      label: string,
+      action: (publicKey: string) => Promise<{ host_clock: HostClockStatus; message: string }>,
+      describe: (result: { message: string }) => string
+    ) => {
+      const publicKey = getPublicKey();
+      if (!publicKey) return;
+      const conversationId = publicKey;
+      const now = Math.floor(Date.now() / 1000);
+
+      setConsoleHistory((prev) => [
+        ...prev,
+        { command: label, response: '', timestamp: now, outgoing: true },
+      ]);
+      setConsoleLoading(true);
+      try {
+        const result = await action(publicKey);
+        if (activeIdRef.current !== conversationId) return;
+        setHostClock(result.host_clock);
+        setConsoleHistory((prev) => [
+          ...prev,
+          {
+            command: label,
+            response: describe(result),
+            timestamp: Math.floor(Date.now() / 1000),
+            outgoing: false,
+          },
+        ]);
+      } catch (err) {
+        if (activeIdRef.current !== conversationId) return;
+        const msg = err instanceof Error ? err.message : 'Command failed';
+        setConsoleHistory((prev) => [
+          ...prev,
+          { command: label, response: `Error: ${msg}`, timestamp: now, outgoing: false },
+        ]);
+      } finally {
+        if (activeIdRef.current === conversationId) {
+          setConsoleLoading(false);
+        }
+      }
+    },
+    [getPublicKey]
+  );
+
   const syncClock = useCallback(async () => {
-    const epochSeconds = Math.floor(Date.now() / 1000);
-    await sendConsoleCommand(`time ${epochSeconds}`);
-  }, [sendConsoleCommand]);
+    await runClockAction(
+      'time <server clock>',
+      (publicKey) => api.repeaterSyncClock(publicKey),
+      (result) => {
+        const r = result as RepeaterSyncClockResponse;
+        return r.command ? `${r.command} -> ${r.message}` : r.message;
+      }
+    );
+    void refreshPane('nodeInfo');
+  }, [runClockAction, refreshPane]);
+
+  const fixForwardClock = useCallback(async () => {
+    await runClockAction(
+      'clkreboot + time <server clock>',
+      (publicKey) => api.repeaterFixClock(publicKey, lastPasswordRef.current),
+      (result) => {
+        const r = result as RepeaterFixClockResponse;
+        const steps = r.steps.map((step) => `  - ${step}`).join('\n');
+        return `[${r.status}] ${r.message}${steps ? `\n${steps}` : ''}`;
+      }
+    );
+    void refreshPane('nodeInfo');
+  }, [runClockAction, refreshPane]);
 
   return {
     loggedIn,
@@ -521,5 +624,8 @@ export function useRepeaterDashboard(
     sendFloodAdvert,
     rebootRepeater,
     syncClock,
+    fixForwardClock,
+    hostClock,
+    refreshHostClock,
   };
 }

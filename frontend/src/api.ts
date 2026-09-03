@@ -43,6 +43,10 @@ import type {
   TelemetryHistoryEntry,
   TelemetrySchedule,
   ClockSyncRepeaterResponse,
+  ClockAutofixRepeaterResponse,
+  HostClockStatus,
+  RepeaterSyncClockResponse,
+  RepeaterFixClockResponse,
   TrackedTelemetryContactsResponse,
   TrackedTelemetryResponse,
   StatisticsResponse,
@@ -605,6 +609,15 @@ export const api = {
       body: JSON.stringify({ public_key: publicKey }),
     }),
 
+  toggleClockAutofixRepeater: (publicKey: string) =>
+    fetchJson<ClockAutofixRepeaterResponse>('/settings/clock-autofix-repeaters/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ public_key: publicKey }),
+    }),
+
+  getHostClock: (force = false) =>
+    fetchJson<HostClockStatus>(force ? '/settings/host-clock?force=true' : '/settings/host-clock'),
+
   // Tracked contact telemetry
   toggleTrackedTelemetryContact: (publicKey: string) =>
     fetchJson<TrackedTelemetryContactsResponse>('/settings/tracked-telemetry-contacts/toggle', {
@@ -698,6 +711,15 @@ export const api = {
   // Granular repeater endpoints
   repeaterLogin: (publicKey: string, password: string) =>
     fetchJson<RepeaterLoginResponse>(`/contacts/${publicKey}/repeater/login`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  repeaterSyncClock: (publicKey: string) =>
+    fetchJson<RepeaterSyncClockResponse>(`/contacts/${publicKey}/repeater/sync-clock`, {
+      method: 'POST',
+    }),
+  repeaterFixClock: (publicKey: string, password: string | null) =>
+    fetchJson<RepeaterFixClockResponse>(`/contacts/${publicKey}/repeater/fix-clock`, {
       method: 'POST',
       body: JSON.stringify({ password }),
     }),
