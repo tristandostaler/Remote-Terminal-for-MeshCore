@@ -170,7 +170,7 @@ class TestFeedingTheIngest:
         handled = AsyncMock()
         monkeypatch.setattr(cdi, "handle_channel_data", handled)
         # The golden packet's chunk carries sender prefix 0x3D1F; pretend it is us.
-        monkeypatch.setattr(pp, "_self_sender_prefix", lambda: 0x3D1F)
+        monkeypatch.setattr(cdi, "self_sender_prefix", lambda: 0x3D1F)
 
         result = await pp._process_group_data(GOLDEN_PACKET, snr=12.0)
 

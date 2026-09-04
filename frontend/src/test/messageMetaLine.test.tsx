@@ -406,6 +406,30 @@ describe('message actions', () => {
     expect(writeText).toHaveBeenCalledWith('copy me');
   });
 
+  it('offers neither copy nor retry on a picture bubble', async () => {
+    // The body is the marker the server hangs the picture off. Copying it hands
+    // over `aeib:grp:...`; retrying it transmits that string, which is how it
+    // turned up as a message in a connected app.
+    render(
+      <MessageList
+        messages={[
+          createMessage({ type: 'CHAN', text: 'aeib:grp:1c1e08f41fd4dd96', send_state: 'sent' }),
+        ]}
+        contacts={[]}
+        loading={false}
+        onDeleteMessage={vi.fn()}
+        onRetryMessage={vi.fn()}
+      />
+    );
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+
+    expect(screen.queryByRole('button', { name: 'Copy text' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Retry/ })).toBeNull();
+    // Delete still means what it says.
+    expect(screen.getByRole('button', { name: /Delete/ })).toBeInTheDocument();
+  });
+
   it('retries a direct message under its original timestamp', async () => {
     const onRetryMessage = vi.fn();
     const message = createMessage({ type: 'PRIV', send_state: 'failed' });

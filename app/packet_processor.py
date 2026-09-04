@@ -550,12 +550,8 @@ async def _process_group_data(raw_bytes: bytes, *, snr: float | None = None) -> 
     Both paths feed one reassembler, and a chunk arriving twice -- once per path,
     or again via a repeater's re-flood -- is absorbed idempotently there.
     """
-    from app.imaging.aeic.channel_data import (
-        DATA_TYPE_AEIC_IMAGE,
-        ParsedChannelData,
-        parse_chunk_blob,
-    )
-    from app.imaging.aeic.channel_data_ingest import handle_channel_data
+    from app.imaging.aeic.channel_data import ParsedChannelData
+    from app.imaging.aeic.channel_data_ingest import handle_channel_data, is_our_own_image_chunk
 
     channels = await ChannelRepository.get_all()
     for channel in channels:
@@ -569,19 +565,11 @@ async def _process_group_data(raw_bytes: bytes, *, snr: float | None = None) -> 
 
         # An echo of our own send: repeaters re-flood our packet and the RF log
         # hears the copy. Without this check every picture we sent came straight
-        # back as an incoming one. Only an AEIC chunk carries a sender identity,
-        # so only it can be filtered this way; 1/65536 of peers share our prefix
-        # and upstream accepts those odds everywhere this field is used.
-        if decrypted.data_type == DATA_TYPE_AEIC_IMAGE:
-            chunk = parse_chunk_blob(decrypted.data)
-            self_prefix = _self_sender_prefix()
-            if (
-                chunk is not None
-                and self_prefix is not None
-                and (chunk.sender_prefix == self_prefix)
-            ):
-                logger.debug("Ignoring the RF echo of our own GRP_DATA chunk")
-                return {"decrypted": True, "channel_name": channel.name, "channel_key": channel.key}
+        # back as an incoming one. Shared with the companion frame-27 path, which
+        # hears the same echo by another route.
+        if is_our_own_image_chunk(decrypted.data_type, decrypted.data):
+            logger.debug("Ignoring the RF echo of our own GRP_DATA chunk")
+            return {"decrypted": True, "channel_name": channel.name, "channel_key": channel.key}
 
         logger.info(
             "Decoded a GRP_DATA packet off RF for channel %s: data type 0x%04X, %d bytes",
@@ -619,18 +607,6 @@ async def _process_group_data(raw_bytes: bytes, *, snr: float | None = None) -> 
 
     # No known key fits. Same silence as channel text we cannot read.
     return None
-
-
-def _self_sender_prefix() -> int | None:
-    """This node's 2-byte AEIC sender prefix, or None while it is unknown.
-
-    One definition, in the module that also uses it to decide whether a picture
-    an app sent through the virtual node is ours: the echo filter here and the
-    attribution there have to agree about what "ours" means.
-    """
-    from app.imaging.aeic.channel_data_ingest import self_sender_prefix
-
-    return self_sender_prefix()
 
 
 async def _process_advertisement(

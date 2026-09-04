@@ -408,10 +408,20 @@ async def on_channel_data(frame: bytes) -> None:
     nothing here touches crypto.
     """
     from app.imaging.aeic.channel_data import parse_channel_data_frame
-    from app.imaging.aeic.channel_data_ingest import handle_channel_data
+    from app.imaging.aeic.channel_data_ingest import handle_channel_data, is_our_own_image_chunk
 
     parsed = parse_channel_data_frame(frame)
     if parsed is None:
+        return
+    if is_our_own_image_chunk(parsed.data_type, parsed.payload):
+        # The firmware hands the companion its own transmissions, so a picture
+        # sent from here came straight back as one received here -- a second
+        # marker row for the same photo, stored `outgoing` since it carries our
+        # prefix, which is what put a resendable "aeib:grp:..." bubble in the
+        # conversation. The raw-RF path has always dropped this echo; frame 27
+        # never did. A picture an APP sends also carries our prefix, but that one
+        # is absorbed where the app's send is handled, not here.
+        logger.debug("Ignoring the companion echo of our own GRP_DATA chunk")
         return
     conversation_key = await _resolve_channel_data_key(parsed.channel_index)
     if conversation_key is None:

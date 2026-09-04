@@ -211,6 +211,31 @@ class TestRepository:
         assert updated.profanity_mode == "censor"
 
 
+class TestMarkerRowsNeverReachBots:
+    """A picture's marker row is a local convention, not text a bot may act on."""
+
+    @pytest.mark.asyncio
+    async def test_only_real_text_is_handled(self, monkeypatch):
+        import asyncio
+
+        engine = BotEngine()
+        engine._started = True
+        monkeypatch.setattr(type(engine), "disabled", property(lambda _self: False))
+        seen: list[str] = []
+
+        async def spy(data: dict) -> None:
+            seen.append(data["text"])
+
+        monkeypatch.setattr(engine, "_handle_message", spy)
+
+        engine.handle_message_event({"type": "CHAN", "text": "aeib:grp:1c1e08f41fd4dd96"})
+        engine.handle_message_event({"type": "CHAN", "text": "mediax:17"})
+        engine.handle_message_event({"type": "CHAN", "text": "hello"})
+        await asyncio.sleep(0)
+
+        assert seen == ["hello"]
+
+
 class TestEngineTestRun:
     @pytest.fixture
     def engine(self):

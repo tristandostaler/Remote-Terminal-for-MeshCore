@@ -157,6 +157,22 @@ class TestFanoutManagerDispatch:
         assert len(mod.message_calls) == 0
 
     @pytest.mark.asyncio
+    async def test_broadcast_message_skips_a_local_marker_row(self):
+        """``aeib:`` is a server-to-UI convention, not something anyone said."""
+        manager = FanoutManager()
+        mod = StubModule()
+        manager._modules["test-id"] = (mod, {"messages": "all", "raw_packets": "none"})
+
+        await manager.broadcast_message(
+            {"type": "CHAN", "conversation_key": "pk1", "text": "aeib:grp:1c1e08f41fd4dd96"}
+        )
+        await manager.broadcast_message(
+            {"type": "CHAN", "conversation_key": "pk1", "text": "mediax:17"}
+        )
+
+        assert mod.message_calls == []
+
+    @pytest.mark.asyncio
     async def test_broadcast_raw_dispatches_to_matching_module(self):
         manager = FanoutManager()
         mod = StubModule()

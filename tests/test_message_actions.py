@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import time as _time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -417,6 +418,46 @@ class TestRetryMessage:
         assert result.message_id == sent.id
         stored = await MessageRepository.get_by_id(sent.id)
         assert stored is not None and stored.send_attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_rejects_a_picture_marker_row(self, test_db):
+        """Its body is bookkeeping for a photo; resending it transmits the marker."""
+        mc = _make_mc(name="MyNode")
+        chan_key = "d0" * 16
+        await ChannelRepository.upsert(key=chan_key, name="#general")
+        msg_id = await MessageRepository.create(
+            msg_type="CHAN",
+            text="aeib:grp:1c1e08f41fd4dd96",
+            conversation_key=chan_key,
+            received_at=1_700_000_000,
+            sender_timestamp=int(_time.time()),
+            outgoing=True,
+        )
+        assert msg_id is not None
+
+        with _entered(_radio_patches(mc)), pytest.raises(HTTPException) as err:
+            await retry_message(msg_id, new_timestamp=False)
+        assert err.value.status_code == 400
+        assert "picture" in err.value.detail
+
+    @pytest.mark.asyncio
+    async def test_rejects_an_undecodable_media_marker_row(self, test_db):
+        mc = _make_mc(name="MyNode")
+        chan_key = "d0" * 16
+        await ChannelRepository.upsert(key=chan_key, name="#general")
+        msg_id = await MessageRepository.create(
+            msg_type="CHAN",
+            text="mediax:17",
+            conversation_key=chan_key,
+            received_at=1_700_000_000,
+            sender_timestamp=int(_time.time()),
+            outgoing=True,
+        )
+        assert msg_id is not None
+
+        with _entered(_radio_patches(mc)), pytest.raises(HTTPException) as err:
+            await retry_message(msg_id, new_timestamp=True)
+        assert err.value.status_code == 400
 
     @pytest.mark.asyncio
     async def test_rejects_an_incoming_message(self, test_db):

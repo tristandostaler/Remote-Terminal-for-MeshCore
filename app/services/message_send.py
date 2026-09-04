@@ -1070,6 +1070,13 @@ async def _channel_echo_watchdog(
         msg = await MessageRepository.get_by_id(message_id)
         if not msg:
             return
+        from app.imaging.aeic.channel_data_ingest import is_local_marker
+
+        if is_local_marker(msg.text):
+            # Nothing textual was ever sent for this row -- it stands in for a
+            # picture -- so there is no echo to hear and nothing to resend. A
+            # resend would put the marker itself on the air.
+            return
         if msg.acked > 0:
             logger.debug(
                 "Echo watchdog: message %d already has %d echo(s), skipping", message_id, msg.acked

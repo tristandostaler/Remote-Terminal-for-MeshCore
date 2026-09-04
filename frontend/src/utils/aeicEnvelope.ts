@@ -154,3 +154,17 @@ export function parseUnsupportedMediaRef(text: string): number | null {
   const id = Number(text.slice(UNSUPPORTED_MARKER_PREFIX.length).trim());
   return Number.isInteger(id) && id > 0 ? id : null;
 }
+
+/**
+ * Whether a message body is one of those markers rather than something someone
+ * wrote.
+ *
+ * The bubble for such a row shows the media, so every affordance that treats the
+ * body as text has to skip it: copying one hands you `aeib:grp:1c1e08f41fd4dd96`
+ * instead of the picture, and resending one puts that string on the air, where
+ * it arrives as a message in everyone else's app.
+ */
+export function isLocalMarkerText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return text.startsWith(BINARY_MARKER_PREFIX) || text.startsWith(UNSUPPORTED_MARKER_PREFIX);
+}

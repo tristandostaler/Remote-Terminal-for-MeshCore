@@ -311,6 +311,27 @@ def unsupported_marker_text(media_id: int) -> str:
     return f"{MARKER_UNSUPPORTED_PREFIX}{media_id}"
 
 
+LOCAL_MARKER_PREFIXES = (MARKER_PREFIX, MARKER_UNSUPPORTED_PREFIX)
+"""Every marker prefix that stands in for media instead of for words.
+
+One definition, because the consumers are scattered: the companion protocol, web
+push, MQTT fanout and the bot engine each have to recognise a marker row, and a
+second copy of this tuple is how one of them ends up publishing
+``aeib:grp:1c1e08f41fd4dd96`` to somebody.
+"""
+
+
+def is_local_marker(text: str | None) -> bool:
+    """Whether a stored message body is a marker rather than something someone wrote.
+
+    A marker row is a convention between this server and its own web UI, which
+    renders the picture the row points at. Anything that reads a message as text
+    -- a push notification body, an MQTT payload, a bot matching a command --
+    has to skip it, or it publishes the convention itself.
+    """
+    return bool(text) and str(text).startswith(LOCAL_MARKER_PREFIXES)
+
+
 async def _note_undecodable(
     parsed: ParsedChannelData,
     *,
@@ -554,6 +575,25 @@ async def handle_channel_data(
     except Exception:
         logger.exception("Failed to store a reassembled GRP_DATA image")
     return True
+
+
+def is_our_own_image_chunk(data_type: int, payload: bytes) -> bool:
+    """Whether this GRP_DATA blob is a picture chunk THIS node transmitted.
+
+    An echo of our own send comes back by more than one route: a repeater
+    re-floods the packet and the RF log hears the copy, and the firmware hands
+    the companion its own transmissions as frame 27. Ingesting either one turns
+    every picture we send into a picture we also received.
+
+    Only an AEIC chunk carries a sender identity, so only it can be recognised
+    this way; 1/65536 of peers share our prefix and every use of this field
+    accepts those odds.
+    """
+    if data_type != DATA_TYPE_AEIC_IMAGE:
+        return False
+    chunk = parse_chunk_blob(payload)
+    ours = self_sender_prefix()
+    return chunk is not None and ours is not None and chunk.sender_prefix == ours
 
 
 async def _attribute_image(sender_prefix: int | None) -> tuple[str | None, str | None, bool]:

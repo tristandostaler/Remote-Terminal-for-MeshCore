@@ -78,11 +78,6 @@ APP_START_NAME_OFFSET = 7
 # repeater's re-flood) do not put the same picture in an app's chat twice.
 RELAY_DEDUP_SECONDS = 60.0
 MAX_REMEMBERED_RELAYED_BLOBS = 128
-# Message texts that are local markers rather than anything that was on the air:
-# ``channel_data_ingest.MARKER_PREFIX`` and ``MARKER_UNSUPPORTED_PREFIX``, spelled
-# out here so the companion protocol does not import the imaging package.
-LOCAL_MARKER_PREFIXES = ("aeib:", "mediax:")
-
 _CMD = CommandType
 _RESP = PacketType
 
@@ -1661,8 +1656,12 @@ class VirtualNodeServer:
 
     async def _frame_for_message(self, message: dict) -> bytes | None:
         """The companion frame for a stored message payload, or None if it has no wire form."""
+        # Imported here, not at module scope, so the companion protocol still does
+        # not drag in the imaging package at import time.
+        from app.imaging.aeic.channel_data_ingest import is_local_marker
+
         text = str(message.get("text") or "")
-        if text.startswith(LOCAL_MARKER_PREFIXES):
+        if is_local_marker(text):
             # A marker row stands in for media that never crossed the air as
             # text -- a picture received as GRP_DATA, or one this build cannot
             # decode. It is a convention between this server and its own web UI;
