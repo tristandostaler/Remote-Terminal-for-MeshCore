@@ -24,6 +24,8 @@ from app.imaging.aeic.channel_data import (
     RESP_CODE_CHANNEL_DATA_RECV,
     ChannelDataFormatError,
     PendingImage,
+    aliased_public_key,
+    aliased_sender_prefix,
     assemble,
     build_chunk_blob,
     build_image_chunks,
@@ -254,3 +256,38 @@ class TestCompanionFrames:
     )
     def test_non_frames_return_none(self, frame):
         assert parse_channel_data_frame(frame) is None
+
+
+class TestTheAliasAnAppSeesOnOurPictures:
+    """Two bytes of identity are all a chunk carries, so both ends of the alias
+    -- the chunk we relabel and the contact we serve for it -- have to agree, or
+    the app has nothing to put a name to."""
+
+    def test_the_key_carries_the_same_alias_as_the_chunks(self):
+        key = "cc" * 32
+        alias = aliased_public_key(key)
+        assert alias is not None
+        assert int(alias[:4], 16) == aliased_sender_prefix(0xCCCC)
+
+    def test_only_the_two_identity_bytes_move(self):
+        key = "9747" + "0123456789abcdef" * 3 + "0123456789ab"
+        alias = aliased_public_key(key)
+        assert alias is not None
+        assert alias[:4] == "68b8"
+        assert alias[4:] == key[4:]
+        assert len(alias) == 64
+
+    def test_it_is_its_own_inverse(self):
+        key = "9747" + "aa" * 30
+        assert aliased_public_key(aliased_public_key(key)) == key
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            pytest.param("", id="empty"),
+            pytest.param("cc" * 6, id="a prefix-only contact"),
+            pytest.param("zz" * 32, id="not hex"),
+        ],
+    )
+    def test_a_key_that_is_not_a_full_key_has_no_alias(self, key):
+        assert aliased_public_key(key) is None

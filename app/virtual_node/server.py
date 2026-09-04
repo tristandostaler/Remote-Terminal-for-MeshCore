@@ -36,7 +36,7 @@ from meshcore.packets import CommandType, PacketType
 
 from app.channel_constants import PUBLIC_CHANNEL_KEY
 from app.config import settings
-from app.models import ContactUpsert
+from app.models import Contact, ContactUpsert
 from app.repository import (
     ChannelRepository,
     ContactRepository,
@@ -830,15 +830,61 @@ class VirtualNodeServer:
             if since and lastmod <= since:
                 continue
             frames.append(protocol.encode_contact(contact, lastmod=lastmod))
+        alias = self._alias_contact()
+        if alias is not None:
+            # Sent whatever the app's cursor says, and deliberately not counted
+            # towards `newest`: it is not a stored row with a write clock, and
+            # dating it "now" would push the cursor past real contacts whose own
+            # lastmod is older than this moment, hiding them for good.
+            frames.append(protocol.encode_contact(alias, lastmod=1))
         return [
             protocol.encode_contact_start(len(frames)),
             *frames,
             protocol.encode_contact_end(newest),
         ]
 
+    def _alias_contact(self) -> Contact | None:
+        """This radio as an app must see it on the pictures this node sends.
+
+        A picture chunk carries two bytes of its sender's key, and the copy an
+        app is handed carries those two bytes complemented -- otherwise the app,
+        whose identity is this radio's, throws the picture away as its own echo
+        (see ``LOCAL_ALIAS_PREFIX_XOR``). Nothing in the contact list then matched
+        them, so every picture from here was labelled with the bytes themselves:
+        "Node 68b8" where the sender's name belongs.
+
+        Serving that alias as a contact under this radio's own name is what puts
+        the name back. It is synthetic -- no row exists for it, and nothing on the
+        air answers to it -- so a message addressed to it is refused rather than
+        transmitted; see ``_send_text_message``.
+        """
+        from app.imaging.aeic.channel_data import aliased_public_key
+        from app.imaging.aeic.channel_data_ingest import self_node_identity
+
+        identity = self_node_identity()
+        if identity is None:
+            return None
+        public_key, name = identity
+        alias = aliased_public_key(public_key)
+        if alias is None or not name:
+            # Without a name there is nothing to improve on: the app would print
+            # the alias bytes either way, and an unnamed contact in the list is
+            # worse than none.
+            return None
+        return Contact(public_key=alias, name=name, type=1, last_advert=1)
+
+    def _is_alias_prefix(self, prefix_hex: str) -> bool:
+        """Whether an app is addressing the synthetic identity of this node."""
+        alias = self._alias_contact()
+        return alias is not None and alias.public_key.startswith(prefix_hex.lower())
+
     async def _contact_by_key(self, payload: bytes) -> bytes:
         key = protocol.parse_public_key_arg(payload)
         contact = await ContactRepository.get_by_key(key) if key else None
+        if contact is None and key:
+            alias = self._alias_contact()
+            if alias is not None and alias.public_key == key.lower():
+                contact = alias
         if contact is None or not protocol.is_full_public_key(contact.public_key):
             return protocol.encode_error(ErrorCode.NOT_FOUND)
         return protocol.encode_contact(contact)
@@ -1103,6 +1149,14 @@ class VirtualNodeServer:
 
         contact = await self._contact_for_prefix(outgoing.pubkey_prefix)
         if contact is None:
+            if self._is_alias_prefix(outgoing.pubkey_prefix):
+                # The contact named after this radio in the app's list is the
+                # identity its pictures carry, not a node on the air. Say so
+                # rather than transmitting to a key nobody holds.
+                raise VirtualNodeError(
+                    ErrorCode.ILLEGAL_ARG,
+                    "that contact is this node itself and cannot be messaged",
+                )
             raise VirtualNodeError(ErrorCode.NOT_FOUND, "unknown destination prefix")
 
         # An app addresses a contact by a 6-byte prefix; say which one that

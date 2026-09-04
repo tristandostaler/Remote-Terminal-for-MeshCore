@@ -540,6 +540,87 @@ class TestContacts:
         await client.read()
 
     @pytest.mark.asyncio
+    async def test_the_pictures_this_node_sends_arrive_with_a_name_on_them(
+        self, proxy, monkeypatch
+    ):
+        """A chunk carries two bytes of identity, and ours are complemented.
+
+        Without a contact behind those two bytes an app has nothing to print but
+        the bytes: "Node 3333" where the sender's name belongs.
+        """
+        from app.imaging.aeic import channel_data_ingest
+
+        server, radio, connect = proxy
+        monkeypatch.setattr(channel_data_ingest, "self_node_identity", lambda: ("cc" * 32, "Proxy"))
+        client = await connect()
+
+        await client.send_only(b"\x04")
+        start = await client.read()
+        assert int.from_bytes(start[1:5], "little") == 1
+        payload = (await parse_with_library(await client.read()))[0].payload
+        await client.read()
+
+        # 0xCCCC complemented -- the same alias the relayed chunks carry.
+        assert payload["public_key"] == "3333" + "cc" * 30
+        assert payload["adv_name"] == "Proxy"
+
+    @pytest.mark.asyncio
+    async def test_the_alias_is_sent_however_far_the_app_has_synced(self, proxy, monkeypatch):
+        """It has no write clock of its own, so a cursor must not hide it."""
+        from app.imaging.aeic import channel_data_ingest
+
+        server, radio, connect = proxy
+        monkeypatch.setattr(channel_data_ingest, "self_node_identity", lambda: ("cc" * 32, "Proxy"))
+        await ContactRepository.upsert(
+            ContactUpsert(public_key=KEY_A, name="Alice", type=1, last_seen=1_700_000_000)
+        )
+        client = await connect()
+
+        await client.send_only(b"\x04" + (1_700_000_000).to_bytes(4, "little"))
+        start = await client.read()
+        assert int.from_bytes(start[1:5], "little") == 1, "Alice is synced, the alias is not"
+        payload = (await parse_with_library(await client.read()))[0].payload
+        end = await client.read()
+
+        assert payload["public_key"].startswith("3333")
+        # And it does not drag the cursor forward past contacts older than now.
+        assert int.from_bytes(end[1:5], "little") == 1_700_000_000
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_served_while_the_radio_has_not_named_itself(self, proxy, monkeypatch):
+        from app.imaging.aeic import channel_data_ingest
+
+        server, radio, connect = proxy
+        monkeypatch.setattr(channel_data_ingest, "self_node_identity", lambda: None)
+        client = await connect()
+
+        await client.send_only(b"\x04")
+        start = await client.read()
+        assert int.from_bytes(start[1:5], "little") == 0
+
+    @pytest.mark.asyncio
+    async def test_a_message_to_the_alias_is_refused_rather_than_transmitted(
+        self, proxy, monkeypatch
+    ):
+        """Nothing on the air answers to it; it is this node wearing a mask."""
+        from app.imaging.aeic import channel_data_ingest
+
+        server, radio, connect = proxy
+        monkeypatch.setattr(channel_data_ingest, "self_node_identity", lambda: ("cc" * 32, "Proxy"))
+        client = await connect()
+
+        payload = (
+            b"\x00\x00"
+            + (1_700_000_000).to_bytes(4, "little")
+            + bytes.fromhex("3333" + "cc" * 4)
+            + b"hi"
+        )
+        response = await client.command(b"\x02" + payload)
+
+        assert response == protocol.encode_error(ErrorCode.ILLEGAL_ARG)
+        assert radio.meshcore.sent == []
+
+    @pytest.mark.asyncio
     async def test_get_contact_by_key(self, proxy):
         server, radio, connect = proxy
         await ContactRepository.upsert(ContactUpsert(public_key=KEY_A, name="Alice", type=1))

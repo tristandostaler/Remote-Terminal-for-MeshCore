@@ -198,6 +198,29 @@ def aliased_sender_prefix(sender_prefix: int) -> int:
     return (sender_prefix ^ LOCAL_ALIAS_PREFIX_XOR) & 0xFFFF
 
 
+def aliased_public_key(public_key: str) -> str | None:
+    """The whole key an app should resolve an aliased chunk back to.
+
+    Two bytes of identity are all a chunk header carries, so an app that cannot
+    match them against a contact has nothing to print but the bytes themselves --
+    "Node 68b8" where the sender's name belongs. This is that alias widened to a
+    full key: the same 32 bytes as ours with only the first two complemented, so
+    it can be served as a contact named after this radio and the picture arrives
+    with a name on it.
+
+    None when the key is not a full 32-byte key -- there is no identity to alias
+    while the radio has not reported itself.
+    """
+    try:
+        raw = bytes.fromhex(public_key)
+    except ValueError:
+        return None
+    if len(raw) != 32:
+        return None
+    prefix = aliased_sender_prefix(sender_prefix_for(raw))
+    return bytes(((prefix >> 8) & 0xFF, prefix & 0xFF)).hex() + raw[2:].hex()
+
+
 def relabel_chunk_sender(blob: bytes, sender_prefix: int) -> bytes:
     """Rewrite a chunk's 2-byte sender prefix, leaving everything else alone.
 
