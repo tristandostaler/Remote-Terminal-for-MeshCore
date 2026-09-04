@@ -7,6 +7,7 @@ import {
   aeicAspectRatio,
   aeicHeaderChars,
   isAeicChunk,
+  isLocalMarkerText,
   parseAeicChunk,
 } from '../utils/aeicEnvelope';
 
@@ -135,5 +136,23 @@ describe('size hints', () => {
   it('undoes the ~23% basE91 expansion', () => {
     // 144 chars is what a 117-byte bitstream encodes to.
     expect(aeicApproxBitstreamBytes(144)).toBe(117);
+  });
+});
+
+describe('local marker rows', () => {
+  it('recognises a binary image marker', () => {
+    expect(isLocalMarkerText('aeib:grp:1c1e08f41fd4dd96')).toBe(true);
+    expect(isLocalMarkerText('aeib:out:m42')).toBe(true);
+  });
+
+  it('recognises a kept-but-undecodable media marker', () => {
+    expect(isLocalMarkerText('mediax:17')).toBe(true);
+  });
+
+  it('leaves anything someone actually wrote alone', () => {
+    expect(isLocalMarkerText('aeib is a nice word')).toBe(false);
+    expect(isLocalMarkerText('hello')).toBe(false);
+    expect(isLocalMarkerText('')).toBe(false);
+    expect(isLocalMarkerText(null)).toBe(false);
   });
 });

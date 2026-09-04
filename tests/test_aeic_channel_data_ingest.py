@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import ANY
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
@@ -455,6 +455,60 @@ class TestWhoSentThePicture:
         assert sent.rows[-1]["sender_key"] is None
         assert sent.rows[-1]["sender_name"] is None
         assert sent.rows[-1]["outgoing"] is False
+
+
+class TestOurOwnPictureComingBack:
+    """The firmware hands a companion its own transmissions.
+
+    So a picture sent from here arrived as frame 27 a moment later and was
+    ingested as a picture received here -- a second marker row for the same
+    photo, carrying our prefix and therefore stored outgoing, which put a
+    resendable ``aeib:grp:...`` bubble in the conversation. Resending one
+    transmits the marker, and it turns up as a text message in everyone's app.
+
+    The raw-RF path has dropped this echo since it was written; frame 27 never
+    did.
+    """
+
+    OURS = "ccdd" + "00" * 30
+
+    def _frame_for(self, prefix: int) -> bytes:
+        blob = build_image_chunks(bytes(120), META, sender_prefix=prefix, img_id=7)[0]
+        return (
+            bytes([27, 0, 0, 0, 1, 0xFF])
+            + DATA_TYPE_AEIC_IMAGE.to_bytes(2, "little")
+            + (bytes([len(blob)]) + blob)
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_companion_echo_of_our_own_picture_is_dropped(self, monkeypatch):
+        import app.event_handlers as event_handlers
+
+        monkeypatch.setattr(channel_data_ingest, "self_node_identity", lambda: (self.OURS, "Proxy"))
+        monkeypatch.setattr(
+            event_handlers, "_resolve_channel_data_key", AsyncMock(return_value=CHANNEL)
+        )
+        handled = AsyncMock()
+        monkeypatch.setattr(channel_data_ingest, "handle_channel_data", handled)
+
+        await event_handlers.on_channel_data(self._frame_for(0xCCDD))
+
+        handled.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_peers_picture_still_arrives(self, monkeypatch):
+        import app.event_handlers as event_handlers
+
+        monkeypatch.setattr(channel_data_ingest, "self_node_identity", lambda: (self.OURS, "Proxy"))
+        monkeypatch.setattr(
+            event_handlers, "_resolve_channel_data_key", AsyncMock(return_value=CHANNEL)
+        )
+        handled = AsyncMock()
+        monkeypatch.setattr(channel_data_ingest, "handle_channel_data", handled)
+
+        await event_handlers.on_channel_data(self._frame_for(0x12AB))
+
+        handled.assert_awaited_once()
 
 
 class TestCompletingOnlyOnce:

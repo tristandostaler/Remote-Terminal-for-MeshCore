@@ -577,6 +577,25 @@ async def handle_channel_data(
     return True
 
 
+def is_our_own_image_chunk(data_type: int, payload: bytes) -> bool:
+    """Whether this GRP_DATA blob is a picture chunk THIS node transmitted.
+
+    An echo of our own send comes back by more than one route: a repeater
+    re-floods the packet and the RF log hears the copy, and the firmware hands
+    the companion its own transmissions as frame 27. Ingesting either one turns
+    every picture we send into a picture we also received.
+
+    Only an AEIC chunk carries a sender identity, so only it can be recognised
+    this way; 1/65536 of peers share our prefix and every use of this field
+    accepts those odds.
+    """
+    if data_type != DATA_TYPE_AEIC_IMAGE:
+        return False
+    chunk = parse_chunk_blob(payload)
+    ours = self_sender_prefix()
+    return chunk is not None and ours is not None and chunk.sender_prefix == ours
+
+
 async def _attribute_image(sender_prefix: int | None) -> tuple[str | None, str | None, bool]:
     """``(sender key, sender name, outgoing)`` for a picture from this prefix.
 

@@ -43,6 +43,7 @@ import { estimateImageTransmitSeconds, parseImageEnvelope } from '../utils/image
 import {
   aeicApproxBitstreamBytes,
   aeicAspectRatio,
+  isLocalMarkerText,
   parseAeicBinaryRef,
   parseAeicChunk,
   parseUnsupportedMediaRef,
@@ -1168,7 +1169,16 @@ function MessageActionsDialog({
 }) {
   const status = message.outgoing ? displaySendStatus(message) : null;
   const canCancel = !!onCancel && status === 'sending';
-  const canRetry = !!onRetry && message.outgoing;
+  // A marker row's body is bookkeeping for the media the bubble shows, not text:
+  // copying it hands over `aeib:grp:...` and resending it puts that string on the
+  // air, where it arrives as a message in everyone else's app. Delete, cancel and
+  // react still mean what they say, so the menu itself stays.
+  const mediaLabel = isLocalMarkerText(message.text)
+    ? parseUnsupportedMediaRef(message.text) !== null
+      ? 'Media'
+      : 'Picture'
+    : null;
+  const canRetry = !!onRetry && message.outgoing && mediaLabel === null;
 
   const run = (action: () => void | Promise<void>) => () => {
     onClose();
@@ -1180,7 +1190,9 @@ function MessageActionsDialog({
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>Message actions</DialogTitle>
-          <DialogDescription className="line-clamp-2 break-words">{message.text}</DialogDescription>
+          <DialogDescription className="line-clamp-2 break-words">
+            {mediaLabel ?? message.text}
+          </DialogDescription>
         </DialogHeader>
         {onReact && (
           <EmojiPickerPanel
@@ -1189,9 +1201,11 @@ function MessageActionsDialog({
           />
         )}
         <div className="flex flex-col gap-2">
-          <Button variant="outline" onClick={run(() => onCopy(message))}>
-            Copy text
-          </Button>
+          {mediaLabel === null && (
+            <Button variant="outline" onClick={run(() => onCopy(message))}>
+              Copy text
+            </Button>
+          )}
           {canRetry && (
             <Button
               variant="outline"
@@ -1593,6 +1607,9 @@ export function MessageList({
 
     for (const msg of messages) {
       if (!msg.outgoing || msg.type !== 'CHAN' || msg.sender_timestamp === null) continue;
+      // A picture's marker row is an outgoing channel message like any other, so
+      // it offered a byte-perfect resend -- which would transmit the marker.
+      if (isLocalMarkerText(msg.text)) continue;
       const remaining = RESEND_WINDOW_SECONDS - (now - msg.sender_timestamp);
       if (remaining <= 0) continue;
 

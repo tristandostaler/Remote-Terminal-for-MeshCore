@@ -391,6 +391,25 @@ keep. The backend writes a synthetic message row whose text is the local marker
 frontend matches it with `parseAeicBinaryRef`. **It is a local server↔UI
 convention and never goes on air** — do not mistake it for a wire format.
 
+**A marker row must never be transmitted, and two things transmitted it.** The
+row `_create_binary_marker_message` mints is an *outgoing channel message* — so
+the conversation offered it a byte-perfect resend, and `_channel_echo_watchdog`
+would have resent it too; both send `message.text` verbatim, which puts
+`aeib:grp:1c1e08f41fd4dd96` on the air as ordinary channel text and lands it in
+everyone's app as a message. `_resend_channel_message` now refuses a marker row
+(HTTP 400, "send the image again instead"), the watchdog skips one, and the UI
+stops offering the two affordances that read the body as text — Copy text and
+Retry — on a media bubble. Delete, cancel and react still mean what they say.
+
+The reachable second row came from the echo. `on_channel_data` (companion frame
+27) had no self-echo filter, though the raw-RF path in `packet_processor` always
+did: the firmware hands a companion its own transmissions, so a picture sent from
+here was ingested as a picture received here, and since attribution stores our own
+prefix as `outgoing`, that duplicate looked exactly like a resendable outgoing
+message. `is_our_own_image_chunk` is now the one filter both paths use. A picture
+an *app* sends carries our prefix too, but it is absorbed in `_absorb_channel_data`
+where the app's send is handled, not through frame 27, so it still arrives.
+
 "Never goes on air" was only ever enforced in one place, and a `message` event
 reaches five consumers. The web UI wants the row (it renders the picture the row
 points at); the other four read a message as *words*, so each one has to skip it,

@@ -328,6 +328,7 @@ async def _resend_channel_message(
     msg: Message, *, new_timestamp: bool
 ) -> ResendChannelMessageResponse:
     """Validate and perform a channel resend. Shared by the resend and retry routes."""
+    from app.imaging.aeic.channel_data_ingest import is_local_marker
     from app.repository import ChannelRepository
 
     if not msg.outgoing:
@@ -335,6 +336,17 @@ async def _resend_channel_message(
 
     if msg.type != "CHAN":
         raise HTTPException(status_code=400, detail="Can only resend channel messages")
+
+    # A picture's row holds a local marker, not the picture and not any text that
+    # was ever on the air. Resending it transmits this server's own bookkeeping
+    # -- "aeib:grp:1c1e08f41fd4dd96" arriving as a message in somebody's app,
+    # which is exactly what a resend of a photo bubble did. Send the picture
+    # again from the composer instead; that goes out as image data.
+    if is_local_marker(msg.text):
+        raise HTTPException(
+            status_code=400,
+            detail="This message is a picture, not text; send the image again instead",
+        )
 
     if msg.sender_timestamp is None:
         raise HTTPException(status_code=400, detail="Message has no timestamp")
