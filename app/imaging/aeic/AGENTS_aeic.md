@@ -248,6 +248,21 @@ only sees frames the *local* radio decrypted, so the channel must be loaded in
 one of its slots. `radio.channel_key_for_slot` maps the frame's slot index back
 to a channel; a slot this process never loaded is logged and skipped.
 
+### Who sent a picture: the 2-byte prefix, and when it is us
+
+Every chunk header carries `senderPublicKey[0..1]`, and `_attribute_image` reads
+it three ways. It is **ours** when it matches this radio's prefix — which is what
+an app on the virtual node sends, since its identity is this radio's — so the row
+is stored `outgoing`, the way an app's *text* message already is. Otherwise
+`ContactRepository.get_by_key_prefix` names the peer, declining an ambiguous
+match rather than guessing. Failing both, the row stays unattributed.
+
+The same prefix is the RF echo filter in `packet_processor`, and both call
+`self_sender_prefix()` so they cannot disagree about what "ours" means. Before
+this, an image row was written with no sender at all and the client fell through
+its whole resolution chain to the conversation key — rendering a channel's shared
+secret as the author.
+
 ### More than one image codec rides GRP_DATA
 
 MCO Advanced ships **AEIC** (`0xAE1C`) *and* **MCOimg** (`0xFFF0`), plus MCMP

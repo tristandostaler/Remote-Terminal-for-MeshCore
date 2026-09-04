@@ -84,6 +84,46 @@ def marker_text(session_key: str) -> str:
     return f"{MARKER_PREFIX}{session_key}"
 
 
+def self_node_identity() -> tuple[str, str] | None:
+    """``(public key hex, node name)`` of the connected radio, or None.
+
+    None while the radio has not reported itself yet -- at startup, or between
+    reconnects -- which every caller treats as "cannot attribute this", never as
+    an error.
+    """
+    from app.services.radio_runtime import radio_runtime
+
+    try:
+        meshcore = radio_runtime.meshcore
+        self_info = (meshcore.self_info if meshcore else None) or {}
+        public_key = str(self_info.get("public_key") or "")
+        if len(public_key) < 4:
+            return None
+        return public_key, str(self_info.get("name") or "")
+    except Exception:
+        return None
+
+
+def self_sender_prefix() -> int | None:
+    """This node's 2-byte GRP_DATA sender prefix, or None while it is unknown.
+
+    Every picture this node puts on the air carries it -- including the ones an
+    app on the virtual companion node sends, since the app's identity *is* this
+    radio's. It is therefore both the echo filter on the RF path and the "this
+    one is ours" test on the app path.
+    """
+    identity = self_node_identity()
+    if identity is None:
+        return None
+    try:
+        key = bytes.fromhex(identity[0])
+    except ValueError:
+        return None
+    if len(key) < 2:
+        return None
+    return ((key[0] & 0xFF) << 8) | (key[1] & 0xFF)
+
+
 class ChannelDataReassembler:
     """Collects GRP_DATA chunks until an image is whole (or recoverable)."""
 
@@ -500,13 +540,59 @@ async def handle_channel_data(
         conversation_key[:12],
         " (one chunk rebuilt from parity)" if recovered else "",
     )
+    # Every chunk of one image carries the same sender prefix, so the blob that
+    # completed it names the sender as well as any other would.
+    completing = parse_chunk_blob(parsed.payload)
     try:
         await _store_and_decode(
-            bitstream, metadata_byte, conversation_key=conversation_key, broadcast_fn=broadcast_fn
+            bitstream,
+            metadata_byte,
+            conversation_key=conversation_key,
+            sender_prefix=completing.sender_prefix if completing is not None else None,
+            broadcast_fn=broadcast_fn,
         )
     except Exception:
         logger.exception("Failed to store a reassembled GRP_DATA image")
     return True
+
+
+async def _attribute_image(sender_prefix: int | None) -> tuple[str | None, str | None, bool]:
+    """``(sender key, sender name, outgoing)`` for a picture from this prefix.
+
+    Three answers, in the order they are worth having:
+
+    * **Ours.** The prefix is this radio's, so the picture left on our identity
+      -- which is what an app on the virtual companion node sends, since its
+      identity is this radio's. It belongs in the conversation as something we
+      sent, exactly as an app's *text* message already is.
+    * **A peer we know.** Two bytes is upstream's identity field and is what the
+      firmware gives us; resolved against the contact list it names the sender,
+      and ``get_by_key_prefix`` declines an ambiguous match rather than guessing.
+    * **Nobody we know.** Left unattributed, as before.
+
+    Without this a picture arrived with no sender at all and the UI fell back to
+    showing the conversation key -- a channel's shared secret rendered as though
+    it were the author.
+    """
+    if sender_prefix is None:
+        return None, None, False
+    ours = self_sender_prefix()
+    if ours is not None and sender_prefix == ours:
+        identity = self_node_identity()
+        if identity is not None:
+            return identity[0], identity[1] or None, True
+        return None, None, True
+
+    from app.repository import ContactRepository
+
+    try:
+        contact = await ContactRepository.get_by_key_prefix(f"{sender_prefix:04x}")
+    except Exception:
+        logger.debug("Could not resolve the sender of a GRP_DATA image", exc_info=True)
+        return None, None, False
+    if contact is None:
+        return None, None, False
+    return contact.public_key, contact.name or None, False
 
 
 async def _store_and_decode(
@@ -514,6 +600,7 @@ async def _store_and_decode(
     metadata_byte: int,
     *,
     conversation_key: str,
+    sender_prefix: int | None = None,
     broadcast_fn=None,
 ) -> None:
     """Persist the image as a session anchored to a synthetic message row."""
@@ -549,19 +636,22 @@ async def _store_and_decode(
     # reaches this function, so anything arriving here is a distinct send. Keeping
     # both layers guessing at "same picture" is what split the notion of identity
     # in the first place.
+    sender_key, sender_name, outgoing = await _attribute_image(sender_prefix)
     message_id = await MessageRepository.create(
         msg_type="CHAN",
         text=marker_text(key),
         received_at=arrived_at,
         sender_timestamp=arrived_at,
         conversation_key=conversation_key,
-        sender_key=None,
+        sender_key=sender_key,
+        sender_name=sender_name,
+        outgoing=outgoing,
     )
     await AeicImageRepository.enforce_cache_limit()
     await AeicImageRepository.create_session(
         key=key,
         message_id=message_id,
-        direction="incoming",
+        direction="outgoing" if outgoing else "incoming",
         conversation_type="CHAN",
         conversation_key=conversation_key,
         peer_public_key=None,
