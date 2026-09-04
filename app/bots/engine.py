@@ -308,8 +308,18 @@ class BotEngine:
     # Message dispatch
     # ------------------------------------------------------------------
     def handle_message_event(self, data: dict) -> None:
-        """Non-blocking entry from broadcast_event."""
+        """Non-blocking entry from broadcast_event.
+
+        A marker row never reaches a bot. Its body stands in for a picture that
+        crossed the air as binary, so a bot matching on text would either see a
+        command in ``aeib:...`` or -- worse, for a bot that relays what it hears
+        -- put this server's own local convention on the mesh.
+        """
+        from app.imaging.aeic.channel_data_ingest import is_local_marker
+
         if self.disabled or not self._started:
+            return
+        if is_local_marker(data.get("text")):
             return
         task = asyncio.create_task(self._handle_message(data))
         self._tasks.add(task)

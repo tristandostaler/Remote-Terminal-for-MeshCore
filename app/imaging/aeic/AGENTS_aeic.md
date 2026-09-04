@@ -391,6 +391,18 @@ keep. The backend writes a synthetic message row whose text is the local marker
 frontend matches it with `parseAeicBinaryRef`. **It is a local server↔UI
 convention and never goes on air** — do not mistake it for a wire format.
 
+"Never goes on air" was only ever enforced in one place, and a `message` event
+reaches five consumers. The web UI wants the row (it renders the picture the row
+points at); the other four read a message as *words*, so each one has to skip it,
+and until this landed only the companion protocol did. Web push put
+`aeib:grp:1c1e08f41fd4dd96` on a phone's lock screen, MQTT fanout published it as
+a message, and the bot engine offered it to every bot's matcher — including,
+for anyone running a relay bot, a route back onto the mesh. `is_local_marker` and
+`LOCAL_MARKER_PREFIXES` in `channel_data_ingest` are now the single definition
+those four import; push is the one that does not simply drop the row, because
+"someone posted a photo" is the fact the reader wanted, so it substitutes a
+body (📷 Photo / 📎 Media) rather than trading gibberish for silence.
+
 ### Parity is on for binary, off for text
 
 The binary framing spends a third packet on upstream's XOR parity chunk, and

@@ -311,6 +311,27 @@ def unsupported_marker_text(media_id: int) -> str:
     return f"{MARKER_UNSUPPORTED_PREFIX}{media_id}"
 
 
+LOCAL_MARKER_PREFIXES = (MARKER_PREFIX, MARKER_UNSUPPORTED_PREFIX)
+"""Every marker prefix that stands in for media instead of for words.
+
+One definition, because the consumers are scattered: the companion protocol, web
+push, MQTT fanout and the bot engine each have to recognise a marker row, and a
+second copy of this tuple is how one of them ends up publishing
+``aeib:grp:1c1e08f41fd4dd96`` to somebody.
+"""
+
+
+def is_local_marker(text: str | None) -> bool:
+    """Whether a stored message body is a marker rather than something someone wrote.
+
+    A marker row is a convention between this server and its own web UI, which
+    renders the picture the row points at. Anything that reads a message as text
+    -- a push notification body, an MQTT payload, a bot matching a command --
+    has to skip it, or it publishes the convention itself.
+    """
+    return bool(text) and str(text).startswith(LOCAL_MARKER_PREFIXES)
+
+
 async def _note_undecodable(
     parsed: ParsedChannelData,
     *,

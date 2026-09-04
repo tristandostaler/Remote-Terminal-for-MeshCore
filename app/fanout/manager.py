@@ -266,7 +266,16 @@ class FanoutManager:
                 )
 
     async def broadcast_message(self, data: dict) -> None:
-        """Dispatch a decoded message to modules whose scope matches."""
+        """Dispatch a decoded message to modules whose scope matches.
+
+        A marker row is skipped: its body is a local server-to-UI convention for
+        a picture, not text anyone sent, so publishing it puts
+        ``aeib:grp:1c1e08f41fd4dd96`` on an MQTT topic where a message belongs.
+        """
+        from app.imaging.aeic.channel_data_ingest import is_local_marker
+
+        if is_local_marker(data.get("text")):
+            return
         await self._dispatch_matching(
             data,
             matcher=_scope_matches_message,

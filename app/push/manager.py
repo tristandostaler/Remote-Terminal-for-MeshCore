@@ -32,10 +32,32 @@ def _state_key_for_message(data: dict) -> str:
     return f"channel-{conversation_key}"
 
 
+def _notification_body(text: str) -> str:
+    """What to put in the notification, for a body that may not be words.
+
+    A picture received on a channel is stored as a marker row -- ``aeib:grp:``
+    plus a content hash -- because nothing textual crossed the air; the web UI
+    renders the picture the row points at. Sent to a phone verbatim, that
+    convention arrives as the notification itself, which is exactly what it
+    looked like on the reporting user's lock screen. Media this build cannot
+    decode (``mediax:``) is the same story.
+
+    The notification is still worth sending: "someone posted a photo" is the fact
+    the reader wants, and dropping it would trade gibberish for silence.
+    """
+    from app.imaging.aeic.channel_data_ingest import MARKER_PREFIX, MARKER_UNSUPPORTED_PREFIX
+
+    if text.startswith(MARKER_PREFIX):
+        return "📷 Photo"
+    if text.startswith(MARKER_UNSUPPORTED_PREFIX):
+        return "📎 Media"
+    return text
+
+
 def _build_payload(data: dict) -> str:
     """Build the push notification JSON payload from a message event."""
     msg_type = data.get("type", "")
-    text = data.get("text", "")
+    text = _notification_body(str(data.get("text") or ""))
     sender_name = data.get("sender_name") or ""
     channel_name = data.get("channel_name") or ""
 
