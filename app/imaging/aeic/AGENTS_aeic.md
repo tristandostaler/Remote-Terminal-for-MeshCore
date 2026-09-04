@@ -391,6 +391,20 @@ keep. The backend writes a synthetic message row whose text is the local marker
 frontend matches it with `parseAeicBinaryRef`. **It is a local server↔UI
 convention and never goes on air** — do not mistake it for a wire format.
 
+**The alias needs a contact behind it, or the picture has no sender.** Two bytes
+of identity are all a chunk header carries, and the copy an app is handed carries
+ours complemented, so nothing in the contact list matched them and MCO Advanced
+labelled every picture from here `Node 68b8` — the alias bytes themselves.
+`aliased_public_key` widens the same alias to a whole key (only the first two
+bytes move, so it is its own inverse), and `VirtualNodeServer._alias_contact`
+serves that key as a contact under the radio's own name. It is sent on every
+`GET_CONTACTS` regardless of the app's cursor and deliberately does **not** raise
+the `CONTACT_END` high-water mark: it has no write clock, and dating it "now"
+would push the cursor past real contacts whose own `lastmod` is older than this
+moment, hiding them for good. Nothing on the air answers to that key, so
+`_send_text_message` refuses a message addressed to it rather than transmitting
+to a node that does not exist.
+
 **A marker row must never be transmitted, and two things transmitted it.** The
 row `_create_binary_marker_message` mints is an *outgoing channel message* — so
 the conversation offered it a byte-perfect resend, and `_channel_echo_watchdog`
