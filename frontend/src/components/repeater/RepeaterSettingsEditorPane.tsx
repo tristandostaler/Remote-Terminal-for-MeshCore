@@ -58,6 +58,7 @@ function statusNote(value: RepeaterSettingValue | undefined): string | null {
 
 const RADIO_PLACEHOLDERS = ['MHz', 'kHz', 'SF', 'CR'];
 const RADIO_STEPS = ['0.001', '0.1', '1', '1'];
+const RADIO_WIDTHS = ['w-24', 'w-20', 'w-16', 'w-16'];
 
 /** The four parts of a `freq,bw,sf,cr` tuple, padded so every box renders. */
 function radioParts(value: string): string[] {
@@ -140,7 +141,7 @@ function SettingField({
               type="number"
               inputMode="decimal"
               step={RADIO_STEPS[index]}
-              className="h-8 w-[4.5rem] text-sm"
+              className={cn('h-8 text-sm', RADIO_WIDTHS[index])}
               placeholder={RADIO_PLACEHOLDERS[index]}
               aria-label={`${setting.label} ${RADIO_PLACEHOLDERS[index]}`}
               value={part}
@@ -183,7 +184,7 @@ function SettingField({
         dirty && 'bg-primary/5'
       )}
     >
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-[1_1_14rem]">
         <label
           htmlFor={inputId}
           className={cn('text-sm', unsupported ? 'text-muted-foreground' : 'font-medium')}
@@ -212,7 +213,7 @@ function SettingField({
           </p>
         )}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="ml-auto flex items-center gap-2">
         {dirty && (
           <span
             className="h-1.5 w-1.5 rounded-full bg-primary"
@@ -246,6 +247,10 @@ export function SettingsEditorPane({
   onApply: (changes: RepeaterSettingChange[]) => Promise<RepeaterSettingApplyResult[]>;
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // Which group's "Read" is in flight, and whether an apply is -- `loading`
+  // alone covers both, and the footer must not say "Applying" during a read.
+  const [readingGroup, setReadingGroup] = useState<string | null>(null);
+  const [applying, setApplying] = useState(false);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [results, setResults] = useState<Record<string, RepeaterSettingApplyResult>>({});
 
@@ -285,7 +290,13 @@ export function SettingsEditorPane({
 
   const applyChanges = useCallback(async () => {
     if (dirtyChanges.length === 0) return;
-    const applied = await onApply(dirtyChanges);
+    setApplying(true);
+    let applied: RepeaterSettingApplyResult[];
+    try {
+      applied = await onApply(dirtyChanges);
+    } finally {
+      setApplying(false);
+    }
     const byKey: Record<string, RepeaterSettingApplyResult> = {};
     for (const result of applied) byKey[result.key] = result;
     setResults(byKey);
@@ -393,11 +404,14 @@ export function SettingsEditorPane({
                     disabled={busy}
                     onClick={() => {
                       setOpenGroups((prev) => ({ ...prev, [group.key]: true }));
-                      void onFetch({ group: group.key });
+                      setReadingGroup(group.key);
+                      void onFetch({ group: group.key }).finally(() =>
+                        setReadingGroup((current) => (current === group.key ? null : current))
+                      );
                     }}
                     title={`Read the ${group.label} settings from the repeater`}
                   >
-                    Read
+                    {readingGroup === group.key && loading ? 'Reading...' : 'Read'}
                   </Button>
                 </div>
                 {open && (
@@ -446,7 +460,7 @@ export function SettingsEditorPane({
             onClick={handleApply}
             title="Writes each changed setting to the repeater"
           >
-            {loading
+            {applying
               ? 'Applying...'
               : confirmApply
                 ? `Confirm ${dirtyChanges.length} change${dirtyChanges.length === 1 ? '' : 's'}`
