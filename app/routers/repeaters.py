@@ -27,6 +27,15 @@ from app.models import (
     RepeaterRadioSettingsResponse,
     RepeaterRegionEntry,
     RepeaterRegionsResponse,
+    RepeaterSettingApplyResult,
+    RepeaterSettingDefinition,
+    RepeaterSettingGroupDefinition,
+    RepeaterSettingsApplyRequest,
+    RepeaterSettingsApplyResponse,
+    RepeaterSettingsReadRequest,
+    RepeaterSettingsResponse,
+    RepeaterSettingsSchemaResponse,
+    RepeaterSettingValue,
     RepeaterStatusResponse,
     RepeaterSyncClockResponse,
     TelemetryHistoryEntry,
@@ -42,6 +51,17 @@ from app.routers.server_control import (
     send_contact_cli_command,
 )
 from app.services.radio_runtime import radio_runtime as radio_manager
+from app.services.repeater_settings import (
+    READABLE_SETTINGS,
+    REPEATER_SETTINGS,
+    SETTING_GROUPS,
+    RepeaterSetting,
+    SettingValueError,
+    classify_set_reply,
+    format_value,
+    get_setting,
+    parse_get_reply,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -315,8 +335,12 @@ async def _batch_cli_fetch(
     contact: Contact,
     operation_name: str,
     commands: list[tuple[str, str]],
+    *,
+    abort_after_silent: int | None = None,
 ) -> dict[str, str | None]:
-    return await batch_cli_fetch(contact, operation_name, commands)
+    return await batch_cli_fetch(
+        contact, operation_name, commands, abort_after_silent=abort_after_silent
+    )
 
 
 @router.post("/{public_key}/repeater/node-info", response_model=RepeaterNodeInfoResponse)
@@ -570,6 +594,201 @@ async def repeater_regions(public_key: str) -> RepeaterRegionsResponse:
     # Nothing usable from either path (unsupported firmware, guest with no anon
     # support, or out of range) -> empty, not a truncated dump.
     return RepeaterRegionsResponse(regions=[], raw=raw, truncated=False, source="cli")
+
+
+# Every change costs one CLI round trip against the radio lock, so a batch is
+# bounded by the size of the catalog itself -- there is nothing legitimate to
+# send beyond "every setting at once".
+MAX_SETTING_CHANGES = len(REPEATER_SETTINGS)
+# A guest answers nothing at all, so a full-catalog read would sit through one
+# 10-second timeout per setting to learn what the first few already said. Stop
+# after this many unanswered commands in a row and report what we have.
+SETTINGS_READ_SILENT_LIMIT = 3
+_REDACTED = "********"
+
+
+def _resolve_requested_settings(request: RepeaterSettingsReadRequest) -> list[RepeaterSetting]:
+    """Pick which catalog entries a read request covers, in catalog order."""
+    if request.keys:
+        try:
+            settings = [get_setting(key) for key in dict.fromkeys(request.keys)]
+        except SettingValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        unreadable = [s.key for s in settings if not s.readable]
+        if unreadable:
+            raise HTTPException(
+                status_code=400,
+                detail=f"These settings cannot be read back: {', '.join(unreadable)}",
+            )
+        return settings
+
+    if request.group:
+        settings = [s for s in READABLE_SETTINGS if s.group == request.group]
+        if not settings:
+            raise HTTPException(status_code=400, detail=f"Unknown settings group '{request.group}'")
+        return settings
+
+    return list(READABLE_SETTINGS)
+
+
+@router.get("/repeater/settings-schema", response_model=RepeaterSettingsSchemaResponse)
+async def repeater_settings_schema() -> RepeaterSettingsSchemaResponse:
+    """Describe every setting the dashboard can edit (static; no radio access).
+
+    The catalog is a superset of what any one firmware build supports; the read
+    endpoint reports each key's actual support, so the UI never has to guess
+    from a version string.
+    """
+    return RepeaterSettingsSchemaResponse(
+        groups=[
+            RepeaterSettingGroupDefinition(
+                key=group.key, label=group.label, description=group.description
+            )
+            for group in SETTING_GROUPS
+        ],
+        settings=[
+            RepeaterSettingDefinition(
+                key=setting.key,
+                label=setting.label,
+                group=setting.group,
+                cli_key=setting.cli_key,
+                value_type=setting.value_type,
+                help=setting.help,
+                unit=setting.unit,
+                minimum=setting.minimum,
+                maximum=setting.maximum,
+                step=setting.step,
+                options=list(setting.options),
+                max_length=setting.max_length,
+                readable=setting.readable,
+                writable=setting.writable,
+                sensitive=setting.sensitive,
+                note=setting.note,
+            )
+            for setting in REPEATER_SETTINGS
+        ],
+    )
+
+
+@router.post("/{public_key}/repeater/settings", response_model=RepeaterSettingsResponse)
+async def repeater_settings(
+    public_key: str, request: RepeaterSettingsReadRequest
+) -> RepeaterSettingsResponse:
+    """Read current values for the requested settings via ``get`` CLI commands.
+
+    One command per setting, batched the same way the other panes are, so the
+    radio lock is released between commands. Reading the whole catalog is a long
+    hold, so a read that draws ``SETTINGS_READ_SILENT_LIMIT`` unanswered commands
+    in a row gives up and reports the rest as ``no_reply``: that is what a guest
+    session looks like, and it should cost half a minute rather than several.
+    """
+    radio_manager.require_connected()
+    contact = await _resolve_contact_or_404(public_key)
+    _require_repeater(contact)
+
+    settings = _resolve_requested_settings(request)
+    replies = await _batch_cli_fetch(
+        contact,
+        "repeater_settings",
+        [(setting.get_command, setting.key) for setting in settings],
+        abort_after_silent=SETTINGS_READ_SILENT_LIMIT,
+    )
+
+    values: list[RepeaterSettingValue] = []
+    cli_responsive = False
+    for setting in settings:
+        raw = replies.get(setting.key)
+        if raw is not None:
+            cli_responsive = True
+        value, status = parse_get_reply(setting, raw)
+        values.append(
+            RepeaterSettingValue(
+                key=setting.key,
+                value=value,
+                # A password read back is already in `value`; don't carry a
+                # second copy in the debug field.
+                raw=None if setting.sensitive else raw,
+                status=status,
+            )
+        )
+
+    return RepeaterSettingsResponse(values=values, cli_responsive=cli_responsive)
+
+
+@router.post("/{public_key}/repeater/settings/apply", response_model=RepeaterSettingsApplyResponse)
+async def repeater_settings_apply(
+    public_key: str, request: RepeaterSettingsApplyRequest
+) -> RepeaterSettingsApplyResponse:
+    """Write settings to a repeater via ``set`` CLI commands, one per change.
+
+    Values are validated against the catalog *before* anything is sent, so a
+    typo in one field cannot half-apply a batch. Each change is then sent in
+    order and its reply classified; a setting the firmware does not know comes
+    back as ``unsupported`` rather than an error, and silence as ``no_reply``
+    (which on a repeater that answered other commands means the firmware
+    rejected the write quietly, and otherwise usually means this session is not
+    an admin).
+    """
+    radio_manager.require_connected()
+    contact = await _resolve_contact_or_404(public_key)
+    _require_repeater(contact)
+
+    if not request.changes:
+        raise HTTPException(status_code=400, detail="No settings to change")
+    if len(request.changes) > MAX_SETTING_CHANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many changes in one request (max {MAX_SETTING_CHANGES})",
+        )
+
+    prepared: list[tuple[RepeaterSetting, str]] = []
+    seen: set[str] = set()
+    for change in request.changes:
+        try:
+            setting = get_setting(change.key)
+        except SettingValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if setting.key in seen:
+            raise HTTPException(
+                status_code=400, detail=f"Duplicate change for setting '{setting.key}'"
+            )
+        seen.add(setting.key)
+        try:
+            prepared.append((setting, format_value(setting, change.value)))
+        except SettingValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    logger.info(
+        "Applying %d setting(s) to repeater %s: %s",
+        len(prepared),
+        contact.public_key[:12],
+        ", ".join(
+            f"{setting.cli_key}={_REDACTED if setting.sensitive else value}"
+            for setting, value in prepared
+        ),
+    )
+
+    replies = await _batch_cli_fetch(
+        contact,
+        "repeater_settings_apply",
+        [(setting.set_command(value), setting.key) for setting, value in prepared],
+    )
+
+    results: list[RepeaterSettingApplyResult] = []
+    for setting, value in prepared:
+        reply = replies.get(setting.key)
+        shown_value = _REDACTED if setting.sensitive else value
+        results.append(
+            RepeaterSettingApplyResult(
+                key=setting.key,
+                command=setting.set_command(shown_value),
+                value=shown_value,
+                status=classify_set_reply(reply),
+                reply=reply,
+            )
+        )
+
+    return RepeaterSettingsApplyResponse(results=results)
 
 
 def _sync_response(sync: ClockSyncResult, host: HostClockStatus) -> RepeaterSyncClockResponse:

@@ -163,6 +163,15 @@ app/
 - ACKs are delivery state, not routing state. Bundled ACKs inside PATH packets still satisfy pending DM sends, but ACK history does not feed contact route learning.
 - DM ACKs are matched from two independent radio emissions, so confirmation does not depend on the radio surfacing a host control frame: (1) the `EventType.ACK`/`SEND_CONFIRMED` host frame via `event_handlers.on_ack`, and (2) the raw RF packet itself via `packet_processor.process_raw_packet`. The packet processor extracts ACK codes both from PATH-return packets (flood replies, ACK embedded in `extra`) and from standalone `PayloadType.ACK` packets (direct replies, 4-byte cleartext payload), feeding both into `apply_dm_ack_code`. This matters for companion firmwares (e.g. pyMC over TCP) that do not reliably emit a separate host ACK frame for direct-routed replies.
 
+### Repeater settings editor
+
+`app/services/repeater_settings.py` is the single catalog of everything the dashboard can configure on a repeater: the firmware key, the value type and its bounds, and whether the value can be read back. The routers do the CLI round trips; the module itself is pure (validation, formatting, reply parsing) and stays that way.
+
+- The catalog is deliberately a **superset** of any one firmware build. An unknown key is answered by the generic config handler with `"??: <key>"` (or an `ERR...` string), never with silence, so `parse_get_reply` reports it as `unsupported` and the UI locks the field. Do not add firmware-version gates per key — a key that stops existing degrades on its own.
+- **`no_reply` is not `unsupported`.** The firmware routes no CLI text at all for a guest or read-only client, so a session that is not admin reads every setting as `no_reply`; that is what `cli_responsive` on the read response tells the UI. Because each of those costs a full 10-second timeout, a read passes `abort_after_silent` to `batch_cli_fetch` and abandons the rest of the batch after three unanswered commands in a row — half a minute to learn nothing is listening, rather than several minutes. A single answer resets the streak, so a lossy link does not truncate a read that is working.
+- **Values are validated before anything is sent.** A batch is prepared in full (unknown key → 400, bad value → 422, duplicate key → 400) so a typo in one field cannot half-apply the rest. String values reject control characters and newlines outright: everything is sent as the tail of a one-line CLI command, so a newline would be a second command smuggled onto the repeater.
+- Password values (`password`, `guest.password`) are `sensitive`: they go out on the wire but are redacted out of the apply response and the server log, and the admin password is `readable=False` because the firmware cannot return it.
+
 ### Server login route escalation
 
 `prepare_authenticated_contact_connection` (`routers/server_control.py`, shared by repeater and room login) sends one login over the contact's effective route. If that draws **no reply at all**, it calls `reset_path(...)` and retries exactly once as flood.
@@ -392,10 +401,13 @@ Web Push is a standalone subsystem in `app/push/`, separate from the fanout modu
 - `POST /contacts/{public_key}/repeater/neighbors`
 - `POST /contacts/{public_key}/repeater/acl`
 - `POST /contacts/{public_key}/repeater/node-info`
-- `POST /contacts/{public_key}/repeater/radio-settings`
+- `POST /contacts/{public_key}/repeater/radio-settings` — kept for API consumers; the dashboard shows and edits these values through the settings endpoints below instead
 - `POST /contacts/{public_key}/repeater/regions` — CLI region hierarchy, falling back to the guest anon flood-allowed names (`source`: `cli` or `anon`)
 - `POST /contacts/{public_key}/repeater/advert-intervals`
 - `POST /contacts/{public_key}/repeater/owner-info`
+- `GET /contacts/repeater/settings-schema` — the static catalog of editable repeater settings (`app/services/repeater_settings.py`); no radio access, so the frontend caches it once
+- `POST /contacts/{public_key}/repeater/settings` — read current values via `get <key>`, optionally narrowed to one `group` or an explicit `keys` list (one CLI round trip per setting; gives up after `SETTINGS_READ_SILENT_LIMIT` unanswered commands in a row; `cli_responsive` is False when nothing answered, which is what a guest session looks like)
+- `POST /contacts/{public_key}/repeater/settings/apply` — write values via `set <key> <value>`; the whole batch is validated against the catalog before anything is sent, and each reply is classified `ok`/`unsupported`/`error`/`no_reply`
 - `GET /contacts/{public_key}/repeater/telemetry-history` — stored telemetry history for a repeater (read-only, no radio access)
 - `POST /contacts/{public_key}/telemetry` — on-demand CayenneLPP telemetry from any contact (persists in `contact_telemetry_history`)
 - `GET /contacts/{public_key}/telemetry-history` — stored LPP telemetry history for a contact (read-only)

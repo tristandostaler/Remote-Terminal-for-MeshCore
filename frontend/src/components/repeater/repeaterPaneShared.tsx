@@ -1,6 +1,34 @@
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 import type { LppSensor, PaneState } from '../../types';
+
+// --- Shared Interaction ---
+
+/**
+ * Two-click confirmation that resets itself after three seconds. Shared by the
+ * actions that are hard to undo remotely: a reboot, a clock reset, and writing
+ * settings to the repeater.
+ */
+export function useArmedAction(action: () => void): [boolean, () => void] {
+  const [armed, setArmed] = useState(false);
+
+  const trigger = useCallback(() => {
+    if (!armed) {
+      setArmed(true);
+      return;
+    }
+    setArmed(false);
+    action();
+  }, [armed, action]);
+
+  useEffect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(timer);
+  }, [armed]);
+
+  return [armed, trigger];
+}
 
 // --- Shared Icons ---
 
@@ -82,21 +110,6 @@ export function formatClockDrift(
   parts.push(`${s}s`);
 
   return { text: parts.join('') + direction, isLarge: false };
-}
-
-export function formatAdvertInterval(
-  val: string | null,
-  unit: 'minutes' | 'hours' = 'hours'
-): string {
-  if (val == null) return '—';
-  const trimmed = val.trim();
-  if (trimmed === '0') return '<disabled>';
-  if (unit === 'hours') return `${trimmed}h`;
-  const mins = parseInt(trimmed, 10);
-  if (isNaN(mins)) return trimmed;
-  if (mins >= 60 && mins % 60 === 0) return `${mins / 60}h`;
-  if (mins >= 60) return `${Math.floor(mins / 60)}h${mins % 60}m`;
-  return `${mins}m`;
 }
 
 function formatFetchedRelative(fetchedAt: number): string {

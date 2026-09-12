@@ -165,12 +165,12 @@ frontend/src/
 │   │   ├── RepeaterNeighborsPane.tsx    # Neighbor table + lazy mini-map
 │   │   ├── RepeaterAclPane.tsx          # Permission table
 │   │   ├── RepeaterNodeInfoPane.tsx      # Repeater name, coords, clock drift
-│   │   ├── RepeaterRadioSettingsPane.tsx # Radio config + advert intervals
 │   │   ├── RepeaterRegionsPane.tsx      # Region hierarchy / flood-allowed region names
 │   │   ├── RepeaterLppTelemetryPane.tsx # CayenneLPP sensor data
 │   │   ├── RepeaterOwnerInfoPane.tsx    # Owner info + guest password
 │   │   ├── RepeaterTelemetryHistoryPane.tsx # Historical telemetry chart/table
 │   │   ├── RepeaterActionsPane.tsx      # Send Advert, Sync Clock, Fix Forward Clock, Reboot
+│   │   ├── RepeaterSettingsEditorPane.tsx # Form over the firmware's get/set settings
 │   │   └── RepeaterConsolePane.tsx      # CLI console with history
 │   └── ui/                     # shadcn/ui primitives
 ├── types/
@@ -200,6 +200,7 @@ frontend/src/
     ├── repeaterFormatters.test.ts
     ├── repeaterLogin.test.tsx
     ├── repeaterMessageParsing.test.ts
+    ├── repeaterSettingsEditor.test.tsx
     ├── roomServerPanel.test.tsx
     ├── securityWarningModal.test.tsx
     ├── localLabel.test.ts
@@ -519,9 +520,18 @@ For repeater contacts (`type=2`), `ConversationPane.tsx` renders `RepeaterDashbo
 
 **Login**: `RepeaterLogin` component — password or guest login via `POST /api/contacts/{key}/repeater/login`. The frontend sends exactly one request; the backend internally escalates a timed-out login to one flood retry (see `app/AGENTS.md` § "Server login route escalation"), so a single call may take up to two response windows. Do not add a client-side login retry loop on top — a `LOGIN_FAILED` result means the password was refused, not that the route needs another attempt.
 
-**Dashboard panes** (after login): Telemetry, Node Info, Neighbors, ACL, Radio Settings, Regions, Advert Intervals, Owner Info — each fetched via granular `POST /api/contacts/{key}/repeater/{pane}` endpoints. The Regions pane prefers the admin CLI hierarchy and falls back to the guest anon flood-allowed names, so its payload carries a `source` of `cli` or `anon`. Panes retry up to 3 times client-side. `Neighbors` depends on the smaller `node-info` fetch for repeater GPS, not the heavier radio-settings batch. "Load All" fetches all panes serially (parallel would queue behind the radio lock).
+**Dashboard panes** (after login): Telemetry, Node Info, Neighbors, ACL, Regions, Owner Info — each fetched via granular `POST /api/contacts/{key}/repeater/{pane}` endpoints. The Regions pane prefers the admin CLI hierarchy and falls back to the guest anon flood-allowed names, so its payload carries a `source` of `cli` or `anon`. Panes retry up to 3 times client-side. `Neighbors` depends on the smaller `node-info` fetch for repeater GPS. "Load All" fetches all panes serially (parallel would queue behind the radio lock) and finishes with a full settings read.
+
+There is deliberately **no read-only Radio Settings pane**: radio tuple, TX power, airtime factor, duty cycle, repeat mode, flood hops and both advert intervals are shown — and edited — in the settings editor, so the dashboard has one place per value rather than a display copy that can disagree with the form. Firmware version stays in Owner Info, which reads it from the guest-accessible binary request rather than the admin-only `ver`. The `radio-settings` and `advert-intervals` endpoints still exist server-side for API consumers; the UI does not call them.
 
 **Actions pane**: Send Advert and Reboot send CLI commands via `POST /api/contacts/{key}/command`. Sync Clock calls `POST /api/contacts/{key}/repeater/sync-clock` (the *server's* clock, with the firmware's reply shown in the console); Fix Forward Clock (two-click confirm) calls `POST .../repeater/fix-clock` — `clkreboot` then re-sync, for a repeater whose clock is ahead — passing the last password typed into the login form so the backend can re-login after the reboot if needed. Both responses carry `host_clock` (`HostClockStatus`); the pane shows its message and disables both buttons while the server's own clock is untrusted. The telemetry-history pane and Settings → Radio-App Management carry the per-repeater "auto-fix" checkbox (`clock_autofix_repeaters`), shown only while clock sync is on.
+
+**Settings editor pane**: A form over the repeater's own `get`/`set` CLI, so no setting needs a typed command. The field list comes from the server catalog (`GET /api/contacts/repeater/settings-schema`, fetched once per browser session and shared by every dashboard), values from `POST .../repeater/settings` and writes from `POST .../repeater/settings/apply`. Rules that matter:
+
+- **Read by group, not all at once.** Each setting is one CLI round trip holding the radio lock, so groups are collapsed and read on demand; "Read All" (and the header's "Load All") reads the whole catalog, which is a long hold. Do not auto-read on expand — expanding is free, reading is not. A group opens itself once it *has* values, so a read is never followed by a second click to see it.
+- **Only dirty fields are written**, one `set` per field, behind a two-click confirm (`useArmedAction`, shared with the Actions pane). A field whose write did not come back `ok` keeps its previous value and stays dirty, so a retry re-sends exactly the ones that failed.
+- **Status drives the field, not a firmware version check.** `unsupported` (the firmware answered `??`) locks the field; `no_reply` across the board sets `cli_responsive: false`, which is what a guest session looks like and is shown as "log in as admin".
+- Password fields are masked, and the backend redacts them from the apply result — which is also what gets mirrored into the console history, so every write is visible there alongside typed commands.
 
 **Console pane**: Full CLI access via the same command endpoint. History is ephemeral (not persisted to DB).
 

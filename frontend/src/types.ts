@@ -797,23 +797,6 @@ export interface RepeaterNodeInfoResponse {
   clock_utc: string | null;
 }
 
-export interface RepeaterRadioSettingsResponse {
-  firmware_version: string | null;
-  radio: string | null;
-  tx_power: string | null;
-  airtime_factor: string | null;
-  // Configured duty-cycle limit (e.g. "25.0%"), firmware-derived from airtime_factor.
-  // Only present on firmware >= 1.15; null on older nodes.
-  duty_cycle_limit: string | null;
-  repeat_enabled: string | null;
-  flood_max: string | null;
-}
-
-export interface RepeaterAdvertIntervalsResponse {
-  advert_interval: string | null;
-  flood_advert_interval: string | null;
-}
-
 export interface RepeaterOwnerInfoResponse {
   owner_info: string | null;
   firmware_version: string | null;
@@ -834,6 +817,80 @@ export interface RepeaterRegionsResponse {
   truncated: boolean;
   /** 'cli' = full admin hierarchy; 'anon' = guest flood-allowed names only. */
   source: 'cli' | 'anon' | null;
+}
+
+/** How the firmware answered one `get`/`set` for a setting. */
+export type RepeaterSettingStatus = 'ok' | 'unsupported' | 'error' | 'no_reply';
+
+export type RepeaterSettingValueType = 'string' | 'int' | 'float' | 'bool' | 'enum' | 'radio';
+
+/**
+ * One editable repeater setting, described by the server-side catalog
+ * (`app/services/repeater_settings.py`). The editor renders its form from
+ * these, so new settings need no frontend change.
+ */
+export interface RepeaterSettingDefinition {
+  key: string;
+  label: string;
+  group: string;
+  /** The firmware's own key, as used in `get`/`set`. */
+  cli_key: string;
+  value_type: RepeaterSettingValueType;
+  help: string;
+  unit: string | null;
+  minimum: number | null;
+  maximum: number | null;
+  step: number | null;
+  options: string[];
+  max_length: number | null;
+  /** False when the firmware cannot read the value back (the admin password). */
+  readable: boolean;
+  writable: boolean;
+  /** Password-like: masked in the UI, redacted in results. */
+  sensitive: boolean;
+  note: string | null;
+}
+
+export interface RepeaterSettingGroupDefinition {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface RepeaterSettingsSchemaResponse {
+  groups: RepeaterSettingGroupDefinition[];
+  settings: RepeaterSettingDefinition[];
+}
+
+export interface RepeaterSettingValue {
+  key: string;
+  value: string | null;
+  raw: string | null;
+  status: RepeaterSettingStatus;
+}
+
+export interface RepeaterSettingsResponse {
+  values: RepeaterSettingValue[];
+  /** False means nothing answered — usually a guest session, since the firmware routes no CLI text for one. */
+  cli_responsive: boolean;
+}
+
+export interface RepeaterSettingChange {
+  key: string;
+  /** Radio tuples travel as 'freq,bandwidth,sf,cr'. */
+  value: string | number | boolean;
+}
+
+export interface RepeaterSettingApplyResult {
+  key: string;
+  command: string;
+  value: string;
+  status: RepeaterSettingStatus;
+  reply: string | null;
+}
+
+export interface RepeaterSettingsApplyResponse {
+  results: RepeaterSettingApplyResult[];
 }
 
 export interface LppSensor {
@@ -863,8 +920,6 @@ export type PaneName =
   | 'nodeInfo'
   | 'neighbors'
   | 'acl'
-  | 'radioSettings'
-  | 'advertIntervals'
   | 'ownerInfo'
   | 'lppTelemetry'
   | 'regions';

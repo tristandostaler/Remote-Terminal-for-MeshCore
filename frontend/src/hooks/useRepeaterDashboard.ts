@@ -12,11 +12,13 @@ import type {
   RepeaterNeighborsResponse,
   RepeaterAclResponse,
   RepeaterNodeInfoResponse,
-  RepeaterRadioSettingsResponse,
-  RepeaterAdvertIntervalsResponse,
   RepeaterOwnerInfoResponse,
   RepeaterLppTelemetryResponse,
   RepeaterRegionsResponse,
+  RepeaterSettingApplyResult,
+  RepeaterSettingChange,
+  RepeaterSettingsSchemaResponse,
+  RepeaterSettingValue,
   CommandResponse,
 } from '../types';
 import {
@@ -41,8 +43,6 @@ interface PaneData {
   nodeInfo: RepeaterNodeInfoResponse | null;
   neighbors: RepeaterNeighborsResponse | null;
   acl: RepeaterAclResponse | null;
-  radioSettings: RepeaterRadioSettingsResponse | null;
-  advertIntervals: RepeaterAdvertIntervalsResponse | null;
   ownerInfo: RepeaterOwnerInfoResponse | null;
   lppTelemetry: RepeaterLppTelemetryResponse | null;
   regions: RepeaterRegionsResponse | null;
@@ -55,6 +55,8 @@ interface RepeaterDashboardCacheEntry {
   paneData: PaneData;
   paneStates: Record<PaneName, PaneState>;
   consoleHistory: ConsoleEntry[];
+  /** Settings-editor values, keyed by catalog key. */
+  settingsValues: Record<string, RepeaterSettingValue>;
 }
 
 const INITIAL_PANE_STATE: PaneState = { loading: false, attempt: 0, error: null, fetched_at: null };
@@ -65,8 +67,6 @@ function createInitialPaneStates(): Record<PaneName, PaneState> {
     nodeInfo: { ...INITIAL_PANE_STATE },
     neighbors: { ...INITIAL_PANE_STATE },
     acl: { ...INITIAL_PANE_STATE },
-    radioSettings: { ...INITIAL_PANE_STATE },
-    advertIntervals: { ...INITIAL_PANE_STATE },
     ownerInfo: { ...INITIAL_PANE_STATE },
     lppTelemetry: { ...INITIAL_PANE_STATE },
     regions: { ...INITIAL_PANE_STATE },
@@ -79,8 +79,6 @@ function createInitialPaneData(): PaneData {
     nodeInfo: null,
     neighbors: null,
     acl: null,
-    radioSettings: null,
-    advertIntervals: null,
     ownerInfo: null,
     lppTelemetry: null,
     regions: null,
@@ -88,6 +86,23 @@ function createInitialPaneData(): PaneData {
 }
 
 const repeaterDashboardCache = new Map<string, RepeaterDashboardCacheEntry>();
+
+/**
+ * The settings catalog is static server-side data, identical for every
+ * repeater, so one in-flight promise is shared by every dashboard.
+ */
+let settingsSchemaPromise: Promise<RepeaterSettingsSchemaResponse> | null = null;
+
+function loadSettingsSchema(): Promise<RepeaterSettingsSchemaResponse> {
+  if (!settingsSchemaPromise) {
+    settingsSchemaPromise = api.repeaterSettingsSchema().catch((err) => {
+      // Don't cache a failure: the next dashboard should retry.
+      settingsSchemaPromise = null;
+      throw err;
+    });
+  }
+  return settingsSchemaPromise;
+}
 
 function getLoginToastTitle(status: string): string {
   switch (status) {
@@ -110,8 +125,6 @@ function normalizePaneStates(paneStates: Record<PaneName, PaneState>): Record<Pa
     nodeInfo: { ...paneStates.nodeInfo, loading: false },
     neighbors: { ...paneStates.neighbors, loading: false },
     acl: { ...paneStates.acl, loading: false },
-    radioSettings: { ...paneStates.radioSettings, loading: false },
-    advertIntervals: { ...paneStates.advertIntervals, loading: false },
     ownerInfo: { ...paneStates.ownerInfo, loading: false },
     lppTelemetry: { ...paneStates.lppTelemetry, loading: false },
     regions: { ...paneStates.regions, loading: false },
@@ -137,6 +150,7 @@ function getCachedState(publicKey: string | null): RepeaterDashboardCacheEntry |
     paneData: clonePaneData(cached.paneData),
     paneStates: normalizePaneStates(cached.paneStates),
     consoleHistory: cloneConsoleHistory(cached.consoleHistory),
+    settingsValues: { ...cached.settingsValues },
   };
 }
 
@@ -149,6 +163,7 @@ function cacheState(publicKey: string, entry: RepeaterDashboardCacheEntry) {
     paneData: clonePaneData(entry.paneData),
     paneStates: normalizePaneStates(entry.paneStates),
     consoleHistory: cloneConsoleHistory(entry.consoleHistory),
+    settingsValues: { ...entry.settingsValues },
   });
 
   if (repeaterDashboardCache.size > MAX_CACHED_REPEATERS) {
@@ -161,6 +176,7 @@ function cacheState(publicKey: string, entry: RepeaterDashboardCacheEntry) {
 
 export function resetRepeaterDashboardCacheForTests() {
   repeaterDashboardCache.clear();
+  settingsSchemaPromise = null;
 }
 
 // Maps pane name to the API call
@@ -174,10 +190,6 @@ function fetchPaneData(publicKey: string, pane: PaneName) {
       return api.repeaterNeighbors(publicKey);
     case 'acl':
       return api.repeaterAcl(publicKey);
-    case 'radioSettings':
-      return api.repeaterRadioSettings(publicKey);
-    case 'advertIntervals':
-      return api.repeaterAdvertIntervals(publicKey);
     case 'ownerInfo':
       return api.repeaterOwnerInfo(publicKey);
     case 'lppTelemetry':
@@ -210,6 +222,18 @@ export interface UseRepeaterDashboardResult {
   /** Whether the server's own clock may be pushed; null until fetched. */
   hostClock: HostClockStatus | null;
   refreshHostClock: () => Promise<void>;
+  /** Catalog of editable settings; null until the (static) schema loads. */
+  settingsSchema: RepeaterSettingsSchemaResponse | null;
+  /** Last-read value per catalog key, merged across group reads. */
+  settingsValues: Record<string, RepeaterSettingValue>;
+  settingsLoading: boolean;
+  settingsError: string | null;
+  /** False once a read came back with nothing answered — i.e. not an admin session. */
+  settingsCliResponsive: boolean | null;
+  /** Read values for a group, an explicit key list, or (with no filter) everything. */
+  fetchSettings: (filter?: { keys?: string[]; group?: string }) => Promise<void>;
+  /** Write changes; resolves with the per-setting results (also logged to the console). */
+  applySettings: (changes: RepeaterSettingChange[]) => Promise<RepeaterSettingApplyResult[]>;
 }
 
 interface UseRepeaterDashboardOptions {
@@ -247,6 +271,14 @@ export function useRepeaterDashboard(
   );
   const [consoleLoading, setConsoleLoading] = useState(false);
 
+  const [settingsSchema, setSettingsSchema] = useState<RepeaterSettingsSchemaResponse | null>(null);
+  const [settingsValues, setSettingsValues] = useState<Record<string, RepeaterSettingValue>>(
+    cachedState?.settingsValues ?? {}
+  );
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsCliResponsive, setSettingsCliResponsive] = useState<boolean | null>(null);
+
   // Track which conversation we're operating on to avoid stale updates after
   // unmount. Initialised from activeConversation because the parent renders
   // <RepeaterDashboard key={id}>, so this hook only ever sees one conversation.
@@ -278,6 +310,7 @@ export function useRepeaterDashboard(
       paneData,
       paneStates,
       consoleHistory,
+      settingsValues,
     });
   }, [
     consoleHistory,
@@ -287,6 +320,7 @@ export function useRepeaterDashboard(
     lastLoginAttempt,
     paneData,
     paneStates,
+    settingsValues,
   ]);
 
   useEffect(() => {
@@ -437,14 +471,141 @@ export function useRepeaterDashboard(
     [getPublicKey, options.hasAdvertLocation]
   );
 
+  // The settings catalog is static server-side data, so it is loaded once the
+  // dashboard is usable -- the editor can then render its form (and say which
+  // settings exist) before a single value has been read off the radio.
+  useEffect(() => {
+    if (!loggedIn) return;
+    let cancelled = false;
+    loadSettingsSchema()
+      .then((schema) => {
+        if (!cancelled) setSettingsSchema(schema);
+      })
+      .catch((err) => console.error('Failed to load the repeater settings catalog:', err));
+    return () => {
+      cancelled = true;
+    };
+  }, [loggedIn]);
+
+  const fetchSettings = useCallback(
+    async (filter: { keys?: string[]; group?: string } = {}) => {
+      const publicKey = getPublicKey();
+      if (!publicKey) return;
+      const conversationId = publicKey;
+
+      setSettingsLoading(true);
+      setSettingsError(null);
+      try {
+        const result = await api.repeaterSettings(publicKey, filter);
+        if (!mountedRef.current || activeIdRef.current !== conversationId) return;
+        setSettingsValues((prev) => {
+          const next = { ...prev };
+          for (const value of result.values) {
+            next[value.key] = value;
+          }
+          return next;
+        });
+        setSettingsCliResponsive(result.cli_responsive);
+      } catch (err) {
+        if (!mountedRef.current || activeIdRef.current !== conversationId) return;
+        const msg = err instanceof Error ? err.message : 'Failed to read settings';
+        setSettingsError(msg);
+        toast.error('Failed to read repeater settings', { description: msg });
+      } finally {
+        if (mountedRef.current && activeIdRef.current === conversationId) {
+          setSettingsLoading(false);
+        }
+      }
+    },
+    [getPublicKey]
+  );
+
+  const applySettings = useCallback(
+    async (changes: RepeaterSettingChange[]): Promise<RepeaterSettingApplyResult[]> => {
+      const publicKey = getPublicKey();
+      if (!publicKey || changes.length === 0) return [];
+      const conversationId = publicKey;
+      const sensitiveKeys = new Set(
+        (settingsSchema?.settings ?? []).filter((s) => s.sensitive).map((s) => s.key)
+      );
+
+      setSettingsLoading(true);
+      setSettingsError(null);
+      try {
+        const result = await api.repeaterApplySettings(publicKey, changes);
+        if (!mountedRef.current || activeIdRef.current !== conversationId) return result.results;
+
+        // Mirror every write into the console, so the dashboard keeps one
+        // chronological record of what this repeater was told. The backend has
+        // already redacted password values out of `command`.
+        const now = Math.floor(Date.now() / 1000);
+        setConsoleHistory((prev) => [
+          ...prev,
+          ...result.results.flatMap((entry) => [
+            { command: entry.command, response: '', timestamp: now, outgoing: true },
+            {
+              command: entry.command,
+              response: entry.reply ?? `(no response - ${entry.status})`,
+              timestamp: now,
+              outgoing: false,
+            },
+          ]),
+        ]);
+
+        // Only a confirmed write moves the shown value; anything else keeps the
+        // last known one, so a failed field stays visibly different from the
+        // repeater and the operator can retry it.
+        const applied = result.results.filter((entry) => entry.status === 'ok');
+        if (applied.length > 0) {
+          setSettingsValues((prev) => {
+            const next = { ...prev };
+            for (const entry of applied) {
+              next[entry.key] = {
+                key: entry.key,
+                // A password is never echoed back, so it has no displayable value.
+                value: sensitiveKeys.has(entry.key) ? null : entry.value,
+                raw: null,
+                status: 'ok',
+              };
+            }
+            return next;
+          });
+        }
+
+        const failed = result.results.filter((entry) => entry.status !== 'ok');
+        if (failed.length === 0) {
+          toast.success(
+            applied.length === 1 ? '1 setting applied' : `${applied.length} settings applied`
+          );
+        } else {
+          toast.error(`${failed.length} of ${result.results.length} settings failed`, {
+            description: failed
+              .map((entry) => `${entry.key}: ${entry.reply ?? entry.status}`)
+              .join('\n'),
+          });
+        }
+        return result.results;
+      } catch (err) {
+        if (!mountedRef.current || activeIdRef.current !== conversationId) return [];
+        const msg = err instanceof Error ? err.message : 'Failed to apply settings';
+        setSettingsError(msg);
+        toast.error('Failed to apply repeater settings', { description: msg });
+        return [];
+      } finally {
+        if (mountedRef.current && activeIdRef.current === conversationId) {
+          setSettingsLoading(false);
+        }
+      }
+    },
+    [getPublicKey, settingsSchema]
+  );
+
   const loadAll = useCallback(async () => {
     const panes: PaneName[] = [
       'status',
       'nodeInfo',
       'neighbors',
-      'radioSettings',
       'acl',
-      'advertIntervals',
       'ownerInfo',
       'lppTelemetry',
       'regions',
@@ -453,7 +614,11 @@ export function useRepeaterDashboard(
     for (const pane of panes) {
       await refreshPane(pane);
     }
-  }, [refreshPane]);
+    // The settings editor is where the radio configuration lives now, so "load
+    // all" has to include it. It goes last because it is the longest hold, and
+    // the backend gives up early when nothing is answering (a guest session).
+    await fetchSettings();
+  }, [refreshPane, fetchSettings]);
 
   const sendConsoleCommand = useCallback(
     async (command: string) => {
@@ -627,5 +792,12 @@ export function useRepeaterDashboard(
     fixForwardClock,
     hostClock,
     refreshHostClock,
+    settingsSchema,
+    settingsValues,
+    settingsLoading,
+    settingsError,
+    settingsCliResponsive,
+    fetchSettings,
+    applySettings,
   };
 }

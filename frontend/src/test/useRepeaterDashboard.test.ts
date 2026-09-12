@@ -1,6 +1,6 @@
 import { StrictMode, createElement, type ReactNode } from 'react';
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import {
   resetRepeaterDashboardCacheForTests,
   useRepeaterDashboard,
@@ -15,14 +15,55 @@ vi.mock('../api', () => ({
     repeaterNodeInfo: vi.fn(),
     repeaterNeighbors: vi.fn(),
     repeaterAcl: vi.fn(),
-    repeaterRadioSettings: vi.fn(),
-    repeaterAdvertIntervals: vi.fn(),
     repeaterOwnerInfo: vi.fn(),
     repeaterLppTelemetry: vi.fn(),
     repeaterRegions: vi.fn(),
     sendRepeaterCommand: vi.fn(),
     repeaterSyncClock: vi.fn(),
     repeaterFixClock: vi.fn(),
+    repeaterSettingsSchema: vi.fn(async () => ({
+      groups: [{ key: 'radio', label: 'Radio', description: 'LoRa parameters' }],
+      settings: [
+        {
+          key: 'flood_max',
+          label: 'Max Flood Hops',
+          group: 'radio',
+          cli_key: 'flood.max',
+          value_type: 'int',
+          help: '',
+          unit: 'hops',
+          minimum: 0,
+          maximum: 64,
+          step: null,
+          options: [],
+          max_length: null,
+          readable: true,
+          writable: true,
+          sensitive: false,
+          note: null,
+        },
+        {
+          key: 'guest_password',
+          label: 'Guest Password',
+          group: 'access',
+          cli_key: 'guest.password',
+          value_type: 'string',
+          help: '',
+          unit: null,
+          minimum: null,
+          maximum: null,
+          step: null,
+          options: [],
+          max_length: 15,
+          readable: true,
+          writable: true,
+          sensitive: true,
+          note: null,
+        },
+      ],
+    })),
+    repeaterSettings: vi.fn(),
+    repeaterApplySettings: vi.fn(),
     getHostClock: vi.fn(async () => ({
       checked_at: 0,
       trusted: true,
@@ -430,7 +471,7 @@ describe('useRepeaterDashboard', () => {
     expect(last.response).toContain('ahead of the reference');
   });
 
-  it('loadAll calls refreshPane for all panes serially', async () => {
+  it('loadAll refreshes every pane and then reads the settings', async () => {
     mockApi.repeaterStatus.mockResolvedValueOnce({ battery_volts: 4.0 });
     mockApi.repeaterNodeInfo.mockResolvedValueOnce({
       name: null,
@@ -438,21 +479,8 @@ describe('useRepeaterDashboard', () => {
       lon: null,
       clock_utc: null,
     });
-    mockApi.repeaterRadioSettings.mockResolvedValueOnce({
-      firmware_version: 'v1.0',
-      radio: null,
-      tx_power: null,
-      airtime_factor: null,
-      duty_cycle_limit: null,
-      repeat_enabled: null,
-      flood_max: null,
-    });
     mockApi.repeaterNeighbors.mockResolvedValueOnce({ neighbors: [] });
     mockApi.repeaterAcl.mockResolvedValueOnce({ acl: [] });
-    mockApi.repeaterAdvertIntervals.mockResolvedValueOnce({
-      advert_interval: null,
-      flood_advert_interval: null,
-    });
     mockApi.repeaterOwnerInfo.mockResolvedValueOnce({
       owner_info: null,
       firmware_version: null,
@@ -466,6 +494,10 @@ describe('useRepeaterDashboard', () => {
       truncated: false,
       source: 'cli',
     });
+    mockApi.repeaterSettings.mockResolvedValueOnce({
+      values: [{ key: 'flood_max', value: '3', raw: '3', status: 'ok' }],
+      cli_responsive: true,
+    });
 
     const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
 
@@ -477,11 +509,13 @@ describe('useRepeaterDashboard', () => {
     expect(mockApi.repeaterNodeInfo).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterNeighbors).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterAcl).toHaveBeenCalledTimes(1);
-    expect(mockApi.repeaterRadioSettings).toHaveBeenCalledTimes(1);
-    expect(mockApi.repeaterAdvertIntervals).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterOwnerInfo).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterLppTelemetry).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterRegions).toHaveBeenCalledTimes(1);
+    // Radio configuration lives in the settings editor now, so "load all" has
+    // to read it -- with no filter, i.e. every readable setting.
+    expect(mockApi.repeaterSettings).toHaveBeenCalledWith(REPEATER_KEY, {});
+    expect(result.current.settingsValues.flood_max.value).toBe('3');
   });
 
   it('refreshing neighbors fetches node info first', async () => {
@@ -583,5 +617,129 @@ describe('useRepeaterDashboard', () => {
     expect(secondMount.result.current.paneStates.status.loading).toBe(false);
     expect(secondMount.result.current.consoleHistory).toHaveLength(2);
     expect(secondMount.result.current.consoleHistory[1].response).toBe('v2.1.0');
+  });
+
+  it('fetchSettings merges values per group and records CLI responsiveness', async () => {
+    mockApi.repeaterSettings.mockResolvedValueOnce({
+      values: [{ key: 'flood_max', value: '3', raw: '3', status: 'ok' }],
+      cli_responsive: true,
+    });
+    mockApi.repeaterSettings.mockResolvedValueOnce({
+      values: [{ key: 'guest_password', value: 'hunter2', raw: null, status: 'ok' }],
+      cli_responsive: true,
+    });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.fetchSettings({ group: 'radio' });
+      await result.current.fetchSettings({ group: 'access' });
+    });
+
+    expect(mockApi.repeaterSettings).toHaveBeenNthCalledWith(1, REPEATER_KEY, { group: 'radio' });
+    // A second group read adds to what the first read, rather than replacing it.
+    expect(result.current.settingsValues.flood_max.value).toBe('3');
+    expect(result.current.settingsValues.guest_password.value).toBe('hunter2');
+    expect(result.current.settingsCliResponsive).toBe(true);
+  });
+
+  it('fetchSettings reports a guest session as not CLI-responsive', async () => {
+    mockApi.repeaterSettings.mockResolvedValueOnce({
+      values: [{ key: 'flood_max', value: null, raw: null, status: 'no_reply' }],
+      cli_responsive: false,
+    });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.fetchSettings({ group: 'radio' });
+    });
+
+    expect(result.current.settingsCliResponsive).toBe(false);
+    expect(result.current.settingsValues.flood_max.status).toBe('no_reply');
+  });
+
+  it('applySettings mirrors each write into the console and keeps confirmed values', async () => {
+    mockApi.repeaterApplySettings.mockResolvedValueOnce({
+      results: [
+        {
+          key: 'flood_max',
+          command: 'set flood.max 5',
+          value: '5',
+          status: 'ok',
+          reply: 'OK',
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.applySettings([{ key: 'flood_max', value: '5' }]);
+    });
+
+    expect(result.current.consoleHistory).toHaveLength(2);
+    expect(result.current.consoleHistory[0].command).toBe('set flood.max 5');
+    expect(result.current.consoleHistory[1].response).toBe('OK');
+    expect(result.current.settingsValues.flood_max.value).toBe('5');
+    expect(mockToast.success).toHaveBeenCalled();
+  });
+
+  it('applySettings leaves a failed write showing the previous value', async () => {
+    mockApi.repeaterSettings.mockResolvedValueOnce({
+      values: [{ key: 'flood_max', value: '3', raw: '3', status: 'ok' }],
+      cli_responsive: true,
+    });
+    mockApi.repeaterApplySettings.mockResolvedValueOnce({
+      results: [
+        {
+          key: 'flood_max',
+          command: 'set flood.max 99',
+          value: '99',
+          status: 'error',
+          reply: 'ERR: out of range',
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.fetchSettings({ group: 'radio' });
+      await result.current.applySettings([{ key: 'flood_max', value: '99' }]);
+    });
+
+    expect(result.current.settingsValues.flood_max.value).toBe('3');
+    expect(mockToast.error).toHaveBeenCalled();
+  });
+
+  it('applySettings never stores a password as a readable value', async () => {
+    mockApi.repeaterApplySettings.mockResolvedValueOnce({
+      results: [
+        {
+          key: 'guest_password',
+          command: 'set guest.password ********',
+          value: '********',
+          status: 'ok',
+          reply: 'OK',
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    // The schema load is what marks the setting sensitive, so wait for it.
+    mockApi.repeaterLogin.mockResolvedValueOnce({ status: 'ok', authenticated: true });
+    await act(async () => {
+      await result.current.login('pw');
+    });
+    await waitFor(() => expect(result.current.settingsSchema).not.toBe(null));
+
+    await act(async () => {
+      await result.current.applySettings([{ key: 'guest_password', value: 'hunter2' }]);
+    });
+
+    expect(result.current.settingsValues.guest_password.value).toBe(null);
+    expect(result.current.consoleHistory.some((e) => e.command.includes('hunter2'))).toBe(false);
   });
 });

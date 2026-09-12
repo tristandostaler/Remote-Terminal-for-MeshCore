@@ -28,7 +28,6 @@ import type {
   MessageActionResponse,
   ResendChannelMessageResponse,
   RepeaterAclResponse,
-  RepeaterAdvertIntervalsResponse,
   RepeaterLoginResponse,
   RoomPollConfigRequest,
   RoomPollStatus,
@@ -36,7 +35,10 @@ import type {
   RepeaterNeighborsResponse,
   RepeaterNodeInfoResponse,
   RepeaterOwnerInfoResponse,
-  RepeaterRadioSettingsResponse,
+  RepeaterSettingChange,
+  RepeaterSettingsApplyResponse,
+  RepeaterSettingsResponse,
+  RepeaterSettingsSchemaResponse,
   NodeStatsResponse,
   RepeaterRegionsResponse,
   RepeaterStatusResponse,
@@ -739,14 +741,6 @@ export const api = {
     fetchJson<RepeaterAclResponse>(`/contacts/${publicKey}/repeater/acl`, {
       method: 'POST',
     }),
-  repeaterRadioSettings: (publicKey: string) =>
-    fetchJson<RepeaterRadioSettingsResponse>(`/contacts/${publicKey}/repeater/radio-settings`, {
-      method: 'POST',
-    }),
-  repeaterAdvertIntervals: (publicKey: string) =>
-    fetchJson<RepeaterAdvertIntervalsResponse>(`/contacts/${publicKey}/repeater/advert-intervals`, {
-      method: 'POST',
-    }),
   repeaterOwnerInfo: (publicKey: string) =>
     fetchJson<RepeaterOwnerInfoResponse>(`/contacts/${publicKey}/repeater/owner-info`, {
       method: 'POST',
@@ -758,6 +752,20 @@ export const api = {
   repeaterLppTelemetry: (publicKey: string) =>
     fetchJson<RepeaterLppTelemetryResponse>(`/contacts/${publicKey}/repeater/lpp-telemetry`, {
       method: 'POST',
+    }),
+  /** Static catalog of editable settings; no radio access, so it is cached by the caller. */
+  repeaterSettingsSchema: () =>
+    fetchJson<RepeaterSettingsSchemaResponse>('/contacts/repeater/settings-schema'),
+  /** Read current values. Omit both filters to read every readable setting (slow: one CLI round trip each). */
+  repeaterSettings: (publicKey: string, filter: { keys?: string[]; group?: string } = {}) =>
+    fetchJson<RepeaterSettingsResponse>(`/contacts/${publicKey}/repeater/settings`, {
+      method: 'POST',
+      body: JSON.stringify({ keys: filter.keys ?? null, group: filter.group ?? null }),
+    }),
+  repeaterApplySettings: (publicKey: string, changes: RepeaterSettingChange[]) =>
+    fetchJson<RepeaterSettingsApplyResponse>(`/contacts/${publicKey}/repeater/settings/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ changes }),
     }),
   repeaterTelemetryHistory: (publicKey: string) =>
     fetchJson<TelemetryHistoryEntry[]>(`/contacts/${publicKey}/repeater/telemetry-history`),
