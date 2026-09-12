@@ -1433,6 +1433,13 @@ class TestRepeaterNodeInfo:
         assert response.lat == "40.7128"
         assert response.lon == "-74.0060"
         assert response.clock_utc == "2025-02-25 14:30:00"
+        # The same three answers, as the settings editor's entries, so the
+        # dashboard fills its identity fields without a second read.
+        assert [(v.key, v.value, v.status) for v in response.settings] == [
+            ("name", "MyRepeater", "ok"),
+            ("lat", "40.7128", "ok"),
+            ("lon", "-74.0060", "ok"),
+        ]
 
     @pytest.mark.asyncio
     async def test_partial_failure(self, test_db):
@@ -1463,6 +1470,11 @@ class TestRepeaterNodeInfo:
         assert response.lat is None
         assert response.lon is None
         assert response.clock_utc is None
+        assert [(v.key, v.status) for v in response.settings] == [
+            ("name", "ok"),
+            ("lat", "no_reply"),
+            ("lon", "no_reply"),
+        ]
 
 
 class TestRepeaterAdvertIntervals:
@@ -1551,6 +1563,14 @@ class TestRepeaterOwnerInfo:
         assert response.firmware_version == "v1.15.0"
         assert response.name == "Repeater One"
         assert response.guest_password == "guestpw123"
+        # Both editable values travel as settings-editor entries too. The
+        # password's raw reply is dropped, as the settings read drops it.
+        by_key = {v.key: v for v in response.settings}
+        assert set(by_key) == {"owner_info", "guest_password"}
+        assert by_key["owner_info"].value == "John Doe - Contact: john@example.com"
+        assert by_key["owner_info"].status == "ok"
+        assert by_key["guest_password"].value == "guestpw123"
+        assert by_key["guest_password"].raw is None
 
     @pytest.mark.asyncio
     async def test_timeout_returns_none_fields(self, test_db):
@@ -1577,6 +1597,34 @@ class TestRepeaterOwnerInfo:
         assert response.firmware_version is None
         assert response.name is None
         assert response.guest_password is None
+        assert {v.key: v.status for v in response.settings} == {
+            "owner_info": "no_reply",
+            "guest_password": "no_reply",
+        }
+
+    @pytest.mark.asyncio
+    async def test_an_empty_owner_note_is_a_value_not_silence(self, test_db):
+        # The binary request answered (firmware + name came back) with no owner
+        # note: that is an empty note the editor can show, not an unanswered read.
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.wait_for_event = AsyncMock(
+            return_value=_radio_result(
+                EventType.BINARY_RESPONSE, {"tag": "aabbccdd", "data": b"v1.15.0\nRpt\n".hex()}
+            )
+        )
+        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=_advancing_clock(step=20.0)),
+            patch("app.routers.server_control.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            response = await repeater_owner_info(KEY_A)
+
+        owner_note = next(v for v in response.settings if v.key == "owner_info")
+        assert (owner_note.value, owner_note.status) == ("", "ok")
 
     @pytest.mark.asyncio
     async def test_binary_req_sends_owner_info_type_and_no_cli_owner_command(self, test_db):
@@ -2168,6 +2216,45 @@ class TestRepeaterSettingsRead:
         # since the firmware routes no CLI text for one.
         assert response.cli_responsive is False
         assert all(value.status == "no_reply" for value in response.values)
+
+    @pytest.mark.asyncio
+    async def test_excluded_keys_are_not_asked_for(self, test_db):
+        """The dashboard's "load all" has already read some keys through other panes."""
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=_advancing_clock(step=20.0)),
+            patch("app.routers.server_control.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            response = await repeater_settings(
+                KEY_A,
+                RepeaterSettingsReadRequest(group="identity", exclude_keys=["name", "lat", "lon"]),
+            )
+
+        sent = [call.args[1] for call in mc.commands.send_cmd.call_args_list]
+        assert sent == ["get owner.info"]
+        assert [value.key for value in response.values] == ["owner_info"]
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_excluded_key_is_rejected(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await repeater_settings(
+                KEY_A, RepeaterSettingsReadRequest(exclude_keys=["not_a_setting"])
+            )
+
+        assert exc_info.value.status_code == 400
+        assert mc.commands.send_cmd.await_count == 0
 
     @pytest.mark.asyncio
     async def test_a_silent_repeater_stops_the_batch_early(self, test_db):

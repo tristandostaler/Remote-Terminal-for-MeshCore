@@ -350,17 +350,18 @@ async def repeater_node_info(public_key: str) -> RepeaterNodeInfoResponse:
     contact = await _resolve_contact_or_404(public_key)
     _require_repeater(contact)
 
+    identity = [get_setting(key) for key in NODE_INFO_SETTING_KEYS]
     results = await _batch_cli_fetch(
         contact,
         "repeater_node_info",
-        [
-            ("get name", "name"),
-            ("get lat", "lat"),
-            ("get lon", "lon"),
-            ("clock", "clock_utc"),
-        ],
+        [(setting.get_command, setting.key) for setting in identity] + [("clock", "clock_utc")],
     )
-    return RepeaterNodeInfoResponse(**results)
+    return RepeaterNodeInfoResponse(
+        **results,
+        # The same replies, parsed as the settings editor would: "load all" then
+        # fills those fields from here instead of asking the repeater again.
+        settings=[_setting_value(setting, results.get(setting.key)) for setting in identity],
+    )
 
 
 @router.post("/{public_key}/repeater/radio-settings", response_model=RepeaterRadioSettingsResponse)
@@ -437,11 +438,24 @@ async def repeater_owner_info(public_key: str) -> RepeaterOwnerInfoResponse:
         [("get guest.password", "guest_password")],
     )
 
+    guest_password = get_setting("guest_password")
     return RepeaterOwnerInfoResponse(
         owner_info=owner.get("owner_info"),
         firmware_version=owner.get("firmware_version"),
         name=owner.get("name"),
         guest_password=cli.get("guest_password"),
+        settings=[
+            # An answered binary request with no owner note is an empty note,
+            # not silence -- the parser hands back None for both, so tell them
+            # apart by whether anything came back at all.
+            RepeaterSettingValue(
+                key="owner_info",
+                value=(owner.get("owner_info") or "") if owner else None,
+                raw=None,
+                status="ok" if owner else "no_reply",
+            ),
+            _setting_value(guest_password, cli.get("guest_password")),
+        ],
     )
 
 
@@ -605,10 +619,26 @@ MAX_SETTING_CHANGES = len(REPEATER_SETTINGS)
 # after this many unanswered commands in a row and report what we have.
 SETTINGS_READ_SILENT_LIMIT = 3
 _REDACTED = "********"
+# Catalog keys the node-info pane reads (in this order); they are answered as
+# settings-editor entries too, so a dashboard "load all" reads each once.
+NODE_INFO_SETTING_KEYS = ("name", "lat", "lon")
 
 
 def _resolve_requested_settings(request: RepeaterSettingsReadRequest) -> list[RepeaterSetting]:
     """Pick which catalog entries a read request covers, in catalog order."""
+    settings = _select_requested_settings(request)
+    if not request.exclude_keys:
+        return settings
+    # The dashboard's "load all" already read some keys through the node-info
+    # and owner-info panes; don't ask the repeater for them a second time.
+    try:
+        excluded = {get_setting(key).key for key in request.exclude_keys}
+    except SettingValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return [s for s in settings if s.key not in excluded]
+
+
+def _select_requested_settings(request: RepeaterSettingsReadRequest) -> list[RepeaterSetting]:
     if request.keys:
         try:
             settings = [get_setting(key) for key in dict.fromkeys(request.keys)]
@@ -629,6 +659,19 @@ def _resolve_requested_settings(request: RepeaterSettingsReadRequest) -> list[Re
         return settings
 
     return list(READABLE_SETTINGS)
+
+
+def _setting_value(setting: RepeaterSetting, raw: str | None) -> RepeaterSettingValue:
+    """Parse one ``get`` reply into the entry the settings editor shows."""
+    value, status = parse_get_reply(setting, raw)
+    return RepeaterSettingValue(
+        key=setting.key,
+        value=value,
+        # A password read back is already in `value`; don't carry a second copy
+        # in the debug field.
+        raw=None if setting.sensitive else raw,
+        status=status,
+    )
 
 
 @router.get("/repeater/settings-schema", response_model=RepeaterSettingsSchemaResponse)
@@ -694,24 +737,8 @@ async def repeater_settings(
         abort_after_silent=SETTINGS_READ_SILENT_LIMIT,
     )
 
-    values: list[RepeaterSettingValue] = []
-    cli_responsive = False
-    for setting in settings:
-        raw = replies.get(setting.key)
-        if raw is not None:
-            cli_responsive = True
-        value, status = parse_get_reply(setting, raw)
-        values.append(
-            RepeaterSettingValue(
-                key=setting.key,
-                value=value,
-                # A password read back is already in `value`; don't carry a
-                # second copy in the debug field.
-                raw=None if setting.sensitive else raw,
-                status=status,
-            )
-        )
-
+    values = [_setting_value(setting, replies.get(setting.key)) for setting in settings]
+    cli_responsive = any(replies.get(setting.key) is not None for setting in settings)
     return RepeaterSettingsResponse(values=values, cli_responsive=cli_responsive)
 
 

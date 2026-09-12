@@ -471,21 +471,30 @@ describe('useRepeaterDashboard', () => {
     expect(last.response).toContain('ahead of the reference');
   });
 
-  it('loadAll refreshes every pane and then reads the settings', async () => {
+  it('loadAll refreshes every pane, then reads only the settings no pane covered', async () => {
     mockApi.repeaterStatus.mockResolvedValueOnce({ battery_volts: 4.0 });
     mockApi.repeaterNodeInfo.mockResolvedValueOnce({
-      name: null,
-      lat: null,
+      name: 'Hilltop',
+      lat: '45.5',
       lon: null,
       clock_utc: null,
+      settings: [
+        { key: 'name', value: 'Hilltop', raw: 'Hilltop', status: 'ok' },
+        { key: 'lat', value: '45.5', raw: '45.5', status: 'ok' },
+        { key: 'lon', value: null, raw: null, status: 'no_reply' },
+      ],
     });
     mockApi.repeaterNeighbors.mockResolvedValueOnce({ neighbors: [] });
     mockApi.repeaterAcl.mockResolvedValueOnce({ acl: [] });
     mockApi.repeaterOwnerInfo.mockResolvedValueOnce({
-      owner_info: null,
-      firmware_version: null,
-      name: null,
-      guest_password: null,
+      owner_info: 'Tristan',
+      firmware_version: 'v1.15.0',
+      name: 'Hilltop',
+      guest_password: 'hunter2',
+      settings: [
+        { key: 'owner_info', value: 'Tristan', raw: null, status: 'ok' },
+        { key: 'guest_password', value: 'hunter2', raw: null, status: 'ok' },
+      ],
     });
     mockApi.repeaterLppTelemetry.mockResolvedValueOnce({ sensors: [] });
     mockApi.repeaterRegions.mockResolvedValueOnce({
@@ -512,10 +521,156 @@ describe('useRepeaterDashboard', () => {
     expect(mockApi.repeaterOwnerInfo).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterLppTelemetry).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterRegions).toHaveBeenCalledTimes(1);
-    // Radio configuration lives in the settings editor now, so "load all" has
-    // to read it -- with no filter, i.e. every readable setting.
-    expect(mockApi.repeaterSettings).toHaveBeenCalledWith(REPEATER_KEY, {});
+    // Node info and owner info already asked the repeater for these five, so
+    // the settings read that follows must not ask again -- even for the one
+    // that went unanswered, since asking twice would not change that.
+    expect(mockApi.repeaterSettings).toHaveBeenCalledTimes(1);
+    expect(mockApi.repeaterSettings).toHaveBeenCalledWith(REPEATER_KEY, {
+      excludeKeys: ['name', 'lat', 'lon', 'owner_info', 'guest_password'],
+    });
+    // ...and what the panes read is in the editor as if it had been read there.
+    expect(result.current.settingsValues.name.value).toBe('Hilltop');
+    expect(result.current.settingsValues.lon.status).toBe('no_reply');
+    expect(result.current.settingsValues.guest_password.value).toBe('hunter2');
     expect(result.current.settingsValues.flood_max.value).toBe('3');
+  });
+
+  it('loadAll reads everything when the panes that share settings failed', async () => {
+    mockApi.repeaterStatus.mockResolvedValueOnce({ battery_volts: 4.0 });
+    mockApi.repeaterNodeInfo.mockRejectedValue(new Error('timeout'));
+    mockApi.repeaterNeighbors.mockResolvedValueOnce({ neighbors: [] });
+    mockApi.repeaterAcl.mockResolvedValueOnce({ acl: [] });
+    mockApi.repeaterOwnerInfo.mockRejectedValue(new Error('timeout'));
+    mockApi.repeaterLppTelemetry.mockResolvedValueOnce({ sensors: [] });
+    mockApi.repeaterRegions.mockResolvedValueOnce({
+      regions: [],
+      raw: null,
+      truncated: false,
+      source: 'cli',
+    });
+    mockApi.repeaterSettings.mockResolvedValueOnce({ values: [], cli_responsive: true });
+
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+      let loading: Promise<void> = Promise.resolve();
+      act(() => {
+        loading = result.current.loadAll();
+      });
+      // Two failing panes, three attempts each, two seconds between attempts.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+        await loading;
+      });
+
+      // Three attempts, then three more when Neighbors tried to prefetch it.
+      expect(mockApi.repeaterNodeInfo).toHaveBeenCalledTimes(6);
+      // Nothing was read for the editor, so nothing is left out of its read.
+      expect(mockApi.repeaterSettings).toHaveBeenCalledWith(REPEATER_KEY, {});
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a pane refresh fills the editor fields it read, and an editor read updates the pane', async () => {
+    mockApi.repeaterNodeInfo.mockResolvedValueOnce({
+      name: 'Hilltop',
+      lat: '45.5',
+      lon: '-73.5',
+      clock_utc: '12:00:00 - 1/1/2024 UTC',
+      settings: [
+        { key: 'name', value: 'Hilltop', raw: 'Hilltop', status: 'ok' },
+        { key: 'lat', value: '45.5', raw: '45.5', status: 'ok' },
+        { key: 'lon', value: '-73.5', raw: '-73.5', status: 'ok' },
+      ],
+    });
+    mockApi.repeaterSettings.mockResolvedValueOnce({
+      values: [
+        { key: 'name', value: 'Valley', raw: 'Valley', status: 'ok' },
+        // A failed read must not blank the pane's copy.
+        { key: 'lat', value: null, raw: null, status: 'no_reply' },
+        // Owner info was never fetched as a pane, so there is nothing to update.
+        { key: 'owner_info', value: 'Tristan', raw: 'Tristan', status: 'ok' },
+      ],
+      cli_responsive: true,
+    });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.refreshPane('nodeInfo');
+    });
+    expect(result.current.settingsValues.name.value).toBe('Hilltop');
+    expect(result.current.settingsValues.lon.value).toBe('-73.5');
+
+    await act(async () => {
+      await result.current.fetchSettings({ group: 'identity' });
+    });
+    expect(result.current.paneData.nodeInfo?.name).toBe('Valley');
+    expect(result.current.paneData.nodeInfo?.lat).toBe('45.5');
+    expect(result.current.paneData.nodeInfo?.clock_utc).toBe('12:00:00 - 1/1/2024 UTC');
+    expect(result.current.paneData.ownerInfo).toBeNull();
+  });
+
+  it('applySettings updates the pane showing the value, including a new guest password', async () => {
+    mockApi.repeaterOwnerInfo.mockResolvedValueOnce({
+      owner_info: 'Tristan',
+      firmware_version: 'v1.15.0',
+      name: 'Hilltop',
+      guest_password: 'hunter2',
+      settings: [
+        { key: 'owner_info', value: 'Tristan', raw: null, status: 'ok' },
+        { key: 'guest_password', value: 'hunter2', raw: null, status: 'ok' },
+      ],
+    });
+    mockApi.repeaterApplySettings.mockResolvedValueOnce({
+      results: [
+        {
+          key: 'guest_password',
+          command: 'set guest.password ********',
+          value: '********',
+          reply: 'OK',
+          status: 'ok',
+        },
+        {
+          key: 'owner_info',
+          command: 'set owner.info Someone else',
+          value: 'Someone else',
+          reply: 'ERR: nope',
+          status: 'error',
+        },
+        { key: 'name', command: 'set name Valley', value: 'Valley', reply: 'OK', status: 'ok' },
+      ],
+    });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    // The schema load is what marks the setting sensitive, so wait for it.
+    mockApi.repeaterLogin.mockResolvedValueOnce({ status: 'ok', authenticated: true });
+    await act(async () => {
+      await result.current.login('pw');
+    });
+    await waitFor(() => expect(result.current.settingsSchema).not.toBe(null));
+
+    await act(async () => {
+      await result.current.refreshPane('ownerInfo');
+      await result.current.applySettings([
+        { key: 'guest_password', value: 'letmein' },
+        { key: 'owner_info', value: 'Someone else' },
+        { key: 'name', value: 'Valley' },
+      ]);
+    });
+
+    // The pane prints the guest password it read back, so it shows the one
+    // that was just set rather than the stale one -- while the editor itself
+    // still never holds a password.
+    expect(result.current.paneData.ownerInfo?.guest_password).toBe('letmein');
+    expect(result.current.settingsValues.guest_password.value).toBeNull();
+    // A refused write leaves the pane as it was.
+    expect(result.current.paneData.ownerInfo?.owner_info).toBe('Tristan');
+    // Owner Info prints the name too, so a rename reaches it as well.
+    expect(result.current.paneData.ownerInfo?.name).toBe('Valley');
   });
 
   it('refreshing neighbors fetches node info first', async () => {

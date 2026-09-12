@@ -795,6 +795,8 @@ export interface RepeaterNodeInfoResponse {
   lat: string | null;
   lon: string | null;
   clock_utc: string | null;
+  /** name/lat/lon again, as settings-editor entries, so the editor is filled from the same read. */
+  settings: RepeaterSettingValue[];
 }
 
 export interface RepeaterOwnerInfoResponse {
@@ -802,6 +804,8 @@ export interface RepeaterOwnerInfoResponse {
   firmware_version: string | null;
   name: string | null;
   guest_password: string | null;
+  /** owner_info/guest_password again, as settings-editor entries. */
+  settings: RepeaterSettingValue[];
 }
 
 export interface RepeaterRegionEntry {
@@ -867,6 +871,14 @@ export interface RepeaterSettingValue {
   value: string | null;
   raw: string | null;
   status: RepeaterSettingStatus;
+}
+
+/** Which settings to read: a key list, one group, or (neither) everything; minus excludeKeys. */
+export interface RepeaterSettingsFilter {
+  keys?: string[];
+  group?: string;
+  /** Keys another pane just read, so the repeater is not asked for them twice. */
+  excludeKeys?: string[];
 }
 
 export interface RepeaterSettingsResponse {

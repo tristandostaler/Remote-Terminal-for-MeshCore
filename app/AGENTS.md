@@ -171,6 +171,7 @@ app/
 - **`no_reply` is not `unsupported`.** The firmware routes no CLI text at all for a guest or read-only client, so a session that is not admin reads every setting as `no_reply`; that is what `cli_responsive` on the read response tells the UI. Because each of those costs a full 10-second timeout, a read passes `abort_after_silent` to `batch_cli_fetch` and abandons the rest of the batch after three unanswered commands in a row — half a minute to learn nothing is listening, rather than several minutes. A single answer resets the streak, so a lossy link does not truncate a read that is working.
 - **Values are validated before anything is sent.** A batch is prepared in full (unknown key → 400, bad value → 422, duplicate key → 400) so a typo in one field cannot half-apply the rest. String values reject control characters and newlines outright: everything is sent as the tail of a one-line CLI command, so a newline would be a second command smuggled onto the repeater.
 - Password values (`password`, `guest.password`) are `sensitive`: they go out on the wire but are redacted out of the apply response and the server log, and the admin password is `readable=False` because the firmware cannot return it.
+- **A value is read off the air once.** The node-info pane reads `name`/`lat`/`lon` and owner-info reads the owner note (binary request) and `guest.password`; those endpoints build their commands from the catalog and answer the same replies a second time as `settings` entries (`_setting_value`), so the dashboard fills the editor from the pane fetch. The settings read takes `exclude_keys` for exactly this: "load all" passes the keys the panes already covered. Keep the two in step — a pane that starts reading another catalog key should emit it as an entry, and the frontend's `PANE_SETTING_FIELDS` should list it.
 
 ### Server login route escalation
 
@@ -400,13 +401,13 @@ Web Push is a standalone subsystem in `app/push/`, separate from the fanout modu
 - `POST /contacts/{public_key}/repeater/lpp-telemetry`
 - `POST /contacts/{public_key}/repeater/neighbors`
 - `POST /contacts/{public_key}/repeater/acl`
-- `POST /contacts/{public_key}/repeater/node-info`
+- `POST /contacts/{public_key}/repeater/node-info` — name, position and clock; also carries name/lat/lon as settings-editor entries (`settings`) so the dashboard need not read them twice
 - `POST /contacts/{public_key}/repeater/radio-settings` — kept for API consumers; the dashboard shows and edits these values through the settings endpoints below instead
 - `POST /contacts/{public_key}/repeater/regions` — CLI region hierarchy, falling back to the guest anon flood-allowed names (`source`: `cli` or `anon`)
 - `POST /contacts/{public_key}/repeater/advert-intervals`
-- `POST /contacts/{public_key}/repeater/owner-info`
+- `POST /contacts/{public_key}/repeater/owner-info` — owner note, firmware and name from the guest-accessible binary request plus the admin-only guest password over CLI; owner note and guest password also come back as settings-editor entries (`settings`)
 - `GET /contacts/repeater/settings-schema` — the static catalog of editable repeater settings (`app/services/repeater_settings.py`); no radio access, so the frontend caches it once
-- `POST /contacts/{public_key}/repeater/settings` — read current values via `get <key>`, optionally narrowed to one `group` or an explicit `keys` list (one CLI round trip per setting; gives up after `SETTINGS_READ_SILENT_LIMIT` unanswered commands in a row; `cli_responsive` is False when nothing answered, which is what a guest session looks like)
+- `POST /contacts/{public_key}/repeater/settings` — read current values via `get <key>`, optionally narrowed to one `group` or an explicit `keys` list, minus any `exclude_keys` another pane already read (one CLI round trip per setting; gives up after `SETTINGS_READ_SILENT_LIMIT` unanswered commands in a row; `cli_responsive` is False when nothing answered, which is what a guest session looks like)
 - `POST /contacts/{public_key}/repeater/settings/apply` — write values via `set <key> <value>`; the whole batch is validated against the catalog before anything is sent, and each reply is classified `ok`/`unsupported`/`error`/`no_reply`
 - `GET /contacts/{public_key}/repeater/telemetry-history` — stored telemetry history for a repeater (read-only, no radio access)
 - `POST /contacts/{public_key}/telemetry` — on-demand CayenneLPP telemetry from any contact (persists in `contact_telemetry_history`)

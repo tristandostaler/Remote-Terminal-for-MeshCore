@@ -274,6 +274,7 @@ describe('RepeaterDashboard', () => {
       lat: '0',
       lon: '0',
       clock_utc: null,
+      settings: [],
     };
     mockHook.paneStates.neighbors = {
       loading: false,
@@ -311,6 +312,7 @@ describe('RepeaterDashboard', () => {
       lat: '-31.9500',
       lon: '115.8600',
       clock_utc: null,
+      settings: [],
     };
     mockHook.paneStates.neighbors = {
       loading: false,
@@ -561,6 +563,7 @@ describe('RepeaterDashboard', () => {
         lat: null,
         lon: null,
         clock_utc: '11:59:30 - 1/1/2024 UTC',
+        settings: [],
       };
       mockHook.paneStates.nodeInfo = {
         loading: false,

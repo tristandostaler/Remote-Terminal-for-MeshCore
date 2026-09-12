@@ -988,6 +988,15 @@ class RepeaterStatusResponse(BaseModel):
     )
 
 
+class RepeaterSettingValue(BaseModel):
+    """One setting's current value as read back from the repeater."""
+
+    key: str = Field(description="Catalog key")
+    value: str | None = Field(default=None, description="Current value, or None when not readable")
+    raw: str | None = Field(default=None, description="Raw firmware reply, before parsing")
+    status: str = Field(description="ok | unsupported | error | no_reply")
+
+
 class RepeaterNodeInfoResponse(BaseModel):
     """Identity/location info from a repeater (small CLI batch)."""
 
@@ -995,6 +1004,13 @@ class RepeaterNodeInfoResponse(BaseModel):
     lat: str | None = Field(default=None, description="Latitude")
     lon: str | None = Field(default=None, description="Longitude")
     clock_utc: str | None = Field(default=None, description="Repeater clock in UTC")
+    settings: list[RepeaterSettingValue] = Field(
+        default_factory=list,
+        description=(
+            "The same values as settings-editor entries, for the catalog keys this pane "
+            "reads, so the dashboard can fill the editor without a second read"
+        ),
+    )
 
 
 class RepeaterRadioSettingsResponse(BaseModel):
@@ -1041,6 +1057,13 @@ class RepeaterOwnerInfoResponse(BaseModel):
         default=None, description="Repeater name (from binary owner-info request)"
     )
     guest_password: str | None = Field(default=None, description="Guest password (admin only)")
+    settings: list[RepeaterSettingValue] = Field(
+        default_factory=list,
+        description=(
+            "The same values as settings-editor entries, for the catalog keys this pane "
+            "reads, so the dashboard can fill the editor without a second read"
+        ),
+    )
 
 
 class RepeaterRegionEntry(BaseModel):
@@ -1138,15 +1161,12 @@ class RepeaterSettingsReadRequest(BaseModel):
     group: str | None = Field(
         default=None, description="Read only the settings in this group (ignored when keys is set)"
     )
-
-
-class RepeaterSettingValue(BaseModel):
-    """One setting's current value as read back from the repeater."""
-
-    key: str = Field(description="Catalog key")
-    value: str | None = Field(default=None, description="Current value, or None when not readable")
-    raw: str | None = Field(default=None, description="Raw firmware reply, before parsing")
-    status: str = Field(description="ok | unsupported | error | no_reply")
+    exclude_keys: list[str] | None = Field(
+        default=None,
+        description=(
+            "Setting keys to leave out, e.g. ones another pane just read; applied after keys/group"
+        ),
+    )
 
 
 class RepeaterSettingsResponse(BaseModel):
