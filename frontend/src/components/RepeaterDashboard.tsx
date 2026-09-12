@@ -18,7 +18,6 @@ import { TelemetryPane } from './repeater/RepeaterTelemetryPane';
 import { NeighborsPane } from './repeater/RepeaterNeighborsPane';
 import { AclPane } from './repeater/RepeaterAclPane';
 import { NodeInfoPane } from './repeater/RepeaterNodeInfoPane';
-import { RadioSettingsPane } from './repeater/RepeaterRadioSettingsPane';
 import { LppTelemetryPane } from './repeater/RepeaterLppTelemetryPane';
 import { OwnerInfoPane } from './repeater/RepeaterOwnerInfoPane';
 import { RegionsPane } from './repeater/RepeaterRegionsPane';
@@ -169,8 +168,8 @@ export function RepeaterDashboard({
     persistAfterLogin('');
   };
 
-  // Loading all panes indicator
-  const anyLoading = Object.values(paneStates).some((s) => s.loading);
+  // Loading indicator for "Load All" — the settings editor is part of it now.
+  const anyLoading = Object.values(paneStates).some((s) => s.loading) || settingsLoading;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -346,7 +345,7 @@ export function RepeaterDashboard({
               onRetryBlank={handleRepeaterGuestLogin}
               blankRetryLabel="Retry Existing-Access Login"
             />
-            {/* Top row: Telemetry + Radio Settings | Node Info + Neighbors */}
+            {/* Top row: Node Info + Telemetry | Neighbors */}
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:items-stretch">
               <div className="flex flex-col gap-4">
                 <NodeInfoPane
@@ -360,15 +359,6 @@ export function RepeaterDashboard({
                   state={paneStates.status}
                   onRefresh={() => refreshPane('status')}
                   disabled={anyLoading}
-                />
-                <RadioSettingsPane
-                  data={paneData.radioSettings}
-                  state={paneStates.radioSettings}
-                  onRefresh={() => refreshPane('radioSettings')}
-                  disabled={anyLoading}
-                  advertData={paneData.advertIntervals}
-                  advertState={paneStates.advertIntervals}
-                  onRefreshAdvert={() => refreshPane('advertIntervals')}
                 />
                 <LppTelemetryPane
                   data={paneData.lppTelemetry}
@@ -428,7 +418,8 @@ export function RepeaterDashboard({
               </div>
             </div>
 
-            {/* Settings editor — full width, above the console it replaces */}
+            {/* Settings editor — full width. This is also where the radio
+                configuration is shown, so there is no read-only pane for it. */}
             <SettingsEditorPane
               schema={settingsSchema}
               values={settingsValues}

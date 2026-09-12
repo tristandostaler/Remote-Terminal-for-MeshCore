@@ -413,19 +413,30 @@ async def batch_cli_fetch(
     contact: Contact,
     operation_name: str,
     commands: list[tuple[str, str]],
+    *,
+    abort_after_silent: int | None = None,
 ) -> dict[str, str | None]:
     """Send a batch of CLI commands to a server-capable contact and collect responses.
 
     Each command acquires and releases the radio lock independently so that
     other operations (sends, syncs) can slip in between commands.
+
+    ``abort_after_silent`` abandons the rest of the batch once that many
+    commands in a row draw no answer, leaving their fields ``None``. Nothing
+    answers a client that is not an admin -- the firmware routes no CLI text for
+    one at all -- so a long batch would otherwise sit through one 10-second
+    timeout per command before reporting what the first few already established.
+    Default ``None`` keeps the batch exhaustive.
     """
     results: dict[str, str | None] = {field: None for _, field in commands}
+    silent_streak = 0
 
     for index, (cmd, field) in enumerate(commands):
         if index > 0:
             # Yield briefly so queued operations can acquire the lock.
             await asyncio.sleep(0.25)
 
+        answered = False
         async with radio_manager.radio_operation(
             operation_name,
             pause_polling=True,
@@ -443,15 +454,25 @@ async def batch_cli_fetch(
             send_result = await mc.commands.send_cmd(contact.public_key, cmd)
             if send_result.type == EventType.ERROR:
                 logger.debug("Command '%s' send error: %s", cmd, send_result.payload)
-                continue
-
-            response_event = await fetch_contact_cli_response(
-                mc, contact.public_key[:12], timeout=10.0
-            )
-            if response_event is not None:
-                results[field] = extract_response_text(response_event)
             else:
-                logger.warning("No response for command '%s' (%s)", cmd, field)
+                response_event = await fetch_contact_cli_response(
+                    mc, contact.public_key[:12], timeout=10.0
+                )
+                if response_event is not None:
+                    results[field] = extract_response_text(response_event)
+                    answered = True
+                else:
+                    logger.warning("No response for command '%s' (%s)", cmd, field)
+
+        silent_streak = 0 if answered else silent_streak + 1
+        if abort_after_silent is not None and silent_streak >= abort_after_silent:
+            logger.info(
+                "Abandoning %s after %d unanswered command(s); %d command(s) not sent",
+                operation_name,
+                silent_streak,
+                len(commands) - index - 1,
+            )
+            break
 
     return results
 

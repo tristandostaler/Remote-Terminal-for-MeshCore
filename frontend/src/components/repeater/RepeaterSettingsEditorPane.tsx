@@ -353,7 +353,11 @@ export function SettingsEditorPane({
           {groups.map((group) => {
             const groupSettings = settingsByGroup.get(group.key) ?? [];
             if (groupSettings.length === 0) return null;
-            const open = openGroups[group.key] ?? false;
+            // A group opens itself once it has something to show -- after its
+            // own read, or after "Load All" read the lot -- unless the operator
+            // has since toggled it by hand.
+            const hasValues = groupSettings.some((setting) => setting.key in values);
+            const open = openGroups[group.key] ?? hasValues;
             const dirtyCount = groupSettings.filter((setting) =>
               isDirty(setting, drafts, values)
             ).length;
@@ -365,12 +369,7 @@ export function SettingsEditorPane({
                     type="button"
                     className="flex min-w-0 flex-1 items-center gap-1.5 text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     aria-expanded={open}
-                    onClick={() =>
-                      setOpenGroups((prev) => ({
-                        ...prev,
-                        [group.key]: !(prev[group.key] ?? false),
-                      }))
-                    }
+                    onClick={() => setOpenGroups((prev) => ({ ...prev, [group.key]: !open }))}
                   >
                     {open ? (
                       <ChevronDown className="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />

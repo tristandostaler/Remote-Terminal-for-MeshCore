@@ -15,8 +15,6 @@ vi.mock('../api', () => ({
     repeaterNodeInfo: vi.fn(),
     repeaterNeighbors: vi.fn(),
     repeaterAcl: vi.fn(),
-    repeaterRadioSettings: vi.fn(),
-    repeaterAdvertIntervals: vi.fn(),
     repeaterOwnerInfo: vi.fn(),
     repeaterLppTelemetry: vi.fn(),
     repeaterRegions: vi.fn(),
@@ -473,7 +471,7 @@ describe('useRepeaterDashboard', () => {
     expect(last.response).toContain('ahead of the reference');
   });
 
-  it('loadAll calls refreshPane for all panes serially', async () => {
+  it('loadAll refreshes every pane and then reads the settings', async () => {
     mockApi.repeaterStatus.mockResolvedValueOnce({ battery_volts: 4.0 });
     mockApi.repeaterNodeInfo.mockResolvedValueOnce({
       name: null,
@@ -481,21 +479,8 @@ describe('useRepeaterDashboard', () => {
       lon: null,
       clock_utc: null,
     });
-    mockApi.repeaterRadioSettings.mockResolvedValueOnce({
-      firmware_version: 'v1.0',
-      radio: null,
-      tx_power: null,
-      airtime_factor: null,
-      duty_cycle_limit: null,
-      repeat_enabled: null,
-      flood_max: null,
-    });
     mockApi.repeaterNeighbors.mockResolvedValueOnce({ neighbors: [] });
     mockApi.repeaterAcl.mockResolvedValueOnce({ acl: [] });
-    mockApi.repeaterAdvertIntervals.mockResolvedValueOnce({
-      advert_interval: null,
-      flood_advert_interval: null,
-    });
     mockApi.repeaterOwnerInfo.mockResolvedValueOnce({
       owner_info: null,
       firmware_version: null,
@@ -509,6 +494,10 @@ describe('useRepeaterDashboard', () => {
       truncated: false,
       source: 'cli',
     });
+    mockApi.repeaterSettings.mockResolvedValueOnce({
+      values: [{ key: 'flood_max', value: '3', raw: '3', status: 'ok' }],
+      cli_responsive: true,
+    });
 
     const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
 
@@ -520,11 +509,13 @@ describe('useRepeaterDashboard', () => {
     expect(mockApi.repeaterNodeInfo).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterNeighbors).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterAcl).toHaveBeenCalledTimes(1);
-    expect(mockApi.repeaterRadioSettings).toHaveBeenCalledTimes(1);
-    expect(mockApi.repeaterAdvertIntervals).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterOwnerInfo).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterLppTelemetry).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterRegions).toHaveBeenCalledTimes(1);
+    // Radio configuration lives in the settings editor now, so "load all" has
+    // to read it -- with no filter, i.e. every readable setting.
+    expect(mockApi.repeaterSettings).toHaveBeenCalledWith(REPEATER_KEY, {});
+    expect(result.current.settingsValues.flood_max.value).toBe('3');
   });
 
   it('refreshing neighbors fetches node info first', async () => {

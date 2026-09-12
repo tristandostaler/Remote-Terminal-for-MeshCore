@@ -28,7 +28,6 @@ import type {
   MessageActionResponse,
   ResendChannelMessageResponse,
   RepeaterAclResponse,
-  RepeaterAdvertIntervalsResponse,
   RepeaterLoginResponse,
   RoomPollConfigRequest,
   RoomPollStatus,
@@ -36,7 +35,6 @@ import type {
   RepeaterNeighborsResponse,
   RepeaterNodeInfoResponse,
   RepeaterOwnerInfoResponse,
-  RepeaterRadioSettingsResponse,
   RepeaterSettingChange,
   RepeaterSettingsApplyResponse,
   RepeaterSettingsResponse,
@@ -741,14 +739,6 @@ export const api = {
     }),
   repeaterAcl: (publicKey: string) =>
     fetchJson<RepeaterAclResponse>(`/contacts/${publicKey}/repeater/acl`, {
-      method: 'POST',
-    }),
-  repeaterRadioSettings: (publicKey: string) =>
-    fetchJson<RepeaterRadioSettingsResponse>(`/contacts/${publicKey}/repeater/radio-settings`, {
-      method: 'POST',
-    }),
-  repeaterAdvertIntervals: (publicKey: string) =>
-    fetchJson<RepeaterAdvertIntervalsResponse>(`/contacts/${publicKey}/repeater/advert-intervals`, {
       method: 'POST',
     }),
   repeaterOwnerInfo: (publicKey: string) =>

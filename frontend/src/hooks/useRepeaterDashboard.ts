@@ -12,8 +12,6 @@ import type {
   RepeaterNeighborsResponse,
   RepeaterAclResponse,
   RepeaterNodeInfoResponse,
-  RepeaterRadioSettingsResponse,
-  RepeaterAdvertIntervalsResponse,
   RepeaterOwnerInfoResponse,
   RepeaterLppTelemetryResponse,
   RepeaterRegionsResponse,
@@ -45,8 +43,6 @@ interface PaneData {
   nodeInfo: RepeaterNodeInfoResponse | null;
   neighbors: RepeaterNeighborsResponse | null;
   acl: RepeaterAclResponse | null;
-  radioSettings: RepeaterRadioSettingsResponse | null;
-  advertIntervals: RepeaterAdvertIntervalsResponse | null;
   ownerInfo: RepeaterOwnerInfoResponse | null;
   lppTelemetry: RepeaterLppTelemetryResponse | null;
   regions: RepeaterRegionsResponse | null;
@@ -71,8 +67,6 @@ function createInitialPaneStates(): Record<PaneName, PaneState> {
     nodeInfo: { ...INITIAL_PANE_STATE },
     neighbors: { ...INITIAL_PANE_STATE },
     acl: { ...INITIAL_PANE_STATE },
-    radioSettings: { ...INITIAL_PANE_STATE },
-    advertIntervals: { ...INITIAL_PANE_STATE },
     ownerInfo: { ...INITIAL_PANE_STATE },
     lppTelemetry: { ...INITIAL_PANE_STATE },
     regions: { ...INITIAL_PANE_STATE },
@@ -85,8 +79,6 @@ function createInitialPaneData(): PaneData {
     nodeInfo: null,
     neighbors: null,
     acl: null,
-    radioSettings: null,
-    advertIntervals: null,
     ownerInfo: null,
     lppTelemetry: null,
     regions: null,
@@ -133,8 +125,6 @@ function normalizePaneStates(paneStates: Record<PaneName, PaneState>): Record<Pa
     nodeInfo: { ...paneStates.nodeInfo, loading: false },
     neighbors: { ...paneStates.neighbors, loading: false },
     acl: { ...paneStates.acl, loading: false },
-    radioSettings: { ...paneStates.radioSettings, loading: false },
-    advertIntervals: { ...paneStates.advertIntervals, loading: false },
     ownerInfo: { ...paneStates.ownerInfo, loading: false },
     lppTelemetry: { ...paneStates.lppTelemetry, loading: false },
     regions: { ...paneStates.regions, loading: false },
@@ -200,10 +190,6 @@ function fetchPaneData(publicKey: string, pane: PaneName) {
       return api.repeaterNeighbors(publicKey);
     case 'acl':
       return api.repeaterAcl(publicKey);
-    case 'radioSettings':
-      return api.repeaterRadioSettings(publicKey);
-    case 'advertIntervals':
-      return api.repeaterAdvertIntervals(publicKey);
     case 'ownerInfo':
       return api.repeaterOwnerInfo(publicKey);
     case 'lppTelemetry':
@@ -485,80 +471,6 @@ export function useRepeaterDashboard(
     [getPublicKey, options.hasAdvertLocation]
   );
 
-  const loadAll = useCallback(async () => {
-    const panes: PaneName[] = [
-      'status',
-      'nodeInfo',
-      'neighbors',
-      'radioSettings',
-      'acl',
-      'advertIntervals',
-      'ownerInfo',
-      'lppTelemetry',
-      'regions',
-    ];
-    // Serial execution — parallel calls just queue behind the radio lock anyway
-    for (const pane of panes) {
-      await refreshPane(pane);
-    }
-  }, [refreshPane]);
-
-  const sendConsoleCommand = useCallback(
-    async (command: string) => {
-      const publicKey = getPublicKey();
-      if (!publicKey) return;
-      const conversationId = publicKey;
-
-      const now = Math.floor(Date.now() / 1000);
-
-      // Add outgoing command entry
-      setConsoleHistory((prev) => [
-        ...prev,
-        { command, response: '', timestamp: now, outgoing: true },
-      ]);
-
-      setConsoleLoading(true);
-      try {
-        const result: CommandResponse = await api.sendRepeaterCommand(publicKey, command);
-        if (activeIdRef.current !== conversationId) return;
-
-        setConsoleHistory((prev) => [
-          ...prev,
-          {
-            command,
-            response: result.response,
-            timestamp: result.sender_timestamp ?? now,
-            outgoing: false,
-          },
-        ]);
-      } catch (err) {
-        if (activeIdRef.current !== conversationId) return;
-        const msg = err instanceof Error ? err.message : 'Command failed';
-        setConsoleHistory((prev) => [
-          ...prev,
-          { command, response: `Error: ${msg}`, timestamp: now, outgoing: false },
-        ]);
-      } finally {
-        if (activeIdRef.current === conversationId) {
-          setConsoleLoading(false);
-        }
-      }
-    },
-    [getPublicKey]
-  );
-
-  const sendZeroHopAdvert = useCallback(async () => {
-    await sendConsoleCommand('advert.zerohop');
-  }, [sendConsoleCommand]);
-
-  const sendFloodAdvert = useCallback(async () => {
-    await sendConsoleCommand('advert');
-  }, [sendConsoleCommand]);
-
-  const rebootRepeater = useCallback(async () => {
-    await sendConsoleCommand('reboot');
-  }, [sendConsoleCommand]);
-
   // The settings catalog is static server-side data, so it is loaded once the
   // dashboard is usable -- the editor can then render its form (and say which
   // settings exist) before a single value has been read off the radio.
@@ -687,6 +599,82 @@ export function useRepeaterDashboard(
     },
     [getPublicKey, settingsSchema]
   );
+
+  const loadAll = useCallback(async () => {
+    const panes: PaneName[] = [
+      'status',
+      'nodeInfo',
+      'neighbors',
+      'acl',
+      'ownerInfo',
+      'lppTelemetry',
+      'regions',
+    ];
+    // Serial execution — parallel calls just queue behind the radio lock anyway
+    for (const pane of panes) {
+      await refreshPane(pane);
+    }
+    // The settings editor is where the radio configuration lives now, so "load
+    // all" has to include it. It goes last because it is the longest hold, and
+    // the backend gives up early when nothing is answering (a guest session).
+    await fetchSettings();
+  }, [refreshPane, fetchSettings]);
+
+  const sendConsoleCommand = useCallback(
+    async (command: string) => {
+      const publicKey = getPublicKey();
+      if (!publicKey) return;
+      const conversationId = publicKey;
+
+      const now = Math.floor(Date.now() / 1000);
+
+      // Add outgoing command entry
+      setConsoleHistory((prev) => [
+        ...prev,
+        { command, response: '', timestamp: now, outgoing: true },
+      ]);
+
+      setConsoleLoading(true);
+      try {
+        const result: CommandResponse = await api.sendRepeaterCommand(publicKey, command);
+        if (activeIdRef.current !== conversationId) return;
+
+        setConsoleHistory((prev) => [
+          ...prev,
+          {
+            command,
+            response: result.response,
+            timestamp: result.sender_timestamp ?? now,
+            outgoing: false,
+          },
+        ]);
+      } catch (err) {
+        if (activeIdRef.current !== conversationId) return;
+        const msg = err instanceof Error ? err.message : 'Command failed';
+        setConsoleHistory((prev) => [
+          ...prev,
+          { command, response: `Error: ${msg}`, timestamp: now, outgoing: false },
+        ]);
+      } finally {
+        if (activeIdRef.current === conversationId) {
+          setConsoleLoading(false);
+        }
+      }
+    },
+    [getPublicKey]
+  );
+
+  const sendZeroHopAdvert = useCallback(async () => {
+    await sendConsoleCommand('advert.zerohop');
+  }, [sendConsoleCommand]);
+
+  const sendFloodAdvert = useCallback(async () => {
+    await sendConsoleCommand('advert');
+  }, [sendConsoleCommand]);
+
+  const rebootRepeater = useCallback(async () => {
+    await sendConsoleCommand('reboot');
+  }, [sendConsoleCommand]);
 
   const refreshHostClock = useCallback(async () => {
     try {

@@ -21,6 +21,7 @@ from app.radio import radio_manager
 from app.repository import ContactRepository
 from app.routers.contacts import request_trace
 from app.routers.repeaters import (
+    SETTINGS_READ_SILENT_LIMIT,
     _batch_cli_fetch,
     _parse_anon_region_names,
     _parse_region_dump,
@@ -42,6 +43,7 @@ from app.routers.repeaters import (
     send_repeater_command,
 )
 from app.routers.server_control import fetch_contact_cli_response
+from app.services.repeater_settings import READABLE_SETTINGS
 
 KEY_A = "aa" * 32
 
@@ -2166,6 +2168,57 @@ class TestRepeaterSettingsRead:
         # since the firmware routes no CLI text for one.
         assert response.cli_responsive is False
         assert all(value.status == "no_reply" for value in response.values)
+
+    @pytest.mark.asyncio
+    async def test_a_silent_repeater_stops_the_batch_early(self, test_db):
+        """A guest answers nothing, and should cost seconds, not minutes."""
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=_advancing_clock(step=20.0)),
+            patch("app.routers.server_control.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            response = await repeater_settings(KEY_A, RepeaterSettingsReadRequest())
+
+        # Three unanswered commands are enough to conclude nothing is listening;
+        # the remaining ~20 settings are reported without being sent.
+        assert mc.commands.send_cmd.call_count == SETTINGS_READ_SILENT_LIMIT
+        assert response.cli_responsive is False
+        assert len(response.values) == len(READABLE_SETTINGS)
+        assert all(value.status == "no_reply" for value in response.values)
+
+    @pytest.mark.asyncio
+    async def test_a_later_answer_resets_the_silence_count(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        answer = _radio_result(
+            EventType.CONTACT_MSG_RECV,
+            {"pubkey_prefix": KEY_A[:12], "text": "Hilltop", "txt_type": 1},
+        )
+        # Two silent commands, then a reply, then two more: the streak resets, so
+        # the batch runs to the end instead of giving up on the third command.
+        fetch = AsyncMock(side_effect=[None, None, answer, None, None])
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch("app.routers.server_control.fetch_contact_cli_response", new=fetch),
+            patch("app.routers.server_control.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            response = await repeater_settings(
+                KEY_A,
+                RepeaterSettingsReadRequest(keys=["lat", "lon", "name", "owner_info", "tx_power"]),
+            )
+
+        assert mc.commands.send_cmd.call_count == 5
+        assert response.cli_responsive is True
+        by_key = {value.key: value for value in response.values}
+        assert by_key["name"].value == "Hilltop"
 
     @pytest.mark.asyncio
     async def test_a_write_only_setting_cannot_be_read(self, test_db):

@@ -108,7 +108,7 @@ describe('SettingsEditorPane', () => {
       }
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Radio/ }));
+    // The group opens itself because it has values to show.
     const input = await screen.findByLabelText(/Max Flood Hops/);
     expect(input).toHaveValue(3);
 
@@ -131,8 +131,6 @@ describe('SettingsEditorPane', () => {
       }
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Radio/ }));
-
     expect(await screen.findByLabelText(/Duty Cycle Limit/)).toBeDisabled();
     expect(screen.getByText('Not supported by this firmware')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Apply/ })).toBeDisabled();
@@ -151,7 +149,6 @@ describe('SettingsEditorPane', () => {
       }
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Access/ }));
     const input = await screen.findByLabelText(/Guest Password/);
     expect(input).toHaveAttribute('type', 'password');
     expect(input).toHaveValue('');
@@ -165,7 +162,6 @@ describe('SettingsEditorPane', () => {
       }
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Radio/ }));
     fireEvent.change(await screen.findByLabelText(/Max Flood Hops/), { target: { value: '7' } });
     expect(screen.getByRole('button', { name: /Apply 1 change/ })).toBeEnabled();
 

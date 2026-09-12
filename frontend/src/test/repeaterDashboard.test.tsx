@@ -17,8 +17,6 @@ const mockHook: {
     nodeInfo: null,
     neighbors: null,
     acl: null,
-    radioSettings: null,
-    advertIntervals: null,
     ownerInfo: null,
     lppTelemetry: null,
     regions: null,
@@ -28,8 +26,6 @@ const mockHook: {
     nodeInfo: { loading: false, attempt: 0, error: null },
     neighbors: { loading: false, attempt: 0, error: null },
     acl: { loading: false, attempt: 0, error: null },
-    radioSettings: { loading: false, attempt: 0, error: null },
-    advertIntervals: { loading: false, attempt: 0, error: null },
     ownerInfo: { loading: false, attempt: 0, error: null },
     lppTelemetry: { loading: false, attempt: 0, error: null },
     regions: { loading: false, attempt: 0, error: null },
@@ -162,8 +158,6 @@ describe('RepeaterDashboard', () => {
       nodeInfo: null,
       neighbors: null,
       acl: null,
-      radioSettings: null,
-      advertIntervals: null,
       ownerInfo: null,
       lppTelemetry: null,
       regions: null,
@@ -173,8 +167,6 @@ describe('RepeaterDashboard', () => {
       nodeInfo: { loading: false, attempt: 0, error: null },
       neighbors: { loading: false, attempt: 0, error: null },
       acl: { loading: false, attempt: 0, error: null },
-      radioSettings: { loading: false, attempt: 0, error: null },
-      advertIntervals: { loading: false, attempt: 0, error: null },
       ownerInfo: { loading: false, attempt: 0, error: null },
       lppTelemetry: { loading: false, attempt: 0, error: null },
       regions: { loading: false, attempt: 0, error: null },
@@ -201,8 +193,10 @@ describe('RepeaterDashboard', () => {
     expect(screen.getByText('Node Info')).toBeInTheDocument();
     expect(screen.getByText('Neighbors')).toBeInTheDocument();
     expect(screen.getByText('ACL')).toBeInTheDocument();
-    expect(screen.getByText('Radio Settings')).toBeInTheDocument();
-    expect(screen.getByText('Advert Intervals')).toBeInTheDocument(); // sub-section inside Radio Settings
+    // Radio configuration is editable in the settings editor rather than
+    // duplicated in a read-only pane.
+    expect(screen.getByText('Settings Editor')).toBeInTheDocument();
+    expect(screen.queryByText('Radio Settings')).not.toBeInTheDocument();
     expect(screen.getByText('LPP Sensors')).toBeInTheDocument();
     expect(screen.getByText('Owner Info')).toBeInTheDocument();
     expect(screen.getByText('Actions')).toBeInTheDocument();
@@ -539,25 +533,6 @@ describe('RepeaterDashboard', () => {
 
     expect(txRow).toHaveTextContent('0.17h');
     expect(txRow).not.toHaveTextContent('%');
-  });
-
-  it('formats the radio tuple and preserves the raw tuple in a tooltip', () => {
-    mockHook.loggedIn = true;
-    mockHook.paneData.radioSettings = {
-      firmware_version: 'v1.0',
-      radio: '910.5250244,62.5,7,5',
-      tx_power: '20',
-      airtime_factor: '0',
-      duty_cycle_limit: '100.0%',
-      repeat_enabled: '1',
-      flood_max: '3',
-    };
-
-    render(<RepeaterDashboard {...defaultProps} />);
-
-    const formatted = screen.getByText('910.525 MHz, BW 62.5 kHz, SF7, CR5');
-    expect(formatted).toBeInTheDocument();
-    expect(formatted).toHaveAttribute('title', '910.5250244,62.5,7,5');
   });
 
   it('shows fetched time and relative age when pane data has been loaded', () => {

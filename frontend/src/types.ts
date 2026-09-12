@@ -797,23 +797,6 @@ export interface RepeaterNodeInfoResponse {
   clock_utc: string | null;
 }
 
-export interface RepeaterRadioSettingsResponse {
-  firmware_version: string | null;
-  radio: string | null;
-  tx_power: string | null;
-  airtime_factor: string | null;
-  // Configured duty-cycle limit (e.g. "25.0%"), firmware-derived from airtime_factor.
-  // Only present on firmware >= 1.15; null on older nodes.
-  duty_cycle_limit: string | null;
-  repeat_enabled: string | null;
-  flood_max: string | null;
-}
-
-export interface RepeaterAdvertIntervalsResponse {
-  advert_interval: string | null;
-  flood_advert_interval: string | null;
-}
-
 export interface RepeaterOwnerInfoResponse {
   owner_info: string | null;
   firmware_version: string | null;
@@ -937,8 +920,6 @@ export type PaneName =
   | 'nodeInfo'
   | 'neighbors'
   | 'acl'
-  | 'radioSettings'
-  | 'advertIntervals'
   | 'ownerInfo'
   | 'lppTelemetry'
   | 'regions';

@@ -335,8 +335,12 @@ async def _batch_cli_fetch(
     contact: Contact,
     operation_name: str,
     commands: list[tuple[str, str]],
+    *,
+    abort_after_silent: int | None = None,
 ) -> dict[str, str | None]:
-    return await batch_cli_fetch(contact, operation_name, commands)
+    return await batch_cli_fetch(
+        contact, operation_name, commands, abort_after_silent=abort_after_silent
+    )
 
 
 @router.post("/{public_key}/repeater/node-info", response_model=RepeaterNodeInfoResponse)
@@ -596,6 +600,10 @@ async def repeater_regions(public_key: str) -> RepeaterRegionsResponse:
 # bounded by the size of the catalog itself -- there is nothing legitimate to
 # send beyond "every setting at once".
 MAX_SETTING_CHANGES = len(REPEATER_SETTINGS)
+# A guest answers nothing at all, so a full-catalog read would sit through one
+# 10-second timeout per setting to learn what the first few already said. Stop
+# after this many unanswered commands in a row and report what we have.
+SETTINGS_READ_SILENT_LIMIT = 3
 _REDACTED = "********"
 
 
@@ -670,7 +678,9 @@ async def repeater_settings(
 
     One command per setting, batched the same way the other panes are, so the
     radio lock is released between commands. Reading the whole catalog is a long
-    hold -- the UI reads one group at a time by default.
+    hold, so a read that draws ``SETTINGS_READ_SILENT_LIMIT`` unanswered commands
+    in a row gives up and reports the rest as ``no_reply``: that is what a guest
+    session looks like, and it should cost half a minute rather than several.
     """
     radio_manager.require_connected()
     contact = await _resolve_contact_or_404(public_key)
@@ -681,6 +691,7 @@ async def repeater_settings(
         contact,
         "repeater_settings",
         [(setting.get_command, setting.key) for setting in settings],
+        abort_after_silent=SETTINGS_READ_SILENT_LIMIT,
     )
 
     values: list[RepeaterSettingValue] = []
