@@ -37,6 +37,7 @@ import type {
   RepeaterOwnerInfoResponse,
   RepeaterSettingChange,
   RepeaterSettingsApplyResponse,
+  RepeaterSettingsFilter,
   RepeaterSettingsResponse,
   RepeaterSettingsSchemaResponse,
   NodeStatsResponse,
@@ -757,10 +758,14 @@ export const api = {
   repeaterSettingsSchema: () =>
     fetchJson<RepeaterSettingsSchemaResponse>('/contacts/repeater/settings-schema'),
   /** Read current values. Omit both filters to read every readable setting (slow: one CLI round trip each). */
-  repeaterSettings: (publicKey: string, filter: { keys?: string[]; group?: string } = {}) =>
+  repeaterSettings: (publicKey: string, filter: RepeaterSettingsFilter = {}) =>
     fetchJson<RepeaterSettingsResponse>(`/contacts/${publicKey}/repeater/settings`, {
       method: 'POST',
-      body: JSON.stringify({ keys: filter.keys ?? null, group: filter.group ?? null }),
+      body: JSON.stringify({
+        keys: filter.keys ?? null,
+        group: filter.group ?? null,
+        exclude_keys: filter.excludeKeys ?? null,
+      }),
     }),
   repeaterApplySettings: (publicKey: string, changes: RepeaterSettingChange[]) =>
     fetchJson<RepeaterSettingsApplyResponse>(`/contacts/${publicKey}/repeater/settings/apply`, {

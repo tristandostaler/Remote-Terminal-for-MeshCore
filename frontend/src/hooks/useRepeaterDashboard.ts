@@ -17,6 +17,7 @@ import type {
   RepeaterRegionsResponse,
   RepeaterSettingApplyResult,
   RepeaterSettingChange,
+  RepeaterSettingsFilter,
   RepeaterSettingsSchemaResponse,
   RepeaterSettingValue,
   CommandResponse,
@@ -86,6 +87,47 @@ function createInitialPaneData(): PaneData {
 }
 
 const repeaterDashboardCache = new Map<string, RepeaterDashboardCacheEntry>();
+
+/**
+ * Settings that a pane shows as well. The node-info and owner-info endpoints
+ * answer these as settings-editor entries too, so a value read through either
+ * side is shown on both, and "load all" asks the repeater for each key once.
+ */
+const PANE_SETTING_FIELDS: {
+  nodeInfo: Partial<Record<string, 'name' | 'lat' | 'lon'>>;
+  ownerInfo: Partial<Record<string, 'name' | 'owner_info' | 'guest_password'>>;
+} = {
+  nodeInfo: { name: 'name', lat: 'lat', lon: 'lon' },
+  // Owner Info prints the name too (from its binary request), so a rename made
+  // in the editor has to reach it as well.
+  ownerInfo: { name: 'name', owner_info: 'owner_info', guest_password: 'guest_password' },
+};
+
+/** The settings-editor entries a pane's response carries (none for most panes). */
+function settingsReadByPane(data: PaneData[PaneName]): RepeaterSettingValue[] {
+  return data && 'settings' in data ? data.settings : [];
+}
+
+/**
+ * Copy confirmed setting values onto the panes that display them. A pane that
+ * has never been fetched is left alone: a half-filled pane would read as a
+ * fetch that lost half its answers.
+ */
+function mirrorSettingsIntoPanes(data: PaneData, values: RepeaterSettingValue[]): PaneData {
+  let next = data;
+  for (const value of values) {
+    if (value.status !== 'ok') continue;
+    const nodeField = PANE_SETTING_FIELDS.nodeInfo[value.key];
+    if (nodeField && next.nodeInfo) {
+      next = { ...next, nodeInfo: { ...next.nodeInfo, [nodeField]: value.value } };
+    }
+    const ownerField = PANE_SETTING_FIELDS.ownerInfo[value.key];
+    if (ownerField && next.ownerInfo) {
+      next = { ...next, ownerInfo: { ...next.ownerInfo, [ownerField]: value.value } };
+    }
+  }
+  return next;
+}
 
 /**
  * The settings catalog is static server-side data, identical for every
@@ -210,7 +252,8 @@ export interface UseRepeaterDashboardResult {
   consoleLoading: boolean;
   login: (password: string) => Promise<void>;
   loginAsGuest: () => Promise<void>;
-  refreshPane: (pane: PaneName) => Promise<void>;
+  /** Resolves true once the pane holds fresh data, false when every attempt failed. */
+  refreshPane: (pane: PaneName) => Promise<boolean>;
   loadAll: () => Promise<void>;
   sendConsoleCommand: (command: string) => Promise<void>;
   sendZeroHopAdvert: () => Promise<void>;
@@ -231,7 +274,7 @@ export interface UseRepeaterDashboardResult {
   /** False once a read came back with nothing answered — i.e. not an admin session. */
   settingsCliResponsive: boolean | null;
   /** Read values for a group, an explicit key list, or (with no filter) everything. */
-  fetchSettings: (filter?: { keys?: string[]; group?: string }) => Promise<void>;
+  fetchSettings: (filter?: RepeaterSettingsFilter) => Promise<void>;
   /** Write changes; resolves with the per-setting results (also logged to the console). */
   applySettings: (changes: RepeaterSettingChange[]) => Promise<RepeaterSettingApplyResult[]>;
 }
@@ -379,9 +422,9 @@ export function useRepeaterDashboard(
   }, [login]);
 
   const refreshPane = useCallback(
-    async (pane: PaneName) => {
+    async (pane: PaneName): Promise<boolean> => {
       const publicKey = getPublicKey();
-      if (!publicKey) return;
+      if (!publicKey) return false;
       const conversationId = publicKey;
 
       if (pane === 'neighbors' && !options.hasAdvertLocation) {
@@ -393,12 +436,12 @@ export function useRepeaterDashboard(
 
         if (needsNodeInfoPrefetch) {
           await refreshPane('nodeInfo');
-          if (!mountedRef.current || activeIdRef.current !== conversationId) return;
+          if (!mountedRef.current || activeIdRef.current !== conversationId) return false;
         }
       }
 
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        if (!mountedRef.current || activeIdRef.current !== conversationId) return;
+        if (!mountedRef.current || activeIdRef.current !== conversationId) return false;
 
         const loadingState = {
           loading: true,
@@ -417,7 +460,7 @@ export function useRepeaterDashboard(
 
         try {
           const data = await fetchPaneData(publicKey, pane);
-          if (!mountedRef.current || activeIdRef.current !== conversationId) return;
+          if (!mountedRef.current || activeIdRef.current !== conversationId) return false;
 
           paneDataRef.current = {
             ...paneDataRef.current,
@@ -439,9 +482,22 @@ export function useRepeaterDashboard(
             ...prev,
             [pane]: successState,
           }));
-          return; // Success
+
+          // Node info and owner info answer their catalog keys as editor
+          // entries too; show them there rather than reading them again.
+          const mirrored = settingsReadByPane(data);
+          if (mirrored.length > 0) {
+            setSettingsValues((prev) => {
+              const next = { ...prev };
+              for (const value of mirrored) {
+                next[value.key] = value;
+              }
+              return next;
+            });
+          }
+          return true;
         } catch (err) {
-          if (!mountedRef.current || activeIdRef.current !== conversationId) return;
+          if (!mountedRef.current || activeIdRef.current !== conversationId) return false;
 
           const msg = err instanceof Error ? err.message : 'Request failed';
 
@@ -467,6 +523,7 @@ export function useRepeaterDashboard(
           }
         }
       }
+      return false;
     },
     [getPublicKey, options.hasAdvertLocation]
   );
@@ -488,7 +545,7 @@ export function useRepeaterDashboard(
   }, [loggedIn]);
 
   const fetchSettings = useCallback(
-    async (filter: { keys?: string[]; group?: string } = {}) => {
+    async (filter: RepeaterSettingsFilter = {}) => {
       const publicKey = getPublicKey();
       if (!publicKey) return;
       const conversationId = publicKey;
@@ -505,6 +562,7 @@ export function useRepeaterDashboard(
           }
           return next;
         });
+        setPaneData((prev) => mirrorSettingsIntoPanes(prev, result.values));
         setSettingsCliResponsive(result.cli_responsive);
       } catch (err) {
         if (!mountedRef.current || activeIdRef.current !== conversationId) return;
@@ -570,6 +628,22 @@ export function useRepeaterDashboard(
             }
             return next;
           });
+          // The panes that show these values (Node Info, Owner Info) would
+          // otherwise keep the old ones. The backend redacted the password in
+          // its reply, so the pane -- which prints the guest password it read
+          // back -- gets the one that was sent.
+          const sent = new Map(changes.map((change) => [change.key, String(change.value)]));
+          setPaneData((prev) =>
+            mirrorSettingsIntoPanes(
+              prev,
+              applied.map((entry) => ({
+                key: entry.key,
+                value: sensitiveKeys.has(entry.key) ? (sent.get(entry.key) ?? null) : entry.value,
+                raw: null,
+                status: 'ok',
+              }))
+            )
+          );
         }
 
         const failed = result.results.filter((entry) => entry.status !== 'ok');
@@ -611,13 +685,21 @@ export function useRepeaterDashboard(
       'regions',
     ];
     // Serial execution — parallel calls just queue behind the radio lock anyway
+    const alreadyRead = new Set<string>();
     for (const pane of panes) {
-      await refreshPane(pane);
+      const fetched = await refreshPane(pane);
+      if (!fetched) continue;
+      // Node info and owner info answered some catalog keys already (and put
+      // them in the editor); each is a round trip over the air, so the
+      // settings read below leaves them out.
+      for (const value of settingsReadByPane(paneDataRef.current[pane])) {
+        alreadyRead.add(value.key);
+      }
     }
     // The settings editor is where the radio configuration lives now, so "load
     // all" has to include it. It goes last because it is the longest hold, and
     // the backend gives up early when nothing is answering (a guest session).
-    await fetchSettings();
+    await fetchSettings(alreadyRead.size > 0 ? { excludeKeys: [...alreadyRead] } : {});
   }, [refreshPane, fetchSettings]);
 
   const sendConsoleCommand = useCallback(
