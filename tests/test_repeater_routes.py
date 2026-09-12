@@ -13,6 +13,9 @@ from app.models import (
     RepeaterFixClockRequest,
     RepeaterLoginRequest,
     RepeaterLoginResponse,
+    RepeaterSettingChange,
+    RepeaterSettingsApplyRequest,
+    RepeaterSettingsReadRequest,
 )
 from app.radio import radio_manager
 from app.repository import ContactRepository
@@ -32,6 +35,8 @@ from app.routers.repeaters import (
     repeater_owner_info,
     repeater_radio_settings,
     repeater_regions,
+    repeater_settings,
+    repeater_settings_apply,
     repeater_status,
     repeater_sync_clock,
     send_repeater_command,
@@ -2103,3 +2108,232 @@ class TestRepeaterClockRoutes:
             with pytest.raises(HTTPException) as exc_info:
                 await repeater_fix_clock(KEY_A, RepeaterFixClockRequest())
             assert exc_info.value.status_code == 400
+
+
+class TestRepeaterSettingsRead:
+    """`get` round trips behind the settings editor."""
+
+    @pytest.mark.asyncio
+    async def test_reads_requested_keys_and_flags_unsupported_ones(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        replies = ["3", "??: dutycycle"]
+        mc.commands.get_msg = AsyncMock(
+            side_effect=[
+                _radio_result(
+                    EventType.CONTACT_MSG_RECV,
+                    {"pubkey_prefix": KEY_A[:12], "text": text, "txt_type": 1},
+                )
+                for text in replies
+            ]
+        )
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=_advancing_clock()),
+        ):
+            response = await repeater_settings(
+                KEY_A, RepeaterSettingsReadRequest(keys=["flood_max", "duty_cycle"])
+            )
+
+        sent = [call.args[1] for call in mc.commands.send_cmd.call_args_list]
+        assert sent == ["get flood.max", "get dutycycle"]
+
+        by_key = {value.key: value for value in response.values}
+        assert by_key["flood_max"].value == "3"
+        assert by_key["duty_cycle"].status == "unsupported"
+        assert response.cli_responsive is True
+
+    @pytest.mark.asyncio
+    async def test_a_group_read_covers_only_that_group(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=_advancing_clock(step=20.0)),
+            patch("app.routers.server_control.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            response = await repeater_settings(KEY_A, RepeaterSettingsReadRequest(group="advert"))
+
+        sent = [call.args[1] for call in mc.commands.send_cmd.call_args_list]
+        assert sent == ["get advert.interval", "get flood.advert.interval"]
+        # Nothing answered -- which is exactly what a guest session looks like,
+        # since the firmware routes no CLI text for one.
+        assert response.cli_responsive is False
+        assert all(value.status == "no_reply" for value in response.values)
+
+    @pytest.mark.asyncio
+    async def test_a_write_only_setting_cannot_be_read(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await repeater_settings(KEY_A, RepeaterSettingsReadRequest(keys=["password"]))
+
+        assert exc_info.value.status_code == 400
+        mc.commands.send_cmd.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_group_is_rejected(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await repeater_settings(KEY_A, RepeaterSettingsReadRequest(group="nope"))
+
+        assert exc_info.value.status_code == 400
+
+
+class TestRepeaterSettingsApply:
+    """`set` round trips behind the settings editor."""
+
+    @pytest.mark.asyncio
+    async def test_writes_each_change_and_reports_the_firmware_reply(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        replies = ["OK", "ERR: out of range"]
+        mc.commands.get_msg = AsyncMock(
+            side_effect=[
+                _radio_result(
+                    EventType.CONTACT_MSG_RECV,
+                    {"pubkey_prefix": KEY_A[:12], "text": text, "txt_type": 1},
+                )
+                for text in replies
+            ]
+        )
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=_advancing_clock()),
+        ):
+            response = await repeater_settings_apply(
+                KEY_A,
+                RepeaterSettingsApplyRequest(
+                    changes=[
+                        RepeaterSettingChange(key="flood_max", value=5),
+                        RepeaterSettingChange(key="tx_power", value="22"),
+                    ]
+                ),
+            )
+
+        sent = [call.args[1] for call in mc.commands.send_cmd.call_args_list]
+        assert sent == ["set flood.max 5", "set tx 22"]
+
+        by_key = {result.key: result for result in response.results}
+        assert by_key["flood_max"].status == "ok"
+        assert by_key["tx_power"].status == "error"
+        assert by_key["tx_power"].reply == "ERR: out of range"
+
+    @pytest.mark.asyncio
+    async def test_a_password_is_sent_but_never_echoed_back(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.commands.get_msg = AsyncMock(
+            return_value=_radio_result(
+                EventType.CONTACT_MSG_RECV,
+                {"pubkey_prefix": KEY_A[:12], "text": "OK", "txt_type": 1},
+            )
+        )
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=_advancing_clock()),
+        ):
+            response = await repeater_settings_apply(
+                KEY_A,
+                RepeaterSettingsApplyRequest(
+                    changes=[RepeaterSettingChange(key="guest_password", value="hunter2")]
+                ),
+            )
+
+        assert mc.commands.send_cmd.call_args_list[0].args[1] == "set guest.password hunter2"
+        assert "hunter2" not in response.results[0].command
+        assert response.results[0].value == "********"
+
+    @pytest.mark.asyncio
+    async def test_an_invalid_value_sends_nothing_at_all(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await repeater_settings_apply(
+                KEY_A,
+                RepeaterSettingsApplyRequest(
+                    changes=[
+                        # Valid, but it must not be written either: the batch is
+                        # validated as a whole so one typo cannot half-apply it.
+                        RepeaterSettingChange(key="flood_max", value=3),
+                        RepeaterSettingChange(key="tx_power", value=9999),
+                    ]
+                ),
+            )
+
+        assert exc_info.value.status_code == 422
+        mc.commands.send_cmd.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_key_duplicate_and_empty_batches_are_rejected(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        async def apply(changes):
+            with (
+                patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+                patch.object(radio_manager, "_meshcore", mc),
+                pytest.raises(HTTPException) as exc_info,
+            ):
+                await repeater_settings_apply(KEY_A, RepeaterSettingsApplyRequest(changes=changes))
+            return exc_info.value
+
+        assert (await apply([])).status_code == 400
+        assert (
+            await apply([RepeaterSettingChange(key="nonexistent", value="1")])
+        ).status_code == 400
+        assert (
+            await apply(
+                [
+                    RepeaterSettingChange(key="flood_max", value=3),
+                    RepeaterSettingChange(key="flood_max", value=4),
+                ]
+            )
+        ).status_code == 400
+        mc.commands.send_cmd.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_repeater_contact_is_refused(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Person", contact_type=0)
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await repeater_settings_apply(
+                KEY_A,
+                RepeaterSettingsApplyRequest(
+                    changes=[RepeaterSettingChange(key="flood_max", value=3)]
+                ),
+            )
+
+        assert exc_info.value.status_code == 400

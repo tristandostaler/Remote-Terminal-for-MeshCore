@@ -24,6 +24,7 @@ import { OwnerInfoPane } from './repeater/RepeaterOwnerInfoPane';
 import { RegionsPane } from './repeater/RepeaterRegionsPane';
 import { ActionsPane } from './repeater/RepeaterActionsPane';
 import { ConsolePane } from './repeater/RepeaterConsolePane';
+import { SettingsEditorPane } from './repeater/RepeaterSettingsEditorPane';
 import { TelemetryHistoryPane } from './repeater/RepeaterTelemetryHistoryPane';
 import { ContactPathDiscoveryModal } from './ContactPathDiscoveryModal';
 
@@ -105,6 +106,13 @@ export function RepeaterDashboard({
     fixForwardClock,
     hostClock,
     refreshHostClock,
+    settingsSchema,
+    settingsValues,
+    settingsLoading,
+    settingsError,
+    settingsCliResponsive,
+    fetchSettings,
+    applySettings,
   } = useRepeaterDashboard(conversation, { hasAdvertLocation });
   const { password, setPassword, rememberPassword, setRememberPassword, persistAfterLogin } =
     useRememberedServerPassword('repeater', conversation.id);
@@ -419,6 +427,18 @@ export function RepeaterDashboard({
                 />
               </div>
             </div>
+
+            {/* Settings editor — full width, above the console it replaces */}
+            <SettingsEditorPane
+              schema={settingsSchema}
+              values={settingsValues}
+              loading={settingsLoading}
+              error={settingsError}
+              cliResponsive={settingsCliResponsive}
+              disabled={anyLoading || consoleLoading}
+              onFetch={fetchSettings}
+              onApply={applySettings}
+            />
 
             {/* Console — full width */}
             <ConsolePane

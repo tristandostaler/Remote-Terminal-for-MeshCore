@@ -48,6 +48,13 @@ const mockHook: {
   fixForwardClock: vi.fn(async () => {}),
   hostClock: null,
   refreshHostClock: vi.fn(async () => {}),
+  settingsSchema: null,
+  settingsValues: {},
+  settingsLoading: false,
+  settingsError: null,
+  settingsCliResponsive: null,
+  fetchSettings: vi.fn(async () => {}),
+  applySettings: vi.fn(async () => []),
 };
 
 vi.mock('../hooks/useRepeaterDashboard', () => ({

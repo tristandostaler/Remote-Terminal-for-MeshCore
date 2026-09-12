@@ -38,7 +38,7 @@ API_TAGS_METADATA: list[dict[str, Any]] = [
     },
     {
         "name": "repeaters",
-        "description": "Repeater login, telemetry, ACL, owner info, radio settings, and CLI commands.",
+        "description": "Repeater login, telemetry, ACL, owner info, settings editing, and CLI commands.",
     },
     {
         "name": "rooms",

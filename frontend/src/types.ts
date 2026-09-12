@@ -836,6 +836,80 @@ export interface RepeaterRegionsResponse {
   source: 'cli' | 'anon' | null;
 }
 
+/** How the firmware answered one `get`/`set` for a setting. */
+export type RepeaterSettingStatus = 'ok' | 'unsupported' | 'error' | 'no_reply';
+
+export type RepeaterSettingValueType = 'string' | 'int' | 'float' | 'bool' | 'enum' | 'radio';
+
+/**
+ * One editable repeater setting, described by the server-side catalog
+ * (`app/services/repeater_settings.py`). The editor renders its form from
+ * these, so new settings need no frontend change.
+ */
+export interface RepeaterSettingDefinition {
+  key: string;
+  label: string;
+  group: string;
+  /** The firmware's own key, as used in `get`/`set`. */
+  cli_key: string;
+  value_type: RepeaterSettingValueType;
+  help: string;
+  unit: string | null;
+  minimum: number | null;
+  maximum: number | null;
+  step: number | null;
+  options: string[];
+  max_length: number | null;
+  /** False when the firmware cannot read the value back (the admin password). */
+  readable: boolean;
+  writable: boolean;
+  /** Password-like: masked in the UI, redacted in results. */
+  sensitive: boolean;
+  note: string | null;
+}
+
+export interface RepeaterSettingGroupDefinition {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface RepeaterSettingsSchemaResponse {
+  groups: RepeaterSettingGroupDefinition[];
+  settings: RepeaterSettingDefinition[];
+}
+
+export interface RepeaterSettingValue {
+  key: string;
+  value: string | null;
+  raw: string | null;
+  status: RepeaterSettingStatus;
+}
+
+export interface RepeaterSettingsResponse {
+  values: RepeaterSettingValue[];
+  /** False means nothing answered — usually a guest session, since the firmware routes no CLI text for one. */
+  cli_responsive: boolean;
+}
+
+export interface RepeaterSettingChange {
+  key: string;
+  /** Radio tuples travel as 'freq,bandwidth,sf,cr'. */
+  value: string | number | boolean;
+}
+
+export interface RepeaterSettingApplyResult {
+  key: string;
+  command: string;
+  value: string;
+  status: RepeaterSettingStatus;
+  reply: string | null;
+}
+
+export interface RepeaterSettingsApplyResponse {
+  results: RepeaterSettingApplyResult[];
+}
+
 export interface LppSensor {
   channel: number;
   type_name: string;

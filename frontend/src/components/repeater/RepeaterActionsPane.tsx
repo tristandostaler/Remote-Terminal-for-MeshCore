@@ -1,28 +1,6 @@
-import { useState, useCallback, useEffect } from 'react';
 import { Button } from '../ui/button';
+import { useArmedAction } from './repeaterPaneShared';
 import type { HostClockStatus } from '../../types';
-
-/** Two-click confirmation that resets itself after three seconds. */
-function useArmedAction(action: () => void): [boolean, () => void] {
-  const [armed, setArmed] = useState(false);
-
-  const trigger = useCallback(() => {
-    if (!armed) {
-      setArmed(true);
-      return;
-    }
-    setArmed(false);
-    action();
-  }, [armed, action]);
-
-  useEffect(() => {
-    if (!armed) return;
-    const timer = setTimeout(() => setArmed(false), 3000);
-    return () => clearTimeout(timer);
-  }, [armed]);
-
-  return [armed, trigger];
-}
 
 export function ActionsPane({
   onSendZeroHopAdvert,

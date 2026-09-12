@@ -1088,6 +1088,111 @@ class RepeaterLppTelemetryResponse(BaseModel):
     sensors: list[LppSensor] = Field(default_factory=list, description="List of sensor readings")
 
 
+class RepeaterSettingDefinition(BaseModel):
+    """One editable repeater setting, as described by the server-side catalog.
+
+    The frontend renders the form straight from these definitions, so a setting
+    is added or retuned in ``app/services/repeater_settings.py`` alone.
+    """
+
+    key: str = Field(description="Stable identifier used by the read/apply endpoints")
+    label: str = Field(description="Human-readable field label")
+    group: str = Field(description="Group key from the schema's group list")
+    cli_key: str = Field(description="The firmware's own key, as used in 'get'/'set'")
+    value_type: str = Field(description="string | int | float | bool | enum | radio")
+    help: str = Field(default="", description="One-line description of what the setting does")
+    unit: str | None = Field(default=None, description="Display unit (dBm, minutes, ...)")
+    minimum: float | None = Field(default=None, description="Lowest accepted value")
+    maximum: float | None = Field(default=None, description="Highest accepted value")
+    step: float | None = Field(default=None, description="Suggested numeric input step")
+    options: list[str] = Field(default_factory=list, description="Allowed values for enums")
+    max_length: int | None = Field(default=None, description="Maximum length for string values")
+    readable: bool = Field(default=True, description="False when the firmware cannot read it back")
+    writable: bool = Field(default=True, description="False when the setting is display-only")
+    sensitive: bool = Field(default=False, description="Password-like; the UI masks it")
+    note: str | None = Field(default=None, description="Extra warning shown next to the field")
+
+
+class RepeaterSettingGroupDefinition(BaseModel):
+    """One titled section of the settings form."""
+
+    key: str = Field(description="Group key referenced by each setting")
+    label: str = Field(description="Section heading")
+    description: str = Field(description="One-line description of the section")
+
+
+class RepeaterSettingsSchemaResponse(BaseModel):
+    """The static catalog of editable repeater settings (no radio access)."""
+
+    groups: list[RepeaterSettingGroupDefinition] = Field(default_factory=list)
+    settings: list[RepeaterSettingDefinition] = Field(default_factory=list)
+
+
+class RepeaterSettingsReadRequest(BaseModel):
+    """Which settings to read. Empty/omitted means every readable setting."""
+
+    keys: list[str] | None = Field(
+        default=None,
+        description="Setting keys to read; omit for all readable settings",
+    )
+    group: str | None = Field(
+        default=None, description="Read only the settings in this group (ignored when keys is set)"
+    )
+
+
+class RepeaterSettingValue(BaseModel):
+    """One setting's current value as read back from the repeater."""
+
+    key: str = Field(description="Catalog key")
+    value: str | None = Field(default=None, description="Current value, or None when not readable")
+    raw: str | None = Field(default=None, description="Raw firmware reply, before parsing")
+    status: str = Field(description="ok | unsupported | error | no_reply")
+
+
+class RepeaterSettingsResponse(BaseModel):
+    """Current values for the requested settings."""
+
+    values: list[RepeaterSettingValue] = Field(default_factory=list)
+    cli_responsive: bool = Field(
+        description=(
+            "True when at least one command was answered. The firmware routes no CLI text "
+            "at all for a non-admin client, so False usually means this session is not "
+            "logged in as admin (or the repeater is unreachable)."
+        )
+    )
+
+
+class RepeaterSettingChange(BaseModel):
+    """One requested change: a catalog key and the value to write."""
+
+    key: str = Field(description="Catalog key")
+    value: bool | int | float | str = Field(
+        description="New value; radio tuples are sent as 'freq,bandwidth,sf,cr'"
+    )
+
+
+class RepeaterSettingsApplyRequest(BaseModel):
+    """A batch of settings to write, applied in the order given."""
+
+    changes: list[RepeaterSettingChange] = Field(default_factory=list)
+
+
+class RepeaterSettingApplyResult(BaseModel):
+    """What the repeater answered for one written setting."""
+
+    key: str = Field(description="Catalog key")
+    command: str = Field(description="The CLI command that was sent (passwords redacted)")
+    value: str = Field(description="The formatted value that was sent (passwords redacted)")
+    status: str = Field(description="ok | unsupported | error | no_reply")
+    reply: str | None = Field(default=None, description="Raw firmware reply")
+
+
+class RepeaterSettingsApplyResponse(BaseModel):
+    """Per-setting results for an apply batch."""
+
+    results: list[RepeaterSettingApplyResult] = Field(default_factory=list)
+
+
 class ContactTelemetryResponse(BaseModel):
     """On-demand CayenneLPP telemetry snapshot from any contact."""
 
