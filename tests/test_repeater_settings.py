@@ -35,6 +35,14 @@ class TestCatalog:
         assert setting.get_command == "get flood.max"
         assert setting.set_command("3") == "set flood.max 3"
 
+    def test_timing_keys_match_the_firmware_spelling(self):
+        # The firmware's CLI keys are not consistent about dots: it is
+        # `direct.txdelay`, not `direct.tx.delay`. A wrong spelling here is
+        # answered "??" and locks the field as unsupported on every firmware.
+        assert get_setting("rx_delay").get_command == "get rxdelay"
+        assert get_setting("tx_delay").get_command == "get txdelay"
+        assert get_setting("direct_tx_delay").set_command("2.5") == "set direct.txdelay 2.5"
+
     def test_unknown_key_is_rejected(self):
         with pytest.raises(SettingValueError):
             get_setting("not_a_setting")
