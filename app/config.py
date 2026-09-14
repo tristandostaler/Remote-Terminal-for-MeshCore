@@ -53,6 +53,21 @@ class Settings(BaseSettings):
     disable_bots: bool = False
     enable_message_poll_fallback: bool = False
     force_channel_slot_reconfigure: bool = False
+    # Keep channels resident in the radio's slots (Public first, then the most
+    # recently active) instead of wiping every slot at startup. A resident
+    # channel is decrypted by the firmware too, so its messages also reach us
+    # through the radio's own message queue -- the same fallback DMs have
+    # always had -- when the raw RX-log push path stalls. The raw frame stays
+    # the primary route; the pulled copy collapses onto it through dedup.
+    resident_channels_enabled: bool = True
+    # RX silence watchdog: after this many seconds without a single raw RX-log
+    # frame while connected, probe the radio's packet counters. If the radio
+    # heard packets we never saw, the push path is wedged and the watchdog
+    # escalates (reconnect, then reboot). 0 disables the watchdog.
+    rx_silence_timeout_seconds: int = 300
+    # TCP keepalive idle time for a WiFi companion link; 0 leaves the OS default
+    # (which on Linux means a dead peer is not noticed for over two hours).
+    tcp_keepalive_idle_seconds: int = 30
     clowntown_do_clock_wraparound: bool = Field(
         default=False,
         validation_alias="__CLOWNTOWN_DO_CLOCK_WRAPAROUND",

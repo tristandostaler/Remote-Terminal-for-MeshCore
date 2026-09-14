@@ -1,6 +1,6 @@
 name: "RemoteTerm for MeshCore Advanced"
 description: "RemoteTerm for MeshCore Advanced - MeshCore web client with bots, compression and images"
-version: "1.20.0"
+version: "1.21.0"
 slug: "remoteterm"
 init: false
 arch:
@@ -28,6 +28,17 @@ options:
   MESHCORE_VIRTUAL_NODE_READ_ONLY: false
   # Missed messages replayed to a returning app on reconnect (0 disables).
   MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT: 1000
+  # Radio link resilience. Keep channels loaded on the radio (Public first,
+  # then favorites and the most recently active) so the radio itself decrypts
+  # and queues their messages as a fallback when it stops pushing raw packets;
+  # false wipes every slot at startup and loads channels only when sending.
+  MESHCORE_RESIDENT_CHANNELS_ENABLED: true
+  # Seconds without a raw packet before the radio's packet counters are probed;
+  # a radio that heard packets it never forwarded is reconnected, then
+  # rebooted. 0 disables the watchdog.
+  MESHCORE_RX_SILENCE_TIMEOUT_SECONDS: 300
+  # TCP keepalive idle time on the WiFi companion link; 0 leaves the OS default.
+  MESHCORE_TCP_KEEPALIVE_IDLE_SECONDS: 30
 schema:
   MESHCORE_TCP_HOST: str
   MESHCORE_TCP_PORT: port
@@ -36,6 +47,9 @@ schema:
   MESHCORE_VIRTUAL_NODE_ENABLED: bool
   MESHCORE_VIRTUAL_NODE_READ_ONLY: bool
   MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT: int(0,10000)
+  MESHCORE_RESIDENT_CHANNELS_ENABLED: bool
+  MESHCORE_RX_SILENCE_TIMEOUT_SECONDS: int(0,86400)
+  MESHCORE_TCP_KEEPALIVE_IDLE_SECONDS: int(0,3600)
 ports:
   8000/tcp: null
   5000/tcp: 5000

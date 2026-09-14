@@ -70,6 +70,11 @@ async def run_post_connect_setup(radio_manager) -> None:
                 # Register event handlers against the locked, current transport.
                 register_event_handlers(mc)
 
+                # The library swaps its transport when it reconnects on its own,
+                # so keepalive has to be re-applied on every setup, not just once.
+                if radio_manager.apply_tcp_keepalive():
+                    logger.debug("TCP keepalive applied to the radio link")
+
                 await export_and_store_private_key(mc)
 
                 # Sync radio clock with system time
@@ -233,9 +238,11 @@ async def run_post_connect_setup(radio_manager) -> None:
                     c = result.get("contacts", {})
                     ch = result.get("channels", {})
                     logger.info(
-                        "Sync complete: %d contacts synced, %d channels synced, %d channels cleared",
+                        "Sync complete: %d contacts synced, %d channels synced, "
+                        "%d resident on the radio, %d slots cleared",
                         c.get("synced", 0),
                         ch.get("synced", 0),
+                        ch.get("resident", 0),
                         ch.get("cleared", 0),
                     )
 
@@ -268,6 +275,9 @@ async def run_post_connect_setup(radio_manager) -> None:
                 start_room_polling()
 
             radio_manager._setup_complete = True
+            # Start the RX silence clock now: the watchdog measures from here
+            # until the first raw frame of this connection.
+            radio_manager.mark_rx_baseline()
         finally:
             radio_manager._setup_in_progress = False
 

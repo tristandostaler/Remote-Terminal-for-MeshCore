@@ -70,6 +70,16 @@ services:
       # Missed messages replayed to a returning app on reconnect (0 disables).
       # MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT: 1000
 
+      # Radio link resilience (defaults shown). Channels stay loaded on the
+      # radio so it can decrypt and queue their messages as a fallback when it
+      # stops pushing raw packets; the watchdog probes the radio's packet
+      # counters after this many silent seconds and reconnects, then reboots, a
+      # radio that heard packets it never forwarded (0 disables); keepalive
+      # notices a dead WiFi companion within about a minute (0 = OS default).
+      # MESHCORE_RESIDENT_CHANNELS_ENABLED: "true"
+      # MESHCORE_RX_SILENCE_TIMEOUT_SECONDS: 300
+      # MESHCORE_TCP_KEEPALIVE_IDLE_SECONDS: 30
+
       # Logging
       # MESHCORE_LOG_LEVEL: INFO
     restart: unless-stopped

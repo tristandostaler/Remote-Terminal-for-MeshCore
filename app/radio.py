@@ -3,6 +3,8 @@ import glob
 import logging
 import platform
 import re
+import socket
+import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
@@ -191,6 +193,19 @@ class RadioManager:
         self._channel_slot_by_key: OrderedDict[str, int] = OrderedDict()
         self._channel_key_by_slot: dict[int, str] = {}
         self._pending_message_channel_key_by_slot: dict[int, str] = {}
+        # Channels pinned in radio slots for the whole session (see
+        # ``radio_sync.load_resident_channels``). Unlike the send cache above,
+        # a resident slot is never evicted by a send to another channel: the
+        # firmware decrypts and queues messages for it, which is the fallback
+        # that keeps channel traffic flowing when the raw RX-log push stalls.
+        self._resident_channel_slot_by_key: OrderedDict[str, int] = OrderedDict()
+        self._resident_channel_key_by_slot: dict[int, str] = {}
+        # Monotonic time of the last raw RX-log frame the radio pushed to us,
+        # and of the moment the current connection finished setup. The RX
+        # silence watchdog compares both against the radio's own packet counters.
+        self._last_rx_log_frame_at: float | None = None
+        self._rx_baseline_at: float | None = None
+        self._rx_watchdog_task: asyncio.Task | None = None
 
     async def _acquire_operation_lock(
         self,
@@ -241,6 +256,85 @@ class RadioManager:
         self.allowed_repeat_freqs = []
         self.reset_channel_send_cache()
         self.clear_pending_message_channel_slots()
+        self.clear_resident_channels()
+        self._last_rx_log_frame_at = None
+        self._rx_baseline_at = None
+
+    # -- RX-log frame tracking (fed by event_handlers.on_rx_log_data) --------
+
+    def note_rx_log_frame(self, now: float | None = None) -> None:
+        """Record that the radio just pushed a raw RX-log frame."""
+        self._last_rx_log_frame_at = time.monotonic() if now is None else now
+
+    def mark_rx_baseline(self, now: float | None = None) -> None:
+        """Start the silence clock now (called when a connection finishes setup)."""
+        self._rx_baseline_at = time.monotonic() if now is None else now
+
+    @property
+    def last_rx_log_frame_at(self) -> float | None:
+        return self._last_rx_log_frame_at
+
+    def seconds_since_last_rx_log_frame(self, now: float | None = None) -> float | None:
+        """Seconds since the last raw frame, or since setup if none arrived yet.
+
+        Returns None when neither has happened on this connection.
+        """
+        reference = self._last_rx_log_frame_at
+        if reference is None or (
+            self._rx_baseline_at is not None and self._rx_baseline_at > reference
+        ):
+            reference = self._rx_baseline_at
+        if reference is None:
+            return None
+        current = time.monotonic() if now is None else now
+        return max(0.0, current - reference)
+
+    # -- Transport keepalive -------------------------------------------------
+
+    def apply_tcp_keepalive(self) -> bool:
+        """Enable TCP keepalive on the live socket to a WiFi companion.
+
+        meshcore-py opens a plain asyncio connection, and a WiFi companion that
+        drops off the network mid-session leaves that socket half-open: no data
+        means no error, so the link reports connected forever. Keepalive turns a
+        dead peer into a connection_lost within ``idle + 3 * interval`` seconds,
+        which is what lets the connection monitor reconnect. Re-applied on every
+        post-connect setup because the library replaces the transport when it
+        reconnects on its own. Returns True when the options were set.
+        """
+        idle = int(settings.tcp_keepalive_idle_seconds or 0)
+        if idle <= 0:
+            return False
+        mc = self._meshcore
+        if mc is None:
+            return False
+        connection = getattr(getattr(mc, "connection_manager", None), "connection", None)
+        transport = getattr(connection, "transport", None)
+        if transport is None:
+            return False
+        try:
+            sock = transport.get_extra_info("socket")
+        except Exception:
+            return False
+        if sock is None:
+            return False
+        interval = max(1, idle // 3)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            for option_name, value in (
+                ("TCP_KEEPIDLE", idle),  # Linux
+                ("TCP_KEEPALIVE", idle),  # macOS spelling of the idle time
+                ("TCP_KEEPINTVL", interval),
+                ("TCP_KEEPCNT", 3),
+            ):
+                option = getattr(socket, option_name, None)
+                if option is not None:
+                    sock.setsockopt(socket.IPPROTO_TCP, option, value)
+        except OSError as exc:
+            logger.debug("Could not enable TCP keepalive: %s", exc)
+            return False
+        logger.debug("TCP keepalive enabled (idle=%ds, interval=%ds)", idle, interval)
+        return True
 
     @asynccontextmanager
     async def radio_operation(
@@ -322,6 +416,74 @@ class RadioManager:
         """Drop any queued-message recovery slot metadata."""
         self._pending_message_channel_key_by_slot.clear()
 
+    # -- Resident channels ---------------------------------------------------
+
+    def set_resident_channels(self, slots_by_key: dict[str, int]) -> None:
+        """Replace the resident channel set (key -> radio slot), in priority order."""
+        self._resident_channel_slot_by_key = OrderedDict(
+            (key.upper(), int(slot)) for key, slot in slots_by_key.items()
+        )
+        self._resident_channel_key_by_slot = {
+            slot: key for key, slot in self._resident_channel_slot_by_key.items()
+        }
+        # A slot that just became resident can no longer be a send scratch slot.
+        for slot in list(self._resident_channel_key_by_slot):
+            cached_key = self._channel_key_by_slot.pop(slot, None)
+            if cached_key is not None:
+                self._channel_slot_by_key.pop(cached_key, None)
+        for key in list(self._resident_channel_slot_by_key):
+            self.invalidate_cached_channel_slot(key)
+
+    def add_resident_channel(self, channel_key: str, slot: int) -> None:
+        """Pin one more channel in a radio slot."""
+        normalized_key = channel_key.upper()
+        previous_slot = self._resident_channel_slot_by_key.pop(normalized_key, None)
+        if previous_slot is not None:
+            self._resident_channel_key_by_slot.pop(previous_slot, None)
+        displaced = self._resident_channel_key_by_slot.get(slot)
+        if displaced is not None:
+            self._resident_channel_slot_by_key.pop(displaced, None)
+        self._resident_channel_slot_by_key[normalized_key] = slot
+        self._resident_channel_key_by_slot[slot] = normalized_key
+        cached_key = self._channel_key_by_slot.pop(slot, None)
+        if cached_key is not None:
+            self._channel_slot_by_key.pop(cached_key, None)
+        self.invalidate_cached_channel_slot(normalized_key)
+
+    def remove_resident_channel(self, channel_key: str) -> int | None:
+        """Unpin a channel; returns the slot it occupied, if any."""
+        slot = self._resident_channel_slot_by_key.pop(channel_key.upper(), None)
+        if slot is not None:
+            self._resident_channel_key_by_slot.pop(slot, None)
+        return slot
+
+    def clear_resident_channels(self) -> None:
+        self._resident_channel_slot_by_key.clear()
+        self._resident_channel_key_by_slot.clear()
+
+    def get_resident_channel_slot(self, channel_key: str) -> int | None:
+        return self._resident_channel_slot_by_key.get(channel_key.upper())
+
+    def resident_channel_key_for_slot(self, slot: int) -> str | None:
+        return self._resident_channel_key_by_slot.get(slot)
+
+    def get_resident_channels_snapshot(self) -> list[tuple[str, int]]:
+        """Resident channels as (key, slot) pairs in priority order."""
+        return list(self._resident_channel_slot_by_key.items())
+
+    def resident_channel_count(self) -> int:
+        return len(self._resident_channel_slot_by_key)
+
+    def first_free_resident_slot(self) -> int | None:
+        """Lowest slot not held by a resident channel, leaving one scratch slot free."""
+        capacity = self.get_channel_send_cache_capacity()
+        if capacity <= 1 or len(self._resident_channel_slot_by_key) >= capacity - 1:
+            return None
+        for slot in range(capacity):
+            if slot not in self._resident_channel_key_by_slot:
+                return slot
+        return None
+
     def channel_slot_reuse_enabled(self) -> bool:
         """Return whether this transport can safely reuse cached channel slots."""
         if settings.force_channel_slot_reconfigure:
@@ -338,8 +500,17 @@ class RadioManager:
             return 1
 
     def get_cached_channel_slot(self, channel_key: str) -> int | None:
-        """Return the cached radio slot for a channel key, if present."""
-        return self._channel_slot_by_key.get(channel_key.upper())
+        """Return the radio slot a channel is known to be loaded in, if any.
+
+        A resident channel counts as loaded on transports that reuse slots; on
+        the others every send reconfigures anyway (see plan_channel_send_slot).
+        """
+        normalized_key = channel_key.upper()
+        if self.channel_slot_reuse_enabled():
+            resident_slot = self._resident_channel_slot_by_key.get(normalized_key)
+            if resident_slot is not None:
+                return resident_slot
+        return self._channel_slot_by_key.get(normalized_key)
 
     def channel_key_for_slot(self, slot: int) -> str | None:
         """Reverse of :meth:`get_cached_channel_slot`.
@@ -366,6 +537,9 @@ class RadioManager:
         Returns None only when nothing in this process has ever associated the
         slot with a channel; the caller then asks the radio directly.
         """
+        resident = self._resident_channel_key_by_slot.get(slot)
+        if resident is not None:
+            return resident
         cached = self._channel_key_by_slot.get(slot)
         if cached is not None:
             return cached
@@ -380,17 +554,39 @@ class RadioManager:
         """Choose a radio slot for a channel send.
 
         Returns `(slot, needs_configure, evicted_channel_key)`.
+
+        A resident channel always sends from its own pinned slot. On transports
+        that reuse slots it is already loaded, so no configure is needed; on the
+        others (TCP, forced reconfigure) the same key is rewritten into the same
+        slot, which is harmless and keeps the "always reconfigure" guarantee.
+        Non-resident channels never touch a resident slot: they share the
+        remaining scratch slots under the existing LRU policy.
         """
+        normalized_key = channel_key.upper()
+        resident_slot = self._resident_channel_slot_by_key.get(normalized_key)
+        if resident_slot is not None:
+            return resident_slot, not self.channel_slot_reuse_enabled(), None
+
+        capacity = self.get_channel_send_cache_capacity()
+
         if not self.channel_slot_reuse_enabled():
+            if preferred_slot in self._resident_channel_key_by_slot:
+                preferred_slot = self._find_first_free_channel_slot(capacity, preferred_slot)
             return preferred_slot, True, None
 
-        normalized_key = channel_key.upper()
         cached_slot = self._channel_slot_by_key.get(normalized_key)
         if cached_slot is not None:
             return cached_slot, False, None
 
-        capacity = self.get_channel_send_cache_capacity()
-        if len(self._channel_slot_by_key) < capacity:
+        scratch_capacity = capacity - len(self._resident_channel_key_by_slot)
+        if scratch_capacity <= 0:
+            # Every slot is pinned (should not happen: the resident set leaves
+            # one scratch slot free). Borrow the lowest-priority resident slot.
+            evicted_key, slot = next(reversed(self._resident_channel_slot_by_key.items()))
+            self.remove_resident_channel(evicted_key)
+            return slot, True, evicted_key
+
+        if len(self._channel_slot_by_key) < scratch_capacity:
             slot = self._find_first_free_channel_slot(capacity, preferred_slot)
             return slot, True, None
 
@@ -403,6 +599,12 @@ class RadioManager:
             return
 
         normalized_key = channel_key.upper()
+        resident_key = self._resident_channel_key_by_slot.get(slot)
+        if resident_key is not None:
+            if resident_key == normalized_key:
+                return  # Already pinned there; nothing to cache.
+            # Something overwrote a pinned slot; it is not resident any more.
+            self.remove_resident_channel(resident_key)
         previous_slot = self._channel_slot_by_key.pop(normalized_key, None)
         if previous_slot is not None and previous_slot != slot:
             self._channel_key_by_slot.pop(previous_slot, None)
@@ -441,11 +643,12 @@ class RadioManager:
 
     def _find_first_free_channel_slot(self, capacity: int, preferred_slot: int) -> int:
         """Pick the first unclaimed app-managed slot, preferring the requested slot."""
-        if preferred_slot < capacity and preferred_slot not in self._channel_key_by_slot:
+        taken = self._channel_key_by_slot.keys() | self._resident_channel_key_by_slot.keys()
+        if preferred_slot < capacity and preferred_slot not in taken:
             return preferred_slot
 
         for slot in range(capacity):
-            if slot not in self._channel_key_by_slot:
+            if slot not in taken:
                 return slot
 
         return preferred_slot
@@ -579,6 +782,7 @@ class RadioManager:
         self._connection_info = f"TCP: {host}:{port}"
         self._last_connected = True
         self._setup_complete = False
+        self.apply_tcp_keepalive()
         logger.debug("TCP connection established")
 
     async def _connect_ble(self) -> None:
@@ -695,6 +899,11 @@ class RadioManager:
         self._reconnect_task = asyncio.create_task(connection_monitor_loop(self))
         logger.info("Radio connection monitor started")
 
+        from app.services.rx_watchdog import rx_watchdog_loop
+
+        if self._rx_watchdog_task is None:
+            self._rx_watchdog_task = asyncio.create_task(rx_watchdog_loop(self))
+
     async def stop_connection_monitor(self) -> None:
         """Stop the connection monitor task."""
         if self._reconnect_task is not None:
@@ -705,6 +914,13 @@ class RadioManager:
                 pass
             self._reconnect_task = None
             logger.info("Radio connection monitor stopped")
+        if self._rx_watchdog_task is not None:
+            self._rx_watchdog_task.cancel()
+            try:
+                await self._rx_watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._rx_watchdog_task = None
 
 
 radio_manager = RadioManager()

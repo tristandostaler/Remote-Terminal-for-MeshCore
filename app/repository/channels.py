@@ -82,6 +82,38 @@ class ChannelRepository:
         ]
 
     @staticmethod
+    async def last_activity_by_key() -> dict[str, int]:
+        """Most recent ``received_at`` per channel key, for resident-slot priority."""
+        async with db.readonly() as conn:
+            async with conn.execute(
+                """
+                SELECT conversation_key, MAX(received_at) AS last_activity
+                FROM messages
+                WHERE type = 'CHAN'
+                GROUP BY conversation_key
+                """
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return {
+            str(row["conversation_key"]).upper(): int(row["last_activity"])
+            for row in rows
+            if row["last_activity"] is not None
+        }
+
+    @staticmethod
+    async def set_on_radio_keys(keys: list[str]) -> None:
+        """Mark exactly ``keys`` as resident on the radio and every other channel as not."""
+        normalized = [key.upper() for key in keys]
+        async with db.tx() as conn:
+            await conn.execute("UPDATE channels SET on_radio = 0")
+            if normalized:
+                placeholders = ",".join("?" for _ in normalized)
+                await conn.execute(
+                    f"UPDATE channels SET on_radio = 1 WHERE key IN ({placeholders})",
+                    normalized,
+                )
+
+    @staticmethod
     async def set_favorite(key: str, value: bool) -> bool:
         """Set or clear the favorite flag for a channel. Returns True if row was found."""
         async with db.tx() as conn:
