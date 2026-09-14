@@ -84,6 +84,13 @@ API_TAGS_METADATA: list[dict[str, Any]] = [
         "name": "statistics",
         "description": "Aggregated mesh, message, packet, channel, and contact statistics.",
     },
+    {
+        "name": "live-feed",
+        "description": (
+            "Live feed comparison: mirror channel messages from a CoreScope instance "
+            "(live.meshcore.ca) and compare them with what this node heard."
+        ),
+    },
 ]
 
 SWAGGER_UI_CSS_URL = "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"

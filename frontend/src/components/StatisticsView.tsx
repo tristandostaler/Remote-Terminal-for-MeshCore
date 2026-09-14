@@ -12,6 +12,7 @@ import {
   Cell,
 } from 'recharts';
 import { Separator } from './ui/separator';
+import { LiveComparePanel } from './liveCompare/LiveCompareStatsPanel';
 import { api } from '../api';
 import { DEFAULT_STATS_WINDOW, STATS_WINDOWS } from '../types';
 import {
@@ -750,9 +751,12 @@ function DriftRankingTable({
 
 export function StatisticsView({
   onOpenNodeStats,
+  onOpenLiveCompare,
 }: {
   /** Passed through so a repeater name in the drift tables opens its stats page. */
   onOpenNodeStats?: (publicKey: string) => void;
+  /** Opens the Live Compare page from the live feed comparison section. */
+  onOpenLiveCompare?: () => void;
 } = {}) {
   const [stats, setStats] = useState<StatisticsResponse | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
@@ -1078,6 +1082,18 @@ export function StatisticsView({
 
               {/* Region Scope */}
               <RegionScopeStatsPanel stats={stats.region_scope} windowKey={shownWindow} />
+
+              {/* Live feed comparison (live.meshcore.ca) — only once something is mirrored */}
+              {stats.live_compare && (
+                <>
+                  <Separator />
+                  <LiveComparePanel
+                    stats={stats.live_compare}
+                    windowKey={shownWindow}
+                    onOpenLiveCompare={onOpenLiveCompare}
+                  />
+                </>
+              )}
 
               {/* Busiest Channels */}
               {stats.busiest_channels.length > 0 && (

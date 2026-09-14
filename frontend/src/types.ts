@@ -500,7 +500,9 @@ type ConversationType =
   | 'bots'
   | 'statistics'
   /** Per-node stats page; `id` is the node's public key. */
-  | 'nodeStats';
+  | 'nodeStats'
+  /** Node vs live.meshcore.ca channel-message comparison. */
+  | 'liveCompare';
 
 export interface Conversation {
   type: ConversationType;
@@ -558,7 +560,20 @@ export interface AppSettings {
   telemetry_routed_hourly: boolean;
   /** Apps on the virtual companion node may change radio settings (default off). */
   virtual_node_allow_admin_commands: boolean;
+  /** Mirror channel messages from a CoreScope instance (live.meshcore.ca) for comparison. */
+  live_feed_enabled: boolean;
+  live_feed_url: string;
+  /** CoreScope region filter: observer IATA code(s), comma-separated; '' = all. */
+  live_feed_region: string;
+  /** '*' = every channel this node knows; otherwise channel keys (or Public / #hashtag names). */
+  live_feed_channels: string[];
+  live_feed_poll_interval: number;
 }
+
+/** Live feed defaults, mirroring app/models.py. */
+export const DEFAULT_LIVE_FEED_URL = 'https://live.meshcore.ca';
+export const MIN_LIVE_FEED_POLL_INTERVAL = 60;
+export const MAX_LIVE_FEED_POLL_INTERVAL = 86400;
 
 /** Bounds and default for `max_message_retries`, mirroring app/send_attempts.py. */
 export const MIN_MESSAGE_RETRIES = 1;
@@ -579,6 +594,11 @@ export interface AppSettingsUpdate {
   telemetry_interval_hours?: number;
   telemetry_routed_hourly?: boolean;
   virtual_node_allow_admin_commands?: boolean;
+  live_feed_enabled?: boolean;
+  live_feed_url?: string;
+  live_feed_region?: string;
+  live_feed_channels?: string[];
+  live_feed_poll_interval?: number;
 }
 
 /** One app currently connected to the virtual companion node. */
@@ -1180,6 +1200,107 @@ export interface StatisticsResponse {
   packets_over_time: PacketsOverTime;
   noise_floor: NoiseFloorHistoryStats;
   repeater_clock_drift: RepeaterClockDriftStats;
+  /** Null until the live feed is enabled or has mirrored at least one message. */
+  live_compare: LiveCompareStats | null;
+}
+
+// ---------------------------------------------------------------------------
+// Live feed comparison (live.meshcore.ca / CoreScope)
+// ---------------------------------------------------------------------------
+
+export interface LiveFeedStatus {
+  enabled: boolean;
+  url: string;
+  region: string;
+  channels: string[];
+  poll_interval: number;
+  syncing: boolean;
+  last_sync_started_at: number | null;
+  last_sync_completed_at: number | null;
+  last_success_at: number | null;
+  last_error: string | null;
+  /** Messages checked by the last sync. */
+  last_fetched: number;
+  /** Rows the last sync inserted or refreshed. */
+  last_changed: number;
+  /** True when the last sync walked the whole lookback window instead of only what changed. */
+  last_sync_full: boolean;
+  mirrored_messages: number;
+  /** Configured entries that matched no channel key on this node. */
+  unresolved_channels: string[];
+  /** 'packets' = remote packets decrypted locally (any channel with a key); 'channel_messages' = the instance's own decryption. */
+  source: 'packets' | 'channel_messages';
+}
+
+export interface LiveCompareCounts {
+  both: number;
+  node_only: number;
+  live_only: number;
+}
+
+export interface LiveCompareChannelCounts extends LiveCompareCounts {
+  channel_name: string;
+  channel_key: string | null;
+}
+
+export interface LiveCompareBucket extends LiveCompareCounts {
+  timestamp: number;
+}
+
+export interface LiveCompareStats {
+  status: LiveFeedStatus;
+  both: number;
+  node_only: number;
+  live_only: number;
+  /** Share of what the live feed saw that this node also heard. */
+  node_coverage_pct: number | null;
+  /** Share of what this node heard that the live feed also saw. */
+  live_coverage_pct: number | null;
+  channels: LiveCompareChannelCounts[];
+  bucket_seconds: number;
+  over_time: LiveCompareBucket[];
+}
+
+export type LiveCompareSource = 'both' | 'node' | 'live';
+
+export interface LiveCompareMessage {
+  key: string;
+  source: LiveCompareSource;
+  channel_key: string | null;
+  channel_name: string | null;
+  sender: string | null;
+  /** Full stored text, including the "Sender: " prefix. */
+  text: string;
+  sender_timestamp: number | null;
+  /** Earliest time either side saw the message. */
+  seen_at: number;
+  outgoing: boolean;
+  message_id: number | null;
+  node_received_at: number | null;
+  node_path_count: number | null;
+  live_first_seen: number | null;
+  live_last_seen: number | null;
+  live_repeats: number | null;
+  live_observers: string[];
+  live_hops: number | null;
+  live_snr: number | null;
+}
+
+export interface LiveCompareMessagesResponse {
+  window: StatsWindow;
+  messages: LiveCompareMessage[];
+  total: number;
+  counts: LiveCompareCounts;
+}
+
+export interface LiveFeedRegion {
+  code: string;
+  label: string;
+}
+
+export interface LiveFeedRegionsResponse {
+  url: string;
+  regions: LiveFeedRegion[];
 }
 
 /** Contact-level multibyte path adoption (nodes, not traffic). */

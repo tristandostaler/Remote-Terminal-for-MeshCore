@@ -39,6 +39,9 @@ const StatisticsView = lazy(() =>
 const NodeStatsView = lazy(() =>
   import('./nodeStats/NodeStatsView').then((m) => ({ default: m.NodeStatsView }))
 );
+const LiveCompareView = lazy(() =>
+  import('./liveCompare/LiveCompareView').then((m) => ({ default: m.LiveCompareView }))
+);
 
 interface ConversationPaneProps {
   activeConversation: Conversation | null;
@@ -109,6 +112,8 @@ interface ConversationPaneProps {
   pushEnabledForConversation?: boolean;
   onTogglePush?: () => void;
   onOpenPushSettings?: () => void;
+  /** Opens Settings › Live Compare (used by the live compare page's empty state). */
+  onOpenLiveFeedSettings?: () => void;
   trackedTelemetryRepeaters: string[];
   onToggleTrackedTelemetry: (publicKey: string) => Promise<void>;
   clockSyncRepeaters: string[];
@@ -202,6 +207,7 @@ export function ConversationPane({
   pushEnabledForConversation,
   onTogglePush,
   onOpenPushSettings,
+  onOpenLiveFeedSettings,
   trackedTelemetryRepeaters,
   onToggleTrackedTelemetry,
   clockSyncRepeaters,
@@ -334,7 +340,20 @@ export function ConversationPane({
   if (activeConversation.type === 'statistics') {
     return (
       <Suspense fallback={<LoadingPane label="Loading statistics..." />}>
-        <StatisticsView onOpenNodeStats={onOpenNodeStats} />
+        <StatisticsView
+          onOpenNodeStats={onOpenNodeStats}
+          onOpenLiveCompare={() =>
+            onSelectConversation({ type: 'liveCompare', id: 'liveCompare', name: 'Live Compare' })
+          }
+        />
+      </Suspense>
+    );
+  }
+
+  if (activeConversation.type === 'liveCompare') {
+    return (
+      <Suspense fallback={<LoadingPane label="Loading live comparison..." />}>
+        <LiveCompareView channels={channels} onOpenSettings={onOpenLiveFeedSettings} />
       </Suspense>
     );
   }

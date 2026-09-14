@@ -80,6 +80,7 @@ const emptyStats: StatisticsResponse = {
     over_time: [],
     bucket_seconds: 3600,
   },
+  live_compare: null,
 };
 
 function mockStatsFetch(stats: StatisticsResponse) {
@@ -94,6 +95,75 @@ function mockStatsFetch(stats: StatisticsResponse) {
 describe('StatisticsView', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('renders the live feed comparison section only when the backend has one', async () => {
+    const withCompare: StatisticsResponse = {
+      ...emptyStats,
+      live_compare: {
+        status: {
+          enabled: true,
+          url: 'https://live.meshcore.ca',
+          region: 'YUL',
+          channels: ['Public'],
+          poll_interval: 300,
+          syncing: false,
+          last_sync_started_at: 1_700_000_000,
+          last_sync_completed_at: 1_700_000_010,
+          last_success_at: 1_700_000_010,
+          last_error: null,
+          last_fetched: 12,
+          last_changed: 0,
+          last_sync_full: false,
+          mirrored_messages: 40,
+          unresolved_channels: [],
+          source: 'packets',
+        },
+        both: 30,
+        node_only: 5,
+        live_only: 10,
+        node_coverage_pct: 75,
+        live_coverage_pct: 85.7,
+        channels: [
+          {
+            channel_key: 'AA'.repeat(16),
+            channel_name: 'Public',
+            both: 30,
+            node_only: 5,
+            live_only: 10,
+          },
+        ],
+        bucket_seconds: 3600,
+        over_time: [],
+      },
+    };
+    mockStatsFetch(withCompare);
+    const onOpenLiveCompare = vi.fn();
+
+    render(<StatisticsView onOpenLiveCompare={onOpenLiveCompare} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Live feed comparison')).toBeInTheDocument();
+    });
+    const panel = screen.getByTestId('live-compare-panel');
+    expect(panel).toHaveTextContent('30');
+    expect(panel).toHaveTextContent('Live only');
+    expect(panel).toHaveTextContent('75%');
+    expect(screen.getByText(/region YUL/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /Browse messages/ }));
+    expect(onOpenLiveCompare).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits the live feed comparison section when it is null', async () => {
+    mockStatsFetch(emptyStats);
+
+    render(<StatisticsView />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Network')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Live feed comparison')).not.toBeInTheDocument();
   });
 
   it('fetches statistics on mount and renders the data', async () => {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
   Bot,
+  GitCompareArrows,
   Hash,
   Map,
   MessageSquare,
@@ -61,7 +62,7 @@ interface ToolItem extends Searchable {
   id: string;
   name: string;
   icon: React.ComponentType<{ className?: string }>;
-  type: 'raw' | 'map' | 'visualizer' | 'search' | 'trace' | 'bots' | 'statistics';
+  type: 'raw' | 'map' | 'visualizer' | 'search' | 'trace' | 'bots' | 'statistics' | 'liveCompare';
 }
 
 interface SettingItem extends Searchable {
@@ -95,6 +96,13 @@ const TOOL_ITEMS: ToolItem[] = [
     icon: BarChart3,
     type: 'statistics',
     searchText: 'statistics',
+  },
+  {
+    id: 'liveCompare',
+    name: 'Live Compare',
+    icon: GitCompareArrows,
+    type: 'liveCompare',
+    searchText: 'live compare meshcore.ca corescope coverage',
   },
 ];
 

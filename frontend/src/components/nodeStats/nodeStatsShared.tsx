@@ -33,6 +33,48 @@ export const TOOLTIP_STYLE = {
   labelStyle: { color: 'hsl(var(--muted-foreground))' },
 } as const;
 
+/**
+ * The statistics window picker, shared by every page that takes a `?window=`.
+ * One control per page; every panel below it must follow the same choice.
+ */
+export function WindowSelector({
+  value,
+  onChange,
+  disabled,
+  ariaLabel = 'Statistics window',
+}: {
+  value: StatsWindow;
+  onChange: (next: StatsWindow) => void;
+  disabled?: boolean;
+  ariaLabel?: string;
+}) {
+  return (
+    <div
+      className="inline-flex shrink-0 overflow-hidden rounded-md border border-border"
+      role="group"
+      aria-label={ariaLabel}
+    >
+      {STATS_WINDOWS.map((option) => (
+        <button
+          key={option.key}
+          type="button"
+          title={option.title}
+          disabled={disabled}
+          aria-pressed={value === option.key}
+          onClick={() => onChange(option.key)}
+          className={`px-2 py-1 text-xs font-medium transition-colors disabled:opacity-60 ${
+            value === option.key
+              ? 'bg-primary text-primary-foreground'
+              : 'text-muted-foreground hover:bg-muted'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)} min`;

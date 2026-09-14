@@ -1,5 +1,6 @@
 import {
   Database,
+  GitCompareArrows,
   Info,
   MonitorCog,
   RadioTower,
@@ -18,6 +19,7 @@ export type SettingsSection =
   | 'virtual-node'
   | 'database'
   | 'fanout'
+  | 'live-feed'
   | 'about';
 
 export const SETTINGS_SECTION_ORDER: SettingsSection[] = [
@@ -27,6 +29,7 @@ export const SETTINGS_SECTION_ORDER: SettingsSection[] = [
   'fanout',
   'radio-app',
   'virtual-node',
+  'live-feed',
   'database',
   'about',
 ];
@@ -39,6 +42,7 @@ export const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
   'virtual-node': 'Virtual Node',
   database: 'Database',
   fanout: 'Integrations',
+  'live-feed': 'Live Compare',
   about: 'About',
 };
 
@@ -50,5 +54,6 @@ export const SETTINGS_SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   'virtual-node': Smartphone,
   database: Database,
   fanout: Share2,
+  'live-feed': GitCompareArrows,
   about: Info,
 };

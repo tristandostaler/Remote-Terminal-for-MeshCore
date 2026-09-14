@@ -85,6 +85,14 @@ describe('parseHashConversation', () => {
     expect(result).toEqual({ type: 'statistics', name: 'statistics' });
   });
 
+  it('parses #live-compare as the live compare tool', () => {
+    window.location.hash = '#live-compare';
+
+    const result = parseHashConversation();
+
+    expect(result).toEqual({ type: 'liveCompare', name: 'liveCompare' });
+  });
+
   it('redirects the legacy #settings/statistics hash to the statistics tool', () => {
     window.location.hash = '#settings/statistics';
 
@@ -365,6 +373,14 @@ describe('getMapFocusHash', () => {
     const result = getMapFocusHash('AB CD/12');
 
     expect(result).toBe('#map/focus/AB%20CD%2F12');
+  });
+});
+
+describe('getConversationHash for live compare', () => {
+  it('round-trips the live compare tool', () => {
+    expect(
+      getConversationHash({ type: 'liveCompare', id: 'liveCompare', name: 'Live Compare' })
+    ).toBe('#live-compare');
   });
 });
 

@@ -27,6 +27,7 @@ import { SettingsDatabaseSection } from './settings/SettingsDatabaseSection';
 import { SettingsAboutSection } from './settings/SettingsAboutSection';
 import { SettingsVirtualNodeSection } from './settings/SettingsVirtualNodeSection';
 import { SettingsHttpsSection } from './settings/SettingsHttpsSection';
+import { SettingsLiveFeedSection } from './settings/SettingsLiveFeedSection';
 
 interface SettingsModalBaseProps {
   open: boolean;
@@ -131,6 +132,7 @@ export function SettingsModal(props: SettingsModalProps) {
     'radio-app': false,
     'virtual-node': false,
     fanout: false,
+    'live-feed': false,
     database: false,
     about: false,
   });
@@ -351,6 +353,27 @@ export function SettingsModal(props: SettingsModalProps) {
               className={sectionContentClass}
             />
           )}
+        </section>
+      )}
+
+      {shouldRenderSection('live-feed') && (
+        <section className={sectionWrapperClass}>
+          {renderSectionHeader('live-feed')}
+          {isSectionVisible('live-feed') &&
+            (appSettings ? (
+              <SettingsLiveFeedSection
+                appSettings={appSettings}
+                channels={channels ?? []}
+                onSaveAppSettings={onSaveAppSettings}
+                className={sectionContentClass}
+              />
+            ) : (
+              <div className={sectionContentClass}>
+                <div className="rounded-md border border-input bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+                  Loading app settings...
+                </div>
+              </div>
+            ))}
         </section>
       )}
 

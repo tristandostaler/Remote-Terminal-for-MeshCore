@@ -775,6 +775,10 @@ export function App() {
       setSettingsSection('local');
       if (!showSettings) handleToggleSettingsView();
     },
+    onOpenLiveFeedSettings: () => {
+      setSettingsSection('live-feed');
+      if (!showSettings) handleToggleSettingsView();
+    },
     trackedTelemetryRepeaters: appSettings?.tracked_telemetry_repeaters ?? [],
     onToggleTrackedTelemetry: handleToggleTrackedTelemetry,
     clockSyncRepeaters: appSettings?.clock_sync_repeaters ?? [],

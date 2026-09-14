@@ -12,6 +12,16 @@ from app.send_attempts import (
     MIN_MESSAGE_RETRIES,
 )
 
+# Live feed comparison defaults (also mirrored in frontend/src/types.ts).
+DEFAULT_LIVE_FEED_URL = "https://live.meshcore.ca"
+DEFAULT_LIVE_FEED_CHANNEL = "Public"
+# Setting entry meaning "every channel this node knows" (its keys are what let
+# us decrypt the remote packet feed, so this covers private channels too).
+ALL_LIVE_FEED_CHANNELS = "*"
+DEFAULT_LIVE_FEED_POLL_INTERVAL = 900
+MIN_LIVE_FEED_POLL_INTERVAL = 60
+MAX_LIVE_FEED_POLL_INTERVAL = 86400
+
 # Valid MeshCore contact types: 0=unknown, 1=client, 2=repeater, 3=room, 4=sensor.
 # Corrupted radio data can produce values outside this range.
 _VALID_CONTACT_TYPES = frozenset({0, 1, 2, 3, 4})
@@ -1697,6 +1707,37 @@ class AppSettings(BaseModel):
             "ERR_CODE_UNSUPPORTED_CMD. Read-only mode overrides this."
         ),
     )
+    live_feed_enabled: bool = Field(
+        default=False,
+        description=(
+            "Periodically mirror channel messages from a public CoreScope instance "
+            "(live.meshcore.ca) so they can be compared with what this node heard"
+        ),
+    )
+    live_feed_url: str = Field(
+        default=DEFAULT_LIVE_FEED_URL,
+        description="Base URL of the CoreScope instance to compare against",
+    )
+    live_feed_region: str = Field(
+        default="",
+        description=(
+            "CoreScope region filter (observer IATA code, comma-separated for several; "
+            "empty = every region the instance aggregates). Unrelated to MeshCore "
+            "flood-scope regions."
+        ),
+    )
+    live_feed_channels: list[str] = Field(
+        default_factory=lambda: [ALL_LIVE_FEED_CHANNELS],
+        description=(
+            "Channels to compare: '*' for every channel this node knows (private ones "
+            "included), or channel keys / 'Public' / '#hashtag' names. Remote packets are "
+            "decrypted locally with these keys."
+        ),
+    )
+    live_feed_poll_interval: int = Field(
+        default=DEFAULT_LIVE_FEED_POLL_INTERVAL,
+        description="Seconds between live feed polls",
+    )
 
 
 class BusyChannel(BaseModel):
@@ -1898,6 +1939,132 @@ class RepeaterClockDriftStats(BaseModel):
     bucket_seconds: int = Field(default=3600, description="Width of each over_time bucket")
 
 
+# ---------------------------------------------------------------------------
+# Live feed comparison (live.meshcore.ca / CoreScope)
+#
+# A remote CoreScope instance aggregates what many observers heard. Mirroring
+# its channel messages and joining them to ours on byte-identical plaintext
+# answers "what did the mesh see that this node missed, and vice versa".
+# ---------------------------------------------------------------------------
+
+
+class LiveFeedStatus(BaseModel):
+    """Configuration plus the sync loop's last known state."""
+
+    enabled: bool
+    url: str
+    region: str = Field(description="CoreScope region filter in effect ('' = all)")
+    channels: list[str] = Field(default_factory=list)
+    poll_interval: int
+    syncing: bool = False
+    last_sync_started_at: int | None = None
+    last_sync_completed_at: int | None = None
+    last_success_at: int | None = None
+    last_error: str | None = None
+    last_fetched: int = Field(default=0, description="Messages checked by the last sync")
+    last_changed: int = Field(default=0, description="Rows the last sync inserted or refreshed")
+    last_sync_full: bool = Field(
+        default=False,
+        description=(
+            "True when the last sync walked the whole lookback window (first sync, or the "
+            "URL/region/channels changed) rather than only what was observed since the one before"
+        ),
+    )
+    mirrored_messages: int = Field(default=0, description="Rows in the local mirror")
+    unresolved_channels: list[str] = Field(
+        default_factory=list,
+        description="Configured entries that matched no channel key on this node",
+    )
+    source: str = Field(
+        default="packets",
+        description=(
+            "'packets' when remote GRP_TXT packets are decrypted locally (any channel "
+            "this node has a key for); 'channel_messages' when only the remote "
+            "instance's own decryption of Public/hashtag channels was available"
+        ),
+    )
+
+
+class LiveCompareCounts(BaseModel):
+    both: int = 0
+    node_only: int = 0
+    live_only: int = 0
+
+
+class LiveCompareChannelCounts(LiveCompareCounts):
+    channel_name: str
+    channel_key: str | None = None
+
+
+class LiveCompareBucket(LiveCompareCounts):
+    timestamp: int = Field(description="Unix timestamp at the start of the bucket")
+
+
+class LiveCompareStats(BaseModel):
+    """How this node's channel reception lines up with the live feed."""
+
+    status: LiveFeedStatus
+    both: int
+    node_only: int
+    live_only: int
+    node_coverage_pct: float | None = Field(
+        default=None,
+        description="Share of messages the live feed saw that this node also heard",
+    )
+    live_coverage_pct: float | None = Field(
+        default=None,
+        description="Share of messages this node heard that the live feed also saw",
+    )
+    channels: list[LiveCompareChannelCounts] = Field(default_factory=list)
+    bucket_seconds: int = 3600
+    over_time: list[LiveCompareBucket] = Field(default_factory=list)
+
+
+LiveCompareSource = Literal["both", "node", "live"]
+
+
+class LiveCompareMessage(BaseModel):
+    """One message from the merged node + live view."""
+
+    key: str = Field(description="Stable row key for the client (message id or packet hash)")
+    source: LiveCompareSource
+    channel_key: str | None = None
+    channel_name: str | None = None
+    sender: str | None = None
+    text: str = Field(description="Full stored text, including the 'Sender: ' prefix")
+    sender_timestamp: int | None = None
+    seen_at: int = Field(description="Earliest time either side saw the message")
+    outgoing: bool = False
+    message_id: int | None = None
+    node_received_at: int | None = None
+    node_path_count: int | None = None
+    live_first_seen: int | None = None
+    live_last_seen: int | None = None
+    live_repeats: int | None = None
+    live_observers: list[str] = Field(default_factory=list)
+    live_hops: int | None = None
+    live_snr: float | None = None
+
+
+class LiveCompareMessagesResponse(BaseModel):
+    window: str
+    messages: list[LiveCompareMessage]
+    total: int
+    counts: LiveCompareCounts = Field(
+        description="Totals for the same filters, across all pages and every source"
+    )
+
+
+class LiveFeedRegion(BaseModel):
+    code: str
+    label: str
+
+
+class LiveFeedRegionsResponse(BaseModel):
+    url: str
+    regions: list[LiveFeedRegion]
+
+
 class StatisticsResponse(BaseModel):
     """Mesh statistics over one selectable time window.
 
@@ -1928,6 +2095,13 @@ class StatisticsResponse(BaseModel):
     packets_over_time: PacketsOverTime
     noise_floor: NoiseFloorHistoryStats
     repeater_clock_drift: RepeaterClockDriftStats
+    live_compare: LiveCompareStats | None = Field(
+        default=None,
+        description=(
+            "Node vs live-feed comparison; null until the live feed is enabled or has "
+            "mirrored at least one message"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
