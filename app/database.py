@@ -132,9 +132,32 @@ CREATE TABLE IF NOT EXISTS app_settings (
     telemetry_interval_hours INTEGER DEFAULT 8,
     vapid_private_key TEXT DEFAULT '',
     vapid_public_key TEXT DEFAULT '',
-    push_conversations TEXT DEFAULT '[]'
+    push_conversations TEXT DEFAULT '[]',
+    live_feed_enabled INTEGER DEFAULT 0,
+    live_feed_url TEXT DEFAULT 'https://live.meshcore.ca',
+    live_feed_region TEXT DEFAULT '',
+    live_feed_channels TEXT DEFAULT '["Public"]',
+    live_feed_poll_interval INTEGER DEFAULT 300
 );
 INSERT OR IGNORE INTO app_settings (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS live_feed_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    packet_hash TEXT NOT NULL UNIQUE,
+    channel_name TEXT NOT NULL,
+    channel_key TEXT,
+    sender TEXT,
+    text TEXT NOT NULL,
+    sender_timestamp INTEGER,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    repeats INTEGER NOT NULL DEFAULT 1,
+    observers TEXT NOT NULL DEFAULT '[]',
+    hops INTEGER,
+    snr REAL,
+    scope_name TEXT,
+    fetched_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS fanout_configs (
     id TEXT PRIMARY KEY,
@@ -300,6 +323,9 @@ CREATE INDEX IF NOT EXISTS idx_repeater_telemetry_pk_ts
 CREATE INDEX IF NOT EXISTS idx_bot_runs_bot_started
     ON bot_runs(bot_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bot_runs_started ON bot_runs(started_at);
+CREATE INDEX IF NOT EXISTS idx_live_feed_messages_match
+    ON live_feed_messages(channel_key, text, COALESCE(sender_timestamp, 0));
+CREATE INDEX IF NOT EXISTS idx_live_feed_messages_first_seen ON live_feed_messages(first_seen);
 """
 
 

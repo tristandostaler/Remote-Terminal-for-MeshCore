@@ -44,6 +44,11 @@ const baseSettings: AppSettings = {
   telemetry_interval_hours: 8,
   telemetry_routed_hourly: false,
   virtual_node_allow_admin_commands: false,
+  live_feed_enabled: false,
+  live_feed_url: 'https://live.meshcore.ca',
+  live_feed_region: '',
+  live_feed_channels: ['Public'],
+  live_feed_poll_interval: 300,
 };
 
 function renderSection(overrides: Partial<AppSettings> = {}) {

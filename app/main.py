@@ -70,6 +70,7 @@ from app.routers import (
     fanout,
     health,
     images,
+    live_feed,
     messages,
     packets,
     push,
@@ -87,6 +88,7 @@ from app.routers import (
     virtual_node as virtual_node_router,
 )
 from app.security import add_optional_basic_auth_middleware
+from app.services.live_feed import start_live_feed, stop_live_feed
 from app.services.radio_runtime import radio_runtime as radio_manager
 from app.services.radio_stats import start_radio_stats_sampling, stop_radio_stats_sampling
 from app.version_info import get_app_build_info
@@ -128,6 +130,8 @@ async def lifespan(app: FastAPI):
 
     await ensure_default_channels()
     await start_radio_stats_sampling()
+    # Live feed comparison (live.meshcore.ca mirror). Idle until enabled in settings.
+    await start_live_feed()
 
     # Always start connection monitor (even if initial connection failed)
     await radio_manager.start_connection_monitor()
@@ -184,6 +188,7 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down")
+    await stop_live_feed()
     try:
         await virtual_node.stop()
     except Exception:
@@ -272,6 +277,7 @@ app.include_router(packets.router, prefix="/api")
 app.include_router(read_state.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 app.include_router(statistics.router, prefix="/api")
+app.include_router(live_feed.router, prefix="/api")
 app.include_router(push.router, prefix="/api")
 app.include_router(voice.router, prefix="/api")
 app.include_router(images.router, prefix="/api")

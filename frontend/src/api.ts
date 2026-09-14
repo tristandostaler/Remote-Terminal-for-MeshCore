@@ -54,6 +54,11 @@ import type {
   TrackedTelemetryResponse,
   StatisticsResponse,
   StatsWindow,
+  LiveCompareMessagesResponse,
+  LiveCompareSource,
+  LiveCompareStats,
+  LiveFeedRegionsResponse,
+  LiveFeedStatus,
   TraceResponse,
   UnreadCounts,
   Bot,
@@ -710,6 +715,37 @@ export const api = {
     fetchJson<StatisticsResponse>(
       window ? `/statistics?window=${encodeURIComponent(window)}` : '/statistics'
     ),
+
+  // Live feed comparison (live.meshcore.ca / CoreScope)
+  getLiveFeedStatus: (signal?: AbortSignal) =>
+    fetchJson<LiveFeedStatus>('/live-feed/status', { signal }),
+  syncLiveFeed: () => fetchJson<LiveFeedStatus>('/live-feed/sync', { method: 'POST' }),
+  getLiveFeedRegions: () => fetchJson<LiveFeedRegionsResponse>('/live-feed/regions'),
+  getLiveCompareStats: (window: StatsWindow, signal?: AbortSignal) =>
+    fetchJson<LiveCompareStats | null>(`/live-feed/stats?window=${encodeURIComponent(window)}`, {
+      signal,
+    }),
+  getLiveCompareMessages: (
+    params: {
+      window: StatsWindow;
+      channelKey?: string | null;
+      source?: LiveCompareSource | null;
+      q?: string;
+      limit?: number;
+      offset?: number;
+    },
+    signal?: AbortSignal
+  ) => {
+    const search = new URLSearchParams({ window: params.window });
+    if (params.channelKey) search.set('channel_key', params.channelKey);
+    if (params.source) search.set('source', params.source);
+    if (params.q) search.set('q', params.q);
+    if (params.limit !== undefined) search.set('limit', String(params.limit));
+    if (params.offset !== undefined) search.set('offset', String(params.offset));
+    return fetchJson<LiveCompareMessagesResponse>(`/live-feed/messages?${search.toString()}`, {
+      signal,
+    });
+  },
 
   // Granular repeater endpoints
   repeaterLogin: (publicKey: string, password: string) =>

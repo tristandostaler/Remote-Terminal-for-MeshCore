@@ -123,7 +123,8 @@ frontend/src/
 │   ├── SecurityWarningModal.tsx # Startup warning for trusted-network / bot execution posture
 │   ├── RawPacketList.tsx
 │   ├── RawPacketFeedView.tsx   # Live raw packet feed + session stats drawer
-│   ├── StatisticsView.tsx      # Read-only mesh network stats tool (window selector, region-scope adoption)
+│   ├── StatisticsView.tsx      # Read-only mesh network stats tool (window selector, region-scope adoption, live feed comparison)
+│   ├── liveCompare/            # Live Compare page (node vs live.meshcore.ca), its Statistics section, shared source vocabulary
 │   ├── RawPacketDetailModal.tsx # On-demand packet inspector dialog
 │   ├── MapView.tsx
 │   ├── TracePane.tsx           # Multi-hop route trace builder/results view
@@ -209,6 +210,7 @@ frontend/src/
     ├── settingsMessageRetries.test.tsx
     ├── settingsModal.test.tsx
     ├── statisticsView.test.tsx
+    ├── liveCompareView.test.tsx
     ├── sidebar.test.tsx
     ├── statusBar.test.tsx
     ├── tracePane.test.tsx
@@ -382,6 +384,7 @@ Supported routes:
 - `#search`
 - `#trace`
 - `#statistics`
+- `#live-compare`
 - `#node-stats/{publicKey}`
 - `#node-stats/{publicKey}/{label}`
 - `#settings/{section}`
@@ -390,7 +393,7 @@ Supported routes:
 - `#contact/{publicKey}`
 - `#contact/{publicKey}/{label}`
 
-Where `{section}` is one of `radio`, `local`, `radio-app`, `database`, `fanout`, or `about`.
+Where `{section}` is one of `radio`, `local`, `https`, `radio-app`, `virtual-node`, `fanout`, `live-feed`, `database`, or `about`.
 
 Legacy name-based channel/contact hashes are still accepted for compatibility, and the
 pre-move `#settings/statistics` hash redirects to the `#statistics` tool.
@@ -613,6 +616,15 @@ Presentation rules that exist for a reason:
 - **A flat series gets a sentence, not a chart.** When the spread is within the in-sync band the ticks collapse onto the same value and the chart reads as broken, so the pane says "Held within Xs across N readings" instead.
 - **A wrong server clock is called out**, not silently spread across every row: when `|median_drift_seconds|` exceeds the in-sync band the panel says to check this server first.
 - **The histogram does not force `interval={0}`.** Nine range labels fit a desktop pane and turn into mush on a phone; the tooltip still names every bin.
+
+## Live Compare page (`components/liveCompare/`)
+
+Sidebar › Tools › Live Compare (`#live-compare`, conversation type `liveCompare`). Lists this node's channel messages merged with the ones the observers feeding a CoreScope instance (live.meshcore.ca) decrypted — one row per message, marked **Both** (green), **Node only** (blue) or **Live only** (amber). The colours are fixed in `liveCompareShared.tsx` (`SOURCE_META`) and shared with the Statistics section so a verdict looks the same everywhere.
+
+- `LiveCompareView.tsx` owns one window (`WindowSelector` from `nodeStatsShared.tsx`), a source filter with counts, a channel filter (only when more than one channel is compared) and a text filter. Two requests: `api.getLiveCompareStats` (status + tiles) and `api.getLiveCompareMessages` (paged list). The stats call is re-polled every 30 s; a newer `last_sync_completed_at` reloads the list, so the page follows the backend sync loop without WebSocket plumbing. `seen_at` (earliest of node receive / live first observation) is the sort key.
+- Empty state when the feature is off points at Settings › Live Compare via `onOpenSettings` (App's `onOpenLiveFeedSettings`).
+- `LiveCompareStatsPanel.tsx` is the `LiveComparePanel` rendered by `StatisticsView` from `stats.live_compare` (tiles, stacked over-time chart, per-channel table); it is omitted while the backend returns `null`.
+- `settings/SettingsLiveFeedSection.tsx` (section key `live-feed`) edits the five `live_feed_*` settings. The region picker is filled from `api.getLiveFeedRegions()` (the instance's own list, IATA codes) with a free-text fallback for several codes; a status box shows the last sync and a Sync now button.
 
 ## Node stats page
 

@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.models import StatisticsResponse
 from app.repository import StatisticsRepository
+from app.services.live_feed import get_compare_stats as get_live_compare_stats
 from app.services.radio_stats import get_noise_floor_history
 from app.stats_windows import DEFAULT_STATS_WINDOW, STATS_WINDOWS, is_valid_window, window_cutoff
 
@@ -27,4 +28,5 @@ async def get_statistics(
 
     data = await StatisticsRepository.get_all(window)
     data["noise_floor"] = await get_noise_floor_history(window_cutoff(window, int(time.time())))
+    data["live_compare"] = await get_live_compare_stats(window)
     return StatisticsResponse(**data)

@@ -31,7 +31,7 @@ app/
 ├── migrations/          # Schema migrations (SQLite user_version, per-version modules)
 ├── models.py            # Pydantic request/response models and typed write contracts (for example ContactUpsert)
 ├── version_info.py      # Unified version/build metadata resolution for debug + startup surfaces
-├── repository/          # Data access layer (contacts, channels, messages, raw_packets, settings, fanout, push_subscriptions, repeater_telemetry, contact_telemetry, noise_floor)
+├── repository/          # Data access layer (contacts, channels, messages, raw_packets, settings, fanout, push_subscriptions, repeater_telemetry, contact_telemetry, noise_floor, live_feed)
 ├── services/            # Shared orchestration/domain services
 │   ├── messages.py              # Shared message creation, dedup, ACK application
 │   ├── message_send.py          # Direct send, channel send, resend workflows
@@ -44,6 +44,7 @@ app/
 │   ├── radio_lifecycle.py       # Post-connect setup and reconnect/setup helpers
 │   ├── radio_commands.py        # Radio config/private-key command workflows
 │   ├── radio_stats.py           # Local radio stats sampling; persists the noise-floor series
+│   ├── live_feed.py             # Mirrors a CoreScope (live.meshcore.ca) channel feed; node-vs-live comparison
 │   └── radio_runtime.py         # Router/dependency seam over the global RadioManager
 ├── radio.py             # RadioManager transport/session state + lock management
 ├── radio_sync.py        # Polling, sync, periodic advertisement loop
@@ -85,6 +86,7 @@ app/
     ├── fanout.py
     ├── repeaters.py
     ├── statistics.py
+    ├── live_feed.py        # Live feed comparison status/sync/regions/stats/messages
     ├── push.py
     ├── virtual_node.py     # Operator view/actions for the virtual companion node
     └── ws.py
@@ -261,6 +263,16 @@ The retry deliberately does not re-run `_ensure_on_radio` — re-adding the cont
 - `code_1` is a keyed MAC over the payload, not a stable per-region id: `code = HMAC-SHA256(SHA256("#" + region_name)[:16], payload_type || payload)[:2]` (firmware `TransportKeyStore.cpp`; reserved values `0x0000`/`0xFFFF` are nudged to `0x0001`/`0xFFFE`). There is **no** reverse lookup table — to name a packet's region you recompute the code per candidate region and check for a match (`app/region_resolver.py`).
 - Candidate region names come from `app_settings.known_regions` (user-editable, seeded by migration 063 from `flood_scope` + channel `flood_scope_override`).
 - Channel messages persist `messages.transport_code` (uint16, NULL = unscoped plain flood) and `messages.region` (resolved name, NULL = scoped but no list match) at ingest, so the chat region badge survives raw-packet purge. The packet inspector (`GET /packets/{id}` and the `raw_packet` WS broadcast) resolves region on the fly against the current list since it still holds the raw payload.
+
+### Live feed comparison (`app/services/live_feed.py`, `app/repository/live_feed.py`)
+
+live.meshcore.ca runs [CoreScope](https://github.com/Kpa-clawbot/CoreScope), whose read API is public. `GET {url}/api/channels/{name}/messages?limit=&offset=&region=` returns server-decrypted channel messages (`sender`, `text`, `sender_timestamp`, `timestamp`, `packetHash`, `repeats`, `observers`, `hops`, `snr`), newest observation first. `GET {url}/api/config/regions` lists the observer regions (IATA airport codes) the instance aggregates.
+
+- **Settings** live in `app_settings`: `live_feed_enabled` (default off), `live_feed_url`, `live_feed_region` (comma-separated IATA codes, `''` = all — passed through as CoreScope's `region=` query param and **unrelated to MeshCore flood-scope regions**), `live_feed_channels` (JSON list of names, default `["Public"]`), `live_feed_poll_interval`. The PATCH handler normalizes them and wakes the loop via `notify_settings_changed()`.
+- **Mirror table** `live_feed_messages` (migration 088): one row per remote `packetHash`, with `text` re-keyed to the local form (`"Sender: body"`, MCMP-decoded) and `channel_key` resolved from the name (`Public` → constant, `#name` → `hashtag_channel_key`, else a local channel with that name; unresolved names stay `NULL` and are reported as `unresolved_channels`).
+- **Matching** is the channel-echo dedup identity — `(conversation_key, text, COALESCE(sender_timestamp, 0))` — via a LEFT JOIN in `LiveFeedRepository._merged_cte`. Channel encryption is deterministic, so identical plaintext + sender clock is the same packet on the air. Verdicts: `both`, `node` (node only), `live` (live only). The join is evaluated at read time, so a late historical decrypt flips a row from live-only to both without a re-sync.
+- **Sync loop** starts in `main.py` lifespan and idles while disabled. Each sync walks pages (200/page, capped) until a page's newest activity is older than `LOOKBACK_SECONDS` (7 days), upserts by hash, then prunes rows older than `RETENTION_SECONDS` (90 days). Failures are recorded in `LiveFeedState.last_error` and back off to at least 2 minutes. `_transport` is the httpx test seam.
+- **Read side**: `GET /live-feed/stats?window=` (also embedded as `live_compare` in `GET /statistics`, `null` until enabled or something is mirrored), `GET /live-feed/messages?window=&channel_key=&source=&q=&limit=&offset=` (merged list ordered by `seen_at`, the earliest time either side saw the message; `counts` ignore `source` so filter chips can show numbers), `GET /live-feed/status`, `POST /live-feed/sync`, `GET /live-feed/regions` (502 when the instance is unreachable).
 
 ### Statistics time windows
 
@@ -492,7 +504,14 @@ Verified against the meshcore firmware (`examples/simple_room_server/MyMesh.cpp`
 - `POST /fanout/bots/disable-until-restart` — stop bot modules and keep bots disabled until restart
 
 ### Statistics
-- `GET /statistics?window=1h|1d|1w|1M|3M|1y|all` — aggregated mesh network stats for one time window (entity counts, message/packet splits, activity windows, busiest channels, packet activity series, `region_scope` regional adoption, noise-floor series). Defaults to `1d`; unknown windows are 422
+- `GET /statistics?window=1h|1d|1w|1M|3M|1y|all` — aggregated mesh network stats for one time window (entity counts, message/packet splits, activity windows, busiest channels, packet activity series, `region_scope` regional adoption, noise-floor series, `live_compare`). Defaults to `1d`; unknown windows are 422
+
+### Live feed comparison
+- `GET /live-feed/status` — config in effect + sync state
+- `POST /live-feed/sync` — run one sync now (works while disabled)
+- `GET /live-feed/regions` — regions the configured CoreScope instance knows (502 if unreachable)
+- `GET /live-feed/stats?window=` — both / node-only / live-only counts, per channel and over time; `null` when nothing is mirrored
+- `GET /live-feed/messages?window=&channel_key=&source=both|node|live&q=&limit=&offset=` — merged, de-duplicated message list
 
 ### Push
 - `GET /push/vapid-public-key` — VAPID public key for browser `PushManager.subscribe()`
@@ -653,6 +672,7 @@ tests/
 ├── test_send_attempts.py       # Direct-message attempt cap: clamping and resolution
 ├── test_send_tracker.py        # In-flight send registry: cancel, supersede, housekeeping
 ├── test_statistics.py          # Statistics aggregation
+├── test_live_feed.py           # Live feed mirror, node-vs-live comparison, and its endpoints
 ├── test_stats_windows.py       # Statistics window keys and chart bucketing
 ├── test_telemetry_interval.py  # Telemetry interval scheduling math
 ├── test_version_info.py        # Version/build metadata resolution

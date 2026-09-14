@@ -14,7 +14,8 @@ interface ParsedHashConversation {
     | 'trace'
     | 'bots'
     | 'statistics'
-    | 'nodeStats';
+    | 'nodeStats'
+    | 'liveCompare';
   /** Conversation identity token (channel key or contact public key, or legacy name token) */
   name: string;
   /** Optional human-readable label segment (ignored for identity resolution) */
@@ -32,6 +33,7 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
   'radio-app',
   'virtual-node',
   'fanout',
+  'live-feed',
   'database',
   'about',
 ];
@@ -70,6 +72,10 @@ export function parseHashConversation(): ParsedHashConversation | null {
   // old settings hash working as a redirect.
   if (hash === 'statistics' || hash === 'settings/statistics') {
     return { type: 'statistics', name: 'statistics' };
+  }
+
+  if (hash === 'live-compare') {
+    return { type: 'liveCompare', name: 'liveCompare' };
   }
 
   // Node stats deep link: #node-stats/{publicKey} (optionally /{label})
@@ -195,6 +201,7 @@ export function getConversationHash(conv: Conversation | null): string {
   if (conv.type === 'search') return '#search';
   if (conv.type === 'trace') return '#trace';
   if (conv.type === 'statistics') return '#statistics';
+  if (conv.type === 'liveCompare') return '#live-compare';
   if (conv.type === 'bots') {
     return conv.botId ? `#bots/${encodeURIComponent(conv.botId)}` : '#bots';
   }

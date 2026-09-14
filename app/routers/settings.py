@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 from app import host_clock
 from app.models import (
     CONTACT_TYPE_REPEATER,
+    MAX_LIVE_FEED_POLL_INTERVAL,
+    MIN_LIVE_FEED_POLL_INTERVAL,
     AppSettings,
     HostClockStatus,
     ImageCodecSelectionRequest,
@@ -24,6 +26,7 @@ from app.send_attempts import (
     MIN_MESSAGE_RETRIES,
     clamp_message_retries,
 )
+from app.services import live_feed
 from app.telemetry_interval import (
     DEFAULT_TELEMETRY_INTERVAL_HOURS,
     TELEMETRY_INTERVAL_OPTIONS_HOURS,
@@ -111,6 +114,31 @@ class AppSettingsUpdate(BaseModel):
         description=(
             "When enabled, tracked repeaters with a direct or routed (non-flood) "
             "path are polled every hour instead of on the normal scheduled interval."
+        ),
+    )
+    live_feed_enabled: bool | None = Field(
+        default=None,
+        description="Mirror channel messages from a CoreScope instance for comparison",
+    )
+    live_feed_url: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Base URL of the CoreScope instance (default https://live.meshcore.ca)",
+    )
+    live_feed_region: str | None = Field(
+        default=None,
+        max_length=200,
+        description="CoreScope region filter: observer IATA code(s), comma-separated; '' = all",
+    )
+    live_feed_channels: list[str] | None = Field(
+        default=None,
+        description="Channel names to mirror, as the CoreScope instance names them",
+    )
+    live_feed_poll_interval: int | None = Field(
+        default=None,
+        description=(
+            f"Seconds between live feed polls ({MIN_LIVE_FEED_POLL_INTERVAL}-"
+            f"{MAX_LIVE_FEED_POLL_INTERVAL}); out-of-range values are clamped"
         ),
     )
     virtual_node_allow_admin_commands: bool | None = Field(
@@ -330,6 +358,31 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
         )
         kwargs["virtual_node_allow_admin_commands"] = update.virtual_node_allow_admin_commands
 
+    # Live feed comparison. Names are trimmed/deduped here so the sync loop and
+    # the UI agree on what "configured channels" means; the URL loses any
+    # trailing slash so path joins stay predictable.
+    live_feed_changed = False
+    if update.live_feed_enabled is not None:
+        kwargs["live_feed_enabled"] = update.live_feed_enabled
+        live_feed_changed = True
+    if update.live_feed_url is not None:
+        url = update.live_feed_url.strip().rstrip("/")
+        if url and not url.lower().startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=400, detail="live_feed_url must start with http:// or https://"
+            )
+        kwargs["live_feed_url"] = url
+        live_feed_changed = True
+    if update.live_feed_region is not None:
+        kwargs["live_feed_region"] = live_feed.normalize_region(update.live_feed_region)
+        live_feed_changed = True
+    if update.live_feed_channels is not None:
+        kwargs["live_feed_channels"] = live_feed.normalize_channel_names(update.live_feed_channels)
+        live_feed_changed = True
+    if update.live_feed_poll_interval is not None:
+        kwargs["live_feed_poll_interval"] = update.live_feed_poll_interval
+        live_feed_changed = True
+
     # Direct-message attempt cap. Clamped rather than 400-ed so a stale client
     # sending an out-of-range value can't brick settings saves.
     if update.max_message_retries is not None:
@@ -395,6 +448,9 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
 
             logger.info("known_regions changed; scheduling region backfill")
             asyncio.create_task(backfill_message_regions(result.known_regions))
+
+        if live_feed_changed:
+            live_feed.notify_settings_changed()
 
         return result
 

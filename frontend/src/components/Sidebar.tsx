@@ -9,6 +9,7 @@ import {
   CheckCheck,
   ChevronDown,
   ChevronRight,
+  GitCompareArrows,
   LockOpen,
   Logs,
   Map,
@@ -881,6 +882,18 @@ export function Sidebar({
               type: 'statistics',
               id: 'statistics',
               name: 'Statistics',
+            }),
+        }),
+        renderSidebarActionRow({
+          key: 'tool-live-compare',
+          active: isActive('liveCompare', 'liveCompare'),
+          icon: <GitCompareArrows className="h-4 w-4" />,
+          label: 'Live Compare',
+          onClick: () =>
+            handleSelectConversation({
+              type: 'liveCompare',
+              id: 'liveCompare',
+              name: 'Live Compare',
             }),
         }),
         renderSidebarActionRow({

@@ -8,13 +8,30 @@ import aiosqlite
 from app import clock_drift
 from app.clock_drift import DRIFT_BUCKET_SECONDS
 from app.database import db
-from app.models import AppSettings
+from app.models import (
+    DEFAULT_LIVE_FEED_CHANNEL,
+    DEFAULT_LIVE_FEED_POLL_INTERVAL,
+    DEFAULT_LIVE_FEED_URL,
+    MAX_LIVE_FEED_POLL_INTERVAL,
+    MIN_LIVE_FEED_POLL_INTERVAL,
+    AppSettings,
+)
 from app.path_utils import bucket_path_hash_widths, bucket_region_scope, parse_packet_envelope
 from app.send_attempts import clamp_message_retries
 from app.stats_windows import DEFAULT_STATS_WINDOW, bucket_seconds_for_span, window_cutoff
 from app.telemetry_interval import DEFAULT_TELEMETRY_INTERVAL_HOURS
 
 logger = logging.getLogger(__name__)
+
+
+def clamp_live_feed_poll_interval(value: Any) -> int:
+    """Clamp a poll interval into the supported range; garbage becomes the default."""
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_LIVE_FEED_POLL_INTERVAL
+    return max(MIN_LIVE_FEED_POLL_INTERVAL, min(MAX_LIVE_FEED_POLL_INTERVAL, seconds))
+
 
 SECONDS_1H = 3600
 SECONDS_24H = 86400
@@ -54,7 +71,9 @@ class AppSettingsRepository:
                    clock_sync_repeaters, clock_autofix_repeaters,
                    auto_resend_channel, max_message_retries,
                    telemetry_interval_hours, telemetry_routed_hourly,
-                   virtual_node_allow_admin_commands
+                   virtual_node_allow_admin_commands,
+                   live_feed_enabled, live_feed_url, live_feed_region,
+                   live_feed_channels, live_feed_poll_interval
             FROM app_settings WHERE id = 1
             """
         ) as cursor:
@@ -179,6 +198,36 @@ class AppSettingsRepository:
         except (KeyError, TypeError, IndexError):
             virtual_node_allow_admin_commands = False
 
+        # Live feed comparison. Every field is guarded independently so a row
+        # written before migration 088 (or edited by hand) still loads.
+        try:
+            live_feed_enabled = bool(row["live_feed_enabled"])
+        except (KeyError, TypeError, IndexError):
+            live_feed_enabled = False
+        try:
+            live_feed_url = (row["live_feed_url"] or "").strip() or DEFAULT_LIVE_FEED_URL
+        except (KeyError, TypeError, IndexError):
+            live_feed_url = DEFAULT_LIVE_FEED_URL
+        try:
+            live_feed_region = (row["live_feed_region"] or "").strip()
+        except (KeyError, TypeError, IndexError):
+            live_feed_region = ""
+        live_feed_channels: list[str] = [DEFAULT_LIVE_FEED_CHANNEL]
+        try:
+            raw_live_channels = row["live_feed_channels"]
+            if raw_live_channels:
+                parsed_channels = json.loads(raw_live_channels)
+                if isinstance(parsed_channels, list):
+                    live_feed_channels = [
+                        str(name) for name in parsed_channels if str(name).strip()
+                    ]
+        except (json.JSONDecodeError, TypeError, KeyError, IndexError):
+            live_feed_channels = [DEFAULT_LIVE_FEED_CHANNEL]
+        try:
+            live_feed_poll_interval = clamp_live_feed_poll_interval(row["live_feed_poll_interval"])
+        except (KeyError, TypeError, IndexError):
+            live_feed_poll_interval = DEFAULT_LIVE_FEED_POLL_INTERVAL
+
         return AppSettings(
             max_radio_contacts=row["max_radio_contacts"],
             auto_decrypt_dm_on_advert=bool(row["auto_decrypt_dm_on_advert"]),
@@ -199,6 +248,11 @@ class AppSettingsRepository:
             telemetry_interval_hours=telemetry_interval_hours,
             telemetry_routed_hourly=telemetry_routed_hourly,
             virtual_node_allow_admin_commands=virtual_node_allow_admin_commands,
+            live_feed_enabled=live_feed_enabled,
+            live_feed_url=live_feed_url,
+            live_feed_region=live_feed_region,
+            live_feed_channels=live_feed_channels,
+            live_feed_poll_interval=live_feed_poll_interval,
         )
 
     @staticmethod
@@ -224,6 +278,11 @@ class AppSettingsRepository:
         telemetry_interval_hours: int | None = None,
         telemetry_routed_hourly: bool | None = None,
         virtual_node_allow_admin_commands: bool | None = None,
+        live_feed_enabled: bool | None = None,
+        live_feed_url: str | None = None,
+        live_feed_region: str | None = None,
+        live_feed_channels: list[str] | None = None,
+        live_feed_poll_interval: int | None = None,
     ) -> None:
         """Apply field updates using an already-acquired connection.
 
@@ -309,6 +368,26 @@ class AppSettingsRepository:
             updates.append("virtual_node_allow_admin_commands = ?")
             params.append(1 if virtual_node_allow_admin_commands else 0)
 
+        if live_feed_enabled is not None:
+            updates.append("live_feed_enabled = ?")
+            params.append(1 if live_feed_enabled else 0)
+
+        if live_feed_url is not None:
+            updates.append("live_feed_url = ?")
+            params.append(live_feed_url.strip().rstrip("/") or DEFAULT_LIVE_FEED_URL)
+
+        if live_feed_region is not None:
+            updates.append("live_feed_region = ?")
+            params.append(live_feed_region.strip())
+
+        if live_feed_channels is not None:
+            updates.append("live_feed_channels = ?")
+            params.append(json.dumps(live_feed_channels))
+
+        if live_feed_poll_interval is not None:
+            updates.append("live_feed_poll_interval = ?")
+            params.append(clamp_live_feed_poll_interval(live_feed_poll_interval))
+
         if updates:
             query = f"UPDATE app_settings SET {', '.join(updates)} WHERE id = 1"
             async with conn.execute(query, params):
@@ -344,6 +423,11 @@ class AppSettingsRepository:
         telemetry_interval_hours: int | None = None,
         telemetry_routed_hourly: bool | None = None,
         virtual_node_allow_admin_commands: bool | None = None,
+        live_feed_enabled: bool | None = None,
+        live_feed_url: str | None = None,
+        live_feed_region: str | None = None,
+        live_feed_channels: list[str] | None = None,
+        live_feed_poll_interval: int | None = None,
     ) -> AppSettings:
         """Update app settings. Only provided fields are updated."""
         async with db.tx() as conn:
@@ -368,6 +452,11 @@ class AppSettingsRepository:
                 telemetry_interval_hours=telemetry_interval_hours,
                 telemetry_routed_hourly=telemetry_routed_hourly,
                 virtual_node_allow_admin_commands=virtual_node_allow_admin_commands,
+                live_feed_enabled=live_feed_enabled,
+                live_feed_url=live_feed_url,
+                live_feed_region=live_feed_region,
+                live_feed_channels=live_feed_channels,
+                live_feed_poll_interval=live_feed_poll_interval,
             )
             return await AppSettingsRepository._get_in_conn(conn)
 

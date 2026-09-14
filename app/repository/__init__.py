@@ -16,6 +16,7 @@ from app.repository.contacts import (
 )
 from app.repository.fanout import FanoutConfigRepository
 from app.repository.image import ImageRepository
+from app.repository.live_feed import LiveFeedRepository
 from app.repository.messages import MessageRepository
 from app.repository.noise_floor import NoiseFloorRepository
 from app.repository.raw_packets import RawPacketRepository
@@ -45,6 +46,7 @@ __all__ = [
     "FanoutConfigRepository",
     "AeicImageRepository",
     "ImageRepository",
+    "LiveFeedRepository",
     "MessageRepository",
     "NoiseFloorRepository",
     "RawPacketRepository",
