@@ -25,9 +25,11 @@ import {
   MIN_LIVE_FEED_POLL_INTERVAL,
 } from '../../types';
 import { Button } from '../ui/button';
+import { Checkbox } from '../ui/checkbox';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Switch } from '../ui/switch';
+import { isPublicChannelKey, PUBLIC_CHANNEL_KEY } from '../../utils/publicChannel';
 import { describeSync, liveChannelUrl, liveHostLabel } from '../liveCompare/liveCompareShared';
 
 const POLL_INTERVAL_OPTIONS: { value: number; label: string }[] = [
@@ -40,16 +42,11 @@ const POLL_INTERVAL_OPTIONS: { value: number; label: string }[] = [
 ];
 
 const CUSTOM_REGION = '__custom__';
+/** Setting entry meaning "every channel this node knows" (mirrors app/models.py). */
+const ALL_CHANNELS = '*';
 
 const selectClass =
   'h-9 rounded-md border border-input bg-background px-3 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2';
-
-function parseChannelList(text: string): string[] {
-  return text
-    .split(/[,\n]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
 
 function parseRegionList(text: string): string {
   return text
@@ -75,7 +72,6 @@ export function SettingsLiveFeedSection({
   className?: string;
 }) {
   const [url, setUrl] = useState(appSettings.live_feed_url);
-  const [channelsText, setChannelsText] = useState(appSettings.live_feed_channels.join(', '));
   const [regionText, setRegionText] = useState(appSettings.live_feed_region);
   const [regions, setRegions] = useState<LiveFeedRegion[] | null>(null);
   const [regionsError, setRegionsError] = useState<string | null>(null);
@@ -87,10 +83,6 @@ export function SettingsLiveFeedSection({
 
   // Keep the drafts in step with saved settings (another tab, a reset, ...).
   useEffect(() => setUrl(appSettings.live_feed_url), [appSettings.live_feed_url]);
-  useEffect(
-    () => setChannelsText(appSettings.live_feed_channels.join(', ')),
-    [appSettings.live_feed_channels]
-  );
   useEffect(() => setRegionText(appSettings.live_feed_region), [appSettings.live_feed_region]);
 
   const refreshStatus = useCallback(async () => {
@@ -147,13 +139,6 @@ export function SettingsLiveFeedSection({
     if (next !== appSettings.live_feed_url) void save('url', { live_feed_url: next });
   };
 
-  const commitChannels = () => {
-    const next = parseChannelList(channelsText);
-    const current = appSettings.live_feed_channels;
-    const same = next.length === current.length && next.every((name, i) => name === current[i]);
-    if (!same) void save('channels', { live_feed_channels: next.length ? next : ['Public'] });
-  };
-
   const commitRegion = (value: string) => {
     const next = parseRegionList(value);
     setRegionText(next);
@@ -173,12 +158,55 @@ export function SettingsLiveFeedSection({
     }
   };
 
-  // Suggest the channels this node already carries; Public is always first.
-  const channelSuggestions = useMemo(() => {
-    const names = new Set<string>(['Public']);
-    for (const c of channels) if (c.name) names.add(c.name);
-    return [...names];
+  // The channels on offer are the ones this node holds a key for -- that key
+  // is what decrypts the remote packets, so private channels qualify as much
+  // as Public. Public is always listed, joined or not.
+  const channelOptions = useMemo(() => {
+    const byKey = new Map<string, { key: string; name: string; isHashtag: boolean }>();
+    for (const c of channels) {
+      byKey.set(c.key.toUpperCase(), {
+        key: c.key.toUpperCase(),
+        name: c.name,
+        isHashtag: c.is_hashtag,
+      });
+    }
+    if (!byKey.has(PUBLIC_CHANNEL_KEY)) {
+      byKey.set(PUBLIC_CHANNEL_KEY, { key: PUBLIC_CHANNEL_KEY, name: 'Public', isHashtag: false });
+    }
+    return [...byKey.values()].sort((a, b) => {
+      if (isPublicChannelKey(a.key)) return -1;
+      if (isPublicChannelKey(b.key)) return 1;
+      return a.name.localeCompare(b.name);
+    });
   }, [channels]);
+
+  const allChannels = appSettings.live_feed_channels.includes(ALL_CHANNELS);
+  // Entries may be keys or names (older configs); match either.
+  const selectedKeys = useMemo(() => {
+    const entries = appSettings.live_feed_channels.map((e) => e.trim());
+    const upper = new Set(entries.map((e) => e.toUpperCase()));
+    const names = new Set(entries.map((e) => e.toLowerCase()));
+    return new Set(
+      channelOptions
+        .filter((c) => upper.has(c.key) || names.has(c.name.toLowerCase()))
+        .map((c) => c.key)
+    );
+  }, [appSettings.live_feed_channels, channelOptions]);
+
+  const saveChannels = (keys: Set<string>) =>
+    save('channels', { live_feed_channels: keys.size ? [...keys] : [PUBLIC_CHANNEL_KEY] });
+
+  const toggleChannel = (key: string, checked: boolean) => {
+    const next = new Set(allChannels ? channelOptions.map((c) => c.key) : selectedKeys);
+    if (checked) next.add(key);
+    else next.delete(key);
+    void saveChannels(next);
+  };
+
+  const setAllChannels = (checked: boolean) => {
+    if (checked) void save('channels', { live_feed_channels: [ALL_CHANNELS] });
+    else void saveChannels(new Set(selectedKeys.size ? selectedKeys : [PUBLIC_CHANNEL_KEY]));
+  };
 
   const selectedRegionCodes = appSettings.live_feed_region
     ? appSettings.live_feed_region.split(',')
@@ -192,7 +220,9 @@ export function SettingsLiveFeedSection({
     regionSelectValue = selectedRegionCodes[0];
   }
   const host = liveHostLabel(appSettings.live_feed_url);
-  const firstChannel = appSettings.live_feed_channels[0] ?? 'Public';
+  // The remote instance can only name Public and hashtag channels, so the
+  // cross-check link always points at Public.
+  const firstChannel = 'Public';
   const syncBusy = busy === 'sync' || status?.syncing === true;
 
   return (
@@ -313,28 +343,60 @@ export function SettingsLiveFeedSection({
           </p>
         </div>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="live-feed-channels">Channels to compare</Label>
-          <Input
-            id="live-feed-channels"
-            list="live-feed-channel-suggestions"
-            value={channelsText}
-            placeholder="Public, #montreal"
-            onChange={(e) => setChannelsText(e.target.value)}
-            onBlur={commitChannels}
-            onKeyDown={blurOnEnter}
-            className="h-9 text-sm"
-          />
-          <datalist id="live-feed-channel-suggestions">
-            {channelSuggestions.map((name) => (
-              <option key={name} value={name} />
-            ))}
-          </datalist>
-          <p className="text-[0.8125rem] text-muted-foreground">
-            Comma-separated, named as the instance names them. The instance must hold a channel's
-            key to decrypt it; Public and community hashtag channels usually qualify. This node
-            needs the key too for a message to count as heard by both.
-          </p>
+        <div className="space-y-2" data-testid="live-feed-channels">
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-0.5">
+              <Label htmlFor="live-feed-all-channels">Channels to compare</Label>
+              <p className="text-[0.8125rem] text-muted-foreground">
+                Remote packets are decrypted here with this node&apos;s keys, so every channel you
+                can read compares, private ones included. The instance never needs your keys.
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="text-xs text-muted-foreground">All channels</span>
+              <Switch
+                id="live-feed-all-channels"
+                checked={allChannels}
+                disabled={busy === 'channels'}
+                onCheckedChange={setAllChannels}
+              />
+            </div>
+          </div>
+          <ul className="grid gap-1 sm:grid-cols-2">
+            {channelOptions.map((channel) => {
+              const checked = allChannels || selectedKeys.has(channel.key);
+              const kind = isPublicChannelKey(channel.key)
+                ? 'public'
+                : channel.isHashtag
+                  ? 'hashtag'
+                  : 'private';
+              return (
+                <li key={channel.key} className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    id={`live-feed-channel-${channel.key}`}
+                    checked={checked}
+                    disabled={allChannels || busy === 'channels'}
+                    onCheckedChange={(value) => toggleChannel(channel.key, value === true)}
+                  />
+                  <Label
+                    htmlFor={`live-feed-channel-${channel.key}`}
+                    className="flex min-w-0 cursor-pointer items-center gap-1.5 font-normal"
+                  >
+                    <span className="truncate">{channel.name}</span>
+                    <span className="shrink-0 text-[0.625rem] uppercase tracking-wider text-muted-foreground">
+                      {kind}
+                    </span>
+                  </Label>
+                </li>
+              );
+            })}
+          </ul>
+          {status && status.source === 'channel_messages' ? (
+            <p className="text-[0.8125rem] text-warning">
+              {host} does not expose raw packets, so only its own decryption of Public and hashtag
+              channels can be compared; private channels stay out of reach on this instance.
+            </p>
+          ) : null}
         </div>
 
         <div className="space-y-1.5">
@@ -395,6 +457,14 @@ export function SettingsLiveFeedSection({
               <span className="text-muted-foreground">Mirrored messages:</span>{' '}
               {status.mirrored_messages.toLocaleString()}
               {status.last_fetched ? ` · ${status.last_fetched} checked on the last sync` : ''}
+            </div>
+            <div>
+              <span className="text-muted-foreground">Comparing:</span>{' '}
+              {status.channels.length ? status.channels.join(', ') : 'no channels'}
+              {' · '}
+              {status.source === 'packets'
+                ? 'remote packets decrypted with this node’s keys'
+                : 'the instance’s own decryption (Public and hashtag channels)'}
             </div>
             {status.unresolved_channels.length > 0 && (
               <div className="text-warning">

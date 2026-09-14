@@ -24,6 +24,7 @@ const status: LiveFeedStatus = {
   last_fetched: 3,
   mirrored_messages: 2,
   unresolved_channels: [],
+  source: 'packets',
 };
 
 const stats: LiveCompareStats = {

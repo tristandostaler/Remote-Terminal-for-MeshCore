@@ -9,7 +9,7 @@ from app import clock_drift
 from app.clock_drift import DRIFT_BUCKET_SECONDS
 from app.database import db
 from app.models import (
-    DEFAULT_LIVE_FEED_CHANNEL,
+    ALL_LIVE_FEED_CHANNELS,
     DEFAULT_LIVE_FEED_POLL_INTERVAL,
     DEFAULT_LIVE_FEED_URL,
     MAX_LIVE_FEED_POLL_INTERVAL,
@@ -212,7 +212,7 @@ class AppSettingsRepository:
             live_feed_region = (row["live_feed_region"] or "").strip()
         except (KeyError, TypeError, IndexError):
             live_feed_region = ""
-        live_feed_channels: list[str] = [DEFAULT_LIVE_FEED_CHANNEL]
+        live_feed_channels: list[str] = [ALL_LIVE_FEED_CHANNELS]
         try:
             raw_live_channels = row["live_feed_channels"]
             if raw_live_channels:
@@ -222,7 +222,7 @@ class AppSettingsRepository:
                         str(name) for name in parsed_channels if str(name).strip()
                     ]
         except (json.JSONDecodeError, TypeError, KeyError, IndexError):
-            live_feed_channels = [DEFAULT_LIVE_FEED_CHANNEL]
+            live_feed_channels = [ALL_LIVE_FEED_CHANNELS]
         try:
             live_feed_poll_interval = clamp_live_feed_poll_interval(row["live_feed_poll_interval"])
         except (KeyError, TypeError, IndexError):

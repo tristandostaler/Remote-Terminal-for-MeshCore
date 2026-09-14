@@ -116,7 +116,7 @@ beforeEach(() => {
     live_feed_enabled: false,
     live_feed_url: 'https://live.meshcore.ca',
     live_feed_region: '',
-    live_feed_channels: ['Public'],
+    live_feed_channels: ['*'],
     live_feed_poll_interval: 300,
   });
   mockedApi.getRadioConfig.mockResolvedValue({
@@ -1194,7 +1194,7 @@ describe('SettingsFanoutSection', () => {
       live_feed_enabled: false,
       live_feed_url: 'https://live.meshcore.ca',
       live_feed_region: '',
-      live_feed_channels: ['Public'],
+      live_feed_channels: ['*'],
       live_feed_poll_interval: 300,
     });
 

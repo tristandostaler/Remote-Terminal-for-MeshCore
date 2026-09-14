@@ -132,7 +132,10 @@ class AppSettingsUpdate(BaseModel):
     )
     live_feed_channels: list[str] | None = Field(
         default=None,
-        description="Channel names to mirror, as the CoreScope instance names them",
+        description=(
+            "Channels to compare: '*' for every channel this node knows, or channel keys, "
+            "'Public', '#hashtag' names or local channel names"
+        ),
     )
     live_feed_poll_interval: int | None = Field(
         default=None,

@@ -1,23 +1,34 @@
 """Mirror channel messages from a CoreScope instance (live.meshcore.ca) and compare.
 
 live.meshcore.ca runs CoreScope, whose HTTP API is public and unauthenticated.
-``GET /api/channels/{name}/messages?limit=&offset=&region=`` returns the
-server-decrypted messages of one channel, newest observation first, with the
-same ``sender`` / ``text`` / ``sender_timestamp`` triple we store locally.
-That is everything the comparison needs: the message is re-keyed to the local
-``(conversation_key, text, sender_timestamp)`` dedup identity and the SQL in
-``LiveFeedRepository`` does the rest.
+Two of its endpoints matter here:
+
+* ``GET /api/packets?type=5&since=&limit=&offset=&region=`` -- every GRP_TXT
+  (channel text) transmission the observers heard, with the raw packet bytes
+  (``raw_hex``) or at least the encrypted envelope (``decoded_json`` carrying
+  ``channelHash`` / ``mac`` / ``encryptedData``). We decrypt those ourselves
+  with the keys this node holds, exactly as ``packet_processor`` does for the
+  radio, so **any** channel the node knows compares -- Public, hashtag and
+  private ones alike -- whether or not the remote instance has the key.
+* ``GET /api/channels/{name}/messages`` -- the remote instance's own decryption
+  of one channel. Only channels it holds a key for (Public, community hashtag
+  channels). Used as a fallback when the packet feed does not expose
+  ciphertext, so Public still compares against a locked-down instance.
+
+Either way the message is re-keyed to the local ``(conversation_key, text,
+sender_timestamp)`` dedup identity and the SQL in ``LiveFeedRepository`` does
+the rest.
 
 Region: CoreScope tags every observation with the observer's IATA region code
 (``meshcore/{IATA}/{PUBKEY}/packets``). ``region=YUL,YQB`` restricts the feed
 to messages heard by observers in those regions. This is a geographic filter
 on the *remote* side and has nothing to do with MeshCore flood-scope regions.
 
-Polling: the remote list is ordered by latest observation, so an old message
-that a late repeater re-observes floats back to the top. Each sync therefore
-walks pages until the page's newest activity is older than ``LOOKBACK_SECONDS``
-(or a page cap), upserting by packet hash. Cheap, idempotent, and it needs no
-cursor state to survive restarts.
+Polling: each sync walks the packet feed back to ``LOOKBACK_SECONDS`` (bounded
+by ``since=`` and a page cap), upserting by packet hash. Cheap, idempotent, and
+it needs no cursor state to survive restarts. The fallback list is ordered by
+latest observation, so it is walked until a whole page is older than the
+horizon.
 """
 
 from __future__ import annotations
@@ -25,16 +36,24 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import time
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 
-from app.channel_constants import PUBLIC_CHANNEL_KEY, hashtag_channel_key, is_public_channel_name
+from app.channel_constants import (
+    PUBLIC_CHANNEL_KEY,
+    PUBLIC_CHANNEL_NAME,
+    hashtag_channel_key,
+    is_public_channel_name,
+)
 from app.compression.metadata import decode_and_describe
-from app.models import AppSettings
+from app.decoder import PayloadType, decrypt_group_text, extract_payload, get_packet_payload_type
+from app.models import ALL_LIVE_FEED_CHANNELS, AppSettings
 from app.repository.channels import ChannelRepository
 from app.repository.live_feed import LiveFeedRepository
 from app.repository.settings import AppSettingsRepository
@@ -51,6 +70,9 @@ LOOKBACK_SECONDS = 7 * 86400
 RETENTION_SECONDS = 90 * 86400
 PAGE_LIMIT = 200
 MAX_PAGES_PER_CHANNEL = 40
+# The packet feed covers every channel at once, so it gets a larger budget.
+MAX_PACKET_PAGES = 100
+GROUP_TEXT_PAYLOAD_TYPE = int(PayloadType.GROUP_TEXT)
 HTTP_TIMEOUT_SECONDS = 20.0
 REGIONS_CACHE_SECONDS = 600
 # Wait this long after a failed sync before letting the loop retry, whatever
@@ -71,6 +93,7 @@ class LiveFeedState:
     last_error: str | None = None
     last_fetched: int = 0
     unresolved_channels: list[str] = field(default_factory=list)
+    source: str = "packets"
 
 
 _state = LiveFeedState()
@@ -261,6 +284,34 @@ class LiveFeedClient:
             raise LiveFeedError("channel messages: missing 'messages' list")
         return [m for m in messages if isinstance(m, dict)], _coerce_int(payload.get("total"))
 
+    async def fetch_packets(
+        self,
+        *,
+        since: int,
+        offset: int = 0,
+        limit: int | None = None,
+        region_code: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """One page of GRP_TXT transmissions heard since ``since`` (unix seconds)."""
+        params: dict[str, Any] = {
+            "type": GROUP_TEXT_PAYLOAD_TYPE,
+            "limit": limit or PAGE_LIMIT,
+            "offset": offset,
+            "order": "desc",
+            "since": datetime.fromtimestamp(since, tz=UTC).isoformat().replace("+00:00", "Z"),
+        }
+        if region_code:
+            params["region"] = region_code
+        payload = await self._get_json("/api/packets", params)
+        if isinstance(payload, list):
+            return [p for p in payload if isinstance(p, dict)], None
+        if not isinstance(payload, dict):
+            raise LiveFeedError("packets: unexpected response shape")
+        packets = payload.get("packets")
+        if not isinstance(packets, list):
+            raise LiveFeedError("packets: missing 'packets' list")
+        return [p for p in packets if isinstance(p, dict)], _coerce_int(payload.get("total"))
+
     async def fetch_regions(self) -> list[dict[str, str]]:
         payload = await self._get_json("/api/config/regions")
         regions: list[dict[str, str]] = []
@@ -285,54 +336,252 @@ class LiveFeedClient:
 # ─── Channel resolution ────────────────────────────────────────────────────
 
 
-async def resolve_channel_keys(names: list[str]) -> dict[str, str | None]:
-    """Map live channel names to this node's channel keys.
+@dataclass(frozen=True)
+class ComparedChannel:
+    """One channel the comparison covers: its local key, display name and hash byte."""
 
-    ``Public`` and hashtag channels derive their key from the name alone, so
-    they compare even before the node has joined them. Anything else must
-    match a local channel by name (case-insensitive) or stays unresolved.
+    key: str
+    name: str
+
+    @property
+    def key_bytes(self) -> bytes:
+        return bytes.fromhex(self.key)
+
+    @property
+    def hash_byte(self) -> int:
+        return hashlib.sha256(self.key_bytes).digest()[0]
+
+    @property
+    def remote_name(self) -> str | None:
+        """The name the remote instance would list this channel under, if any.
+
+        Public and hashtag channels are named the same everywhere; a private
+        channel's local name means nothing to another instance.
+        """
+        if self.key == PUBLIC_CHANNEL_KEY:
+            return PUBLIC_CHANNEL_NAME
+        if self.name.startswith("#") and hashtag_channel_key(self.name) == self.key:
+            return self.name
+        return None
+
+
+def _is_channel_key(value: str) -> bool:
+    return len(value) == 32 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
+async def resolve_compared_channels(
+    entries: list[str],
+) -> tuple[list[ComparedChannel], list[str]]:
+    """Turn the ``live_feed_channels`` setting into channels with keys.
+
+    Accepted entries: ``*`` (every channel this node knows), a 32-hex channel
+    key, ``Public``, a ``#hashtag`` name (key derived from the name, so it
+    compares before the node joins it), or the name of a local channel.
+    Returns the channels plus the entries nothing could be made of.
     """
-    resolved: dict[str, str | None] = {}
-    local_by_name: dict[str, str] | None = None
-    for name in names:
-        if is_public_channel_name(name):
-            resolved[name] = PUBLIC_CHANNEL_KEY
+    local = await ChannelRepository.get_all()
+    by_key = {channel.key.upper(): channel for channel in local}
+    by_name = {channel.name.casefold(): channel for channel in local}
+
+    chosen: dict[str, ComparedChannel] = {}
+    unresolved: list[str] = []
+
+    def add(key: str, fallback_name: str) -> None:
+        key = key.upper()
+        if key in chosen:
+            return
+        channel = by_key.get(key)
+        if channel is not None:
+            name = channel.name
+        elif key == PUBLIC_CHANNEL_KEY:
+            name = PUBLIC_CHANNEL_NAME
+        else:
+            name = fallback_name
+        chosen[key] = ComparedChannel(key=key, name=name)
+
+    for raw in entries:
+        entry = (raw or "").strip()
+        if not entry:
             continue
-        if name.startswith("#"):
-            resolved[name] = hashtag_channel_key(name)
-            continue
-        if local_by_name is None:
-            local_by_name = {
-                channel.name.casefold(): channel.key.upper()
-                for channel in await ChannelRepository.get_all()
-            }
-        resolved[name] = local_by_name.get(name.casefold())
-    return resolved
+        if entry == ALL_LIVE_FEED_CHANNELS:
+            for channel in local:
+                add(channel.key, channel.name)
+            add(PUBLIC_CHANNEL_KEY, PUBLIC_CHANNEL_NAME)
+        elif _is_channel_key(entry):
+            add(entry, entry[:8].upper())
+        elif is_public_channel_name(entry):
+            add(PUBLIC_CHANNEL_KEY, PUBLIC_CHANNEL_NAME)
+        elif entry.startswith("#"):
+            add(hashtag_channel_key(entry), entry)
+        elif entry.casefold() in by_name:
+            channel = by_name[entry.casefold()]
+            add(channel.key, channel.name)
+        else:
+            unresolved.append(entry)
+    return list(chosen.values()), unresolved
 
 
 async def compare_channel_keys(settings: AppSettings | None = None) -> list[str]:
     settings = settings or await AppSettingsRepository.get()
-    mapping = await resolve_channel_keys(normalize_channel_names(settings.live_feed_channels))
-    return [key for key in mapping.values() if key]
+    channels, _unresolved = await resolve_compared_channels(settings.live_feed_channels)
+    return [channel.key for channel in channels]
 
 
 # ─── Sync ──────────────────────────────────────────────────────────────────
 
 
-async def _sync_channel(
-    client: LiveFeedClient, channel_name: str, channel_key: str | None, now: int
-) -> int:
-    """Walk one channel's remote pages back to the lookback horizon."""
+def _packet_payload(packet: dict[str, Any]) -> bytes | None:
+    """The GRP_TXT payload bytes of a remote packet, from whichever field carries them."""
+    raw_hex = packet.get("raw_hex") or packet.get("raw")
+    if isinstance(raw_hex, str) and raw_hex:
+        try:
+            raw = bytes.fromhex(raw_hex)
+        except ValueError:
+            raw = b""
+        if raw and get_packet_payload_type(raw) == PayloadType.GROUP_TEXT:
+            payload = extract_payload(raw)
+            if payload:
+                return payload
+    decoded = packet.get("decoded_json") or packet.get("decoded")
+    if isinstance(decoded, str):
+        try:
+            decoded = json.loads(decoded)
+        except ValueError:
+            decoded = None
+    if isinstance(decoded, dict):
+        nested = decoded.get("payload")
+        envelope: dict[str, Any] = nested if isinstance(nested, dict) else decoded
+        channel_hash = _coerce_int(envelope.get("channelHash"))
+        mac = envelope.get("mac")
+        encrypted = envelope.get("encryptedData")
+        if channel_hash is not None and isinstance(mac, str) and isinstance(encrypted, str):
+            try:
+                return bytes([channel_hash & 0xFF]) + bytes.fromhex(mac) + bytes.fromhex(encrypted)
+            except ValueError:
+                return None
+    return None
+
+
+def _corescope_hash(payload: bytes) -> str:
+    """CoreScope's transmission hash: SHA256(payload_type_byte || payload)[:16]."""
+    return hashlib.sha256(bytes([GROUP_TEXT_PAYLOAD_TYPE]) + payload).hexdigest()[:16]
+
+
+def _packet_hops(packet: dict[str, Any]) -> int | None:
+    path = packet.get("path_json")
+    if isinstance(path, str):
+        try:
+            path = json.loads(path)
+        except ValueError:
+            return None
+    if isinstance(path, dict):
+        path = path.get("hops")
+    return len(path) if isinstance(path, list) else None
+
+
+def decrypt_live_packet(
+    packet: dict[str, Any], channels_by_hash: dict[int, list[ComparedChannel]]
+) -> dict[str, Any] | None:
+    """Decrypt one remote GRP_TXT packet with the compared channels' keys.
+
+    Returns a ``live_feed_messages`` row, or ``None`` when the packet carries
+    no ciphertext or belongs to a channel we hold no key for.
+    """
+    payload = _packet_payload(packet)
+    if payload is None or len(payload) < 3:
+        return None
+    for channel in channels_by_hash.get(payload[0], ()):
+        decrypted = decrypt_group_text(payload, channel.key_bytes)
+        if decrypted is None:
+            continue
+        text = normalize_live_text(decrypted.sender, decrypted.message)
+        if not text.strip():
+            return None
+        latest = _parse_iso(packet.get("timestamp"))
+        first = _parse_iso(packet.get("first_seen")) or latest or int(time.time())
+        latest = latest or first
+        observer = packet.get("observer_name") or packet.get("observer_id")
+        return {
+            "packet_hash": str(packet.get("hash") or _corescope_hash(payload)),
+            "channel_name": channel.name,
+            "channel_key": channel.key,
+            "sender": decrypted.sender,
+            "text": text,
+            "sender_timestamp": decrypted.timestamp,
+            "first_seen": first,
+            "last_seen": max(first, latest),
+            "repeats": _coerce_int(packet.get("observation_count")) or 1,
+            "observers": [str(observer)] if observer else [],
+            "hops": _packet_hops(packet),
+            "snr": _coerce_float(packet.get("snr")),
+            "scope_name": None,
+        }
+    return None
+
+
+@dataclass
+class _PacketSyncResult:
+    fetched: int = 0
+    packets: int = 0
+    with_ciphertext: int = 0
+
+
+async def _sync_packets(
+    client: LiveFeedClient, channels: list[ComparedChannel], now: int
+) -> _PacketSyncResult:
+    """Walk the remote GRP_TXT feed back to the horizon and decrypt what we can."""
+    result = _PacketSyncResult()
+    channels_by_hash: dict[int, list[ComparedChannel]] = defaultdict(list)
+    for channel in channels:
+        channels_by_hash[channel.hash_byte].append(channel)
+    since = now - LOOKBACK_SECONDS
+    # The packet endpoint takes one region at a time; several codes mean one
+    # walk each, de-duplicated by hash in the upsert.
+    region_codes: list[str | None] = [c for c in client.region.split(",") if c] or [None]
+    seen: set[str] = set()
+    for region_code in region_codes:
+        offset = 0
+        for _page in range(MAX_PACKET_PAGES):
+            packets, total = await client.fetch_packets(
+                since=since, offset=offset, region_code=region_code
+            )
+            if not packets:
+                break
+            rows: list[dict[str, Any]] = []
+            for packet in packets:
+                payload_type = _coerce_int(packet.get("payload_type"))
+                if payload_type is not None and payload_type != GROUP_TEXT_PAYLOAD_TYPE:
+                    continue
+                result.packets += 1
+                if _packet_payload(packet) is not None:
+                    result.with_ciphertext += 1
+                row = decrypt_live_packet(packet, channels_by_hash)
+                if row is not None and row["packet_hash"] not in seen:
+                    seen.add(row["packet_hash"])
+                    rows.append(row)
+            await LiveFeedRepository.upsert_many(rows)
+            result.fetched += len(rows)
+            offset += len(packets)
+            if len(packets) < PAGE_LIMIT or (total is not None and offset >= total):
+                break
+    return result
+
+
+async def _sync_channel_messages(client: LiveFeedClient, channel: ComparedChannel, now: int) -> int:
+    """Fallback: walk the remote instance's own decryption of one channel."""
+    remote_name = channel.remote_name
+    if remote_name is None:
+        return 0
     horizon = now - LOOKBACK_SECONDS
     fetched = 0
     offset = 0
     for _page in range(MAX_PAGES_PER_CHANNEL):
-        messages, total = await client.fetch_channel_messages(channel_name, offset=offset)
+        messages, total = await client.fetch_channel_messages(remote_name, offset=offset)
         if not messages:
             break
         rows = [
             row
-            for row in (normalize_live_message(m, channel_name, channel_key) for m in messages)
+            for row in (normalize_live_message(m, channel.name, channel.key) for m in messages)
             if row is not None
         ]
         await LiveFeedRepository.upsert_many(rows)
@@ -362,23 +611,48 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
         _state.syncing = True
         _state.last_sync_started_at = now
         try:
-            names = normalize_channel_names(settings.live_feed_channels)
-            mapping = await resolve_channel_keys(names)
-            _state.unresolved_channels = [name for name, key in mapping.items() if not key]
-            await LiveFeedRepository.assign_channel_keys(mapping)
+            channels, unresolved = await resolve_compared_channels(settings.live_feed_channels)
+            _state.unresolved_channels = unresolved
+            await LiveFeedRepository.assign_channel_keys(
+                {channel.name: channel.key for channel in channels}
+            )
             client = LiveFeedClient(settings.live_feed_url, settings.live_feed_region)
             fetched = 0
-            for name in names:
-                fetched += await _sync_channel(client, name, mapping[name], now)
+            source = "packets"
+            if channels:
+                packet_feed_available = True
+                try:
+                    packet_result = await _sync_packets(client, channels, now)
+                except LiveFeedError as exc:
+                    # An instance without the packet feed (or one that hides it)
+                    # still serves its own decryption of the public channels.
+                    if "HTTP 404" not in str(exc) and "HTTP 403" not in str(exc):
+                        raise
+                    logger.info("Live feed packet endpoint unavailable (%s); falling back", exc)
+                    packet_feed_available = False
+                    packet_result = _PacketSyncResult()
+                fetched = packet_result.fetched
+                # Fall back to the remote instance's own decryption when the
+                # packet feed gave us nothing to decrypt: no feed at all, or
+                # packets stripped of their ciphertext.
+                if not packet_feed_available or (
+                    packet_result.packets > 0 and packet_result.with_ciphertext == 0
+                ):
+                    source = "channel_messages"
+                    for channel in channels:
+                        fetched += await _sync_channel_messages(client, channel, now)
+            _state.source = source
             await LiveFeedRepository.prune_older_than(now - RETENTION_SECONDS)
             _state.last_fetched = fetched
             _state.last_success_at = int(time.time())
             _state.last_error = None
             logger.info(
-                "Live feed sync: %d messages from %s (%s)",
+                "Live feed sync: %d messages from %s (%s, %d channels, via %s)",
                 fetched,
                 settings.live_feed_url,
                 settings.live_feed_region or "all regions",
+                len(channels),
+                source,
             )
         except LiveFeedError as exc:
             _state.last_error = str(exc)
@@ -455,11 +729,12 @@ def _wake_requested() -> bool:
 
 async def get_status(settings: AppSettings | None = None) -> dict[str, Any]:
     settings = settings or await AppSettingsRepository.get()
+    channels, _unresolved = await resolve_compared_channels(settings.live_feed_channels)
     return {
         "enabled": settings.live_feed_enabled,
         "url": settings.live_feed_url,
         "region": normalize_region(settings.live_feed_region),
-        "channels": normalize_channel_names(settings.live_feed_channels),
+        "channels": [channel.name for channel in channels],
         "poll_interval": settings.live_feed_poll_interval,
         "mirrored_messages": await LiveFeedRepository.count(),
         **asdict(_state),

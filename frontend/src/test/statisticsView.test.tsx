@@ -115,6 +115,7 @@ describe('StatisticsView', () => {
           last_fetched: 12,
           mirrored_messages: 40,
           unresolved_channels: [],
+          source: 'packets',
         },
         both: 30,
         node_only: 5,

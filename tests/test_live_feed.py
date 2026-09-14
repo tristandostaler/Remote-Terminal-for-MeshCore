@@ -41,14 +41,99 @@ def _live_message(sender: str, text: str, ts: int, *, seen: int | None = None, *
     return payload
 
 
-class FakeCoreScope:
-    """An httpx mock transport that serves CoreScope's channel endpoints."""
+PUBLIC_KEY_BYTES = bytes.fromhex(PUBLIC_CHANNEL_KEY)
+SECRET_KEY_HEX = "CD" * 16
+SECRET_KEY_BYTES = bytes.fromhex(SECRET_KEY_HEX)
 
-    def __init__(self, channels: dict[str, list[dict]], regions: dict[str, str] | None = None):
+
+def encrypt_group_text(channel_key: bytes, timestamp: int, sender: str, message: str) -> bytes:
+    """A complete FLOOD/GRP_TXT packet, encrypted the way the firmware does it."""
+    import hashlib
+    import hmac
+
+    from Crypto.Cipher import AES
+
+    plaintext = (
+        timestamp.to_bytes(4, "little") + b"\x00" + f"{sender}: {message}".encode() + b"\x00"
+    )
+    pad = (16 - len(plaintext) % 16) % 16 or 16
+    plaintext += bytes(pad)
+    ciphertext = AES.new(channel_key, AES.MODE_ECB).encrypt(plaintext)
+    mac = hmac.new(channel_key + bytes(16), ciphertext, hashlib.sha256).digest()[:2]
+    payload = hashlib.sha256(channel_key).digest()[0:1] + mac + ciphertext
+    return bytes([0x15, 0x00]) + payload
+
+
+def _live_packet(message: dict, channel_key: bytes) -> dict:
+    """The ``/api/packets`` row CoreScope would serve for one of our fake messages."""
+    raw = encrypt_group_text(
+        channel_key, message["sender_timestamp"], message["sender"], message["text"]
+    )
+    return {
+        "id": message["packetId"],
+        "raw_hex": raw.hex(),
+        "hash": message["packetHash"],
+        "first_seen": message["timestamp"],
+        "timestamp": message["timestamp"],
+        "route_type": 1,
+        "payload_type": 5,
+        "observation_count": message["repeats"],
+        "observer_name": message["observers"][0] if message["observers"] else None,
+        "snr": message["snr"],
+        "path_json": json.dumps(["ab"] * message["hops"]),
+    }
+
+
+class FakeCoreScope:
+    """An httpx mock transport that serves CoreScope's packet and channel endpoints.
+
+    ``channels`` maps a remote channel name to server-decrypted messages; each
+    is also served as an encrypted packet built with ``keys[name]`` (Public by
+    default), so the same fixture exercises both the packet path and the
+    channel-messages fallback.
+    """
+
+    def __init__(
+        self,
+        channels: dict[str, list[dict]],
+        regions: dict[str, str] | None = None,
+        keys: dict[str, bytes] | None = None,
+    ):
         self.channels = channels
+        self.keys = keys or {}
         self.regions = regions if regions is not None else {"YUL": "Montréal, CA"}
         self.requests: list[httpx.Request] = []
         self.fail_with: int | None = None
+        # 404 the packet feed (an older instance) -> the fallback path.
+        self.packets_enabled = True
+        # Serve packets without raw bytes or ciphertext (a locked-down instance).
+        self.strip_ciphertext = False
+        # Serve the encrypted envelope in decoded_json instead of raw_hex.
+        self.envelope_only = False
+
+    def all_packets(self) -> list[dict]:
+        packets: list[dict] = []
+        for name, messages in self.channels.items():
+            key = self.keys.get(name, PUBLIC_KEY_BYTES)
+            for message in messages:
+                packet = _live_packet(message, key)
+                if self.envelope_only:
+                    raw = bytes.fromhex(packet.pop("raw_hex"))
+                    payload = raw[2:]
+                    packet["decoded_json"] = json.dumps(
+                        {
+                            "type": "GRP_TXT",
+                            "channelHash": payload[0],
+                            "mac": payload[1:3].hex(),
+                            "encryptedData": payload[3:].hex(),
+                        }
+                    )
+                if self.strip_ciphertext:
+                    packet["raw_hex"] = None
+                    packet["decoded_json"] = json.dumps({"type": "GRP_TXT"})
+                packets.append(packet)
+        packets.sort(key=lambda p: p["timestamp"], reverse=True)
+        return packets
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -57,6 +142,21 @@ class FakeCoreScope:
         path = request.url.path
         if path == "/api/config/regions":
             return httpx.Response(200, json=self.regions)
+        if path == "/api/packets":
+            if not self.packets_enabled:
+                return httpx.Response(404, json={"error": "not found"})
+            assert request.url.params.get("type") == "5"
+            since = live_feed._parse_iso(request.url.params.get("since")) or 0
+            packets = [
+                p
+                for p in self.all_packets()
+                if (live_feed._parse_iso(p["timestamp"]) or 0) >= since
+            ]
+            limit = int(request.url.params.get("limit", "50"))
+            offset = int(request.url.params.get("offset", "0"))
+            return httpx.Response(
+                200, json={"packets": packets[offset : offset + limit], "total": len(packets)}
+            )
         if path.startswith("/api/channels/") and path.endswith("/messages"):
             name = httpx.URL(str(request.url)).path.split("/")[3]
             from urllib.parse import unquote
@@ -158,19 +258,43 @@ class TestNormalizeLiveMessage:
         ]
 
 
-class TestResolveChannelKeys:
+class TestResolveComparedChannels:
     @pytest.mark.asyncio
     async def test_public_and_hashtag_channels_resolve_without_local_rows(self, test_db):
-        mapping = await live_feed.resolve_channel_keys(["Public", "#bot", "Secret"])
-        assert mapping["Public"] == PUBLIC_CHANNEL_KEY
-        assert mapping["#bot"] == hashtag_channel_key("#bot")
-        assert mapping["Secret"] is None
+        channels, unresolved = await live_feed.resolve_compared_channels(
+            ["Public", "#bot", "Secret"]
+        )
+        assert [(c.key, c.name) for c in channels] == [
+            (PUBLIC_CHANNEL_KEY, "Public"),
+            (hashtag_channel_key("#bot"), "#bot"),
+        ]
+        assert unresolved == ["Secret"]
+        assert channels[0].remote_name == "Public"
+        assert channels[1].remote_name == "#bot"
 
     @pytest.mark.asyncio
-    async def test_other_names_resolve_against_local_channels(self, test_db):
-        await ChannelRepository.upsert("AB" * 16, "Secret")
-        mapping = await live_feed.resolve_channel_keys(["secret"])
-        assert mapping["secret"] == "AB" * 16
+    async def test_keys_and_local_names_resolve_and_private_channels_have_no_remote_name(
+        self, test_db
+    ):
+        await ChannelRepository.upsert(SECRET_KEY_HEX, "Secret")
+        channels, unresolved = await live_feed.resolve_compared_channels(
+            ["secret", SECRET_KEY_HEX.lower(), PUBLIC_CHANNEL_KEY]
+        )
+        assert unresolved == []
+        assert [(c.key, c.name) for c in channels] == [
+            (SECRET_KEY_HEX, "Secret"),
+            (PUBLIC_CHANNEL_KEY, "Public"),
+        ]
+        assert channels[0].remote_name is None
+
+    @pytest.mark.asyncio
+    async def test_star_means_every_local_channel_plus_public(self, test_db):
+        await ChannelRepository.upsert(SECRET_KEY_HEX, "Secret")
+        await ChannelRepository.upsert(hashtag_channel_key("#bot"), "#bot", is_hashtag=True)
+        channels, unresolved = await live_feed.resolve_compared_channels(["*"])
+        assert unresolved == []
+        # Every local channel (the test DB seeds #remoteterm) plus Public.
+        assert {c.name for c in channels} >= {"Secret", "#bot", "Public", "#remoteterm"}
 
 
 # ─── Sync + comparison ─────────────────────────────────────────────────────
@@ -195,11 +319,14 @@ class TestSyncAndCompare:
 
         assert state.last_error is None
         assert state.last_fetched == 2
+        assert state.source == "packets"
         assert state.unresolved_channels == []
         assert await LiveFeedRepository.count() == 2
-        # The region filter reaches the remote request, upper-cased and trimmed.
+        # Packets are fetched once for every channel, with the region filter
+        # upper-cased and trimmed, and never via the per-channel endpoint.
+        assert fake.requests[0].url.path == "/api/packets"
         assert fake.requests[0].url.params["region"] == "YUL"
-        assert fake.requests[0].url.path == "/api/channels/Public/messages"
+        assert not any(r.url.path.startswith("/api/channels/") for r in fake.requests)
 
         stats = await live_feed.get_compare_stats("1d")
         assert stats is not None
@@ -247,7 +374,8 @@ class TestSyncAndCompare:
         both = by_text["Alice: seen by both"]
         assert both["source"] == "both"
         assert both["message_id"] is not None
-        assert both["live_observers"] == ["obs-a", "obs-b"]
+        # The packet feed names the first observer and counts the observations.
+        assert both["live_observers"] == ["obs-a"]
         assert both["live_repeats"] == 2
         # Earliest of the two sides: we received it at ts+1, the mesh at ts+3.
         assert both["seen_at"] == NOW - 99
@@ -313,12 +441,12 @@ class TestSyncAndCompare:
         assert await LiveFeedRepository.count() == 1
         message = (await live_feed.list_messages("1d"))["messages"][0]
         assert message["live_repeats"] == 3
-        assert message["live_observers"] == ["a", "b", "c"]
+        assert message["live_observers"] == ["a"]
 
     @pytest.mark.asyncio
-    async def test_pagination_stops_at_the_lookback_horizon(self, test_db, monkeypatch):
+    async def test_packet_feed_is_paged_and_bounded_by_the_lookback(self, test_db, monkeypatch):
         monkeypatch.setattr(live_feed, "PAGE_LIMIT", 2)
-        recent = [_live_message("A", f"m{i}", NOW - i) for i in range(4)]
+        recent = [_live_message("A", f"m{i}", NOW - i) for i in range(5)]
         ancient = [
             _live_message("Z", f"z{i}", NOW - live_feed.LOOKBACK_SECONDS - 86400 * (i + 1))
             for i in range(4)
@@ -327,29 +455,140 @@ class TestSyncAndCompare:
         live_feed._transport = fake.transport
         await live_feed.sync_once(await _enable())
 
-        # 2 pages of recent rows, then the first ancient page ends the walk.
-        assert len(fake.requests) == 3
+        # since= keeps the ancient packets out; 5 recent rows take 3 pages.
         assert [r.url.params["offset"] for r in fake.requests] == ["0", "2", "4"]
-        assert await LiveFeedRepository.count() == 6
+        assert all(r.url.params["since"] for r in fake.requests)
+        assert await LiveFeedRepository.count() == 5
 
     @pytest.mark.asyncio
-    async def test_unresolved_channels_are_reported_and_stay_live_only(self, test_db):
-        fake = FakeCoreScope({"Secret": [_live_message("A", "psst", NOW - 5)]})
+    async def test_private_channels_compare_through_local_decryption(self, test_db):
+        """The remote instance has no key for Secret; we do, so its packets decrypt here."""
+        await ChannelRepository.upsert(SECRET_KEY_HEX, "Secret")
+        fake = FakeCoreScope(
+            {
+                "Secret": [_live_message("Zed", "private and heard by both", NOW - 40)],
+                "Public": [_live_message("Alice", "public and live only", NOW - 50)],
+            },
+            keys={"Secret": SECRET_KEY_BYTES},
+        )
+        live_feed._transport = fake.transport
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="Zed: private and heard by both",
+            received_at=NOW - 39,
+            conversation_key=SECRET_KEY_HEX,
+            sender_timestamp=NOW - 40,
+            sender_name="Zed",
+        )
+
+        state = await live_feed.sync_once(await _enable(live_feed_channels=["*"]))
+
+        assert state.last_error is None
+        assert state.source == "packets"
+        assert state.last_fetched == 2
+        by_text = {m["text"]: m for m in (await live_feed.list_messages("1d"))["messages"]}
+        secret = by_text["Zed: private and heard by both"]
+        assert secret["source"] == "both"
+        assert secret["channel_key"] == SECRET_KEY_HEX
+        assert secret["channel_name"] == "Secret"
+        assert by_text["Alice: public and live only"]["source"] == "live"
+        stats = await live_feed.get_compare_stats("1d")
+        assert stats is not None
+        assert {c["channel_name"]: c["both"] for c in stats["channels"]} == {
+            "Secret": 1,
+            "Public": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_packets_for_channels_we_hold_no_key_for_are_skipped(self, test_db):
+        fake = FakeCoreScope(
+            {"Secret": [_live_message("Zed", "unreadable", NOW - 40)]},
+            keys={"Secret": SECRET_KEY_BYTES},
+        )
+        live_feed._transport = fake.transport
+        state = await live_feed.sync_once(await _enable(live_feed_channels=["*"]))
+        assert state.last_error is None
+        assert state.last_fetched == 0
+        assert await LiveFeedRepository.count() == 0
+
+    @pytest.mark.asyncio
+    async def test_envelope_only_packets_decrypt_too(self, test_db):
+        """CoreScope may expose only decoded_json's channelHash/mac/encryptedData."""
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "via envelope", NOW - 20)]})
+        fake.envelope_only = True
+        live_feed._transport = fake.transport
+        state = await live_feed.sync_once(await _enable())
+        assert state.last_error is None
+        assert state.source == "packets"
+        assert [m["text"] for m in (await live_feed.list_messages("1d"))["messages"]] == [
+            "Alice: via envelope"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_server_decryption_when_packets_carry_no_ciphertext(self, test_db):
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "server side", NOW - 20)]})
+        fake.strip_ciphertext = True
+        live_feed._transport = fake.transport
+        state = await live_feed.sync_once(await _enable())
+        assert state.last_error is None
+        assert state.source == "channel_messages"
+        assert state.last_fetched == 1
+        assert any(r.url.path == "/api/channels/Public/messages" for r in fake.requests)
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_the_packet_feed_is_missing(self, test_db):
+        await ChannelRepository.upsert(SECRET_KEY_HEX, "Secret")
+        fake = FakeCoreScope(
+            {
+                "Public": [_live_message("Alice", "server side", NOW - 20)],
+                "Secret": [_live_message("Zed", "never reachable", NOW - 30)],
+            },
+            keys={"Secret": SECRET_KEY_BYTES},
+        )
+        fake.packets_enabled = False
+        live_feed._transport = fake.transport
+        state = await live_feed.sync_once(await _enable(live_feed_channels=["*"]))
+        assert state.last_error is None
+        assert state.source == "channel_messages"
+        # Only channels the remote instance can name are asked for: Public and
+        # hashtag channels, never the private one.
+        asked = {r.url.path for r in fake.requests if r.url.path.startswith("/api/channels/")}
+        assert "/api/channels/Public/messages" in asked
+        assert not any("Secret" in path for path in asked)
+        assert state.last_fetched == 1
+
+    @pytest.mark.asyncio
+    async def test_several_regions_walk_the_packet_feed_once_each(self, test_db):
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
+        live_feed._transport = fake.transport
+        await live_feed.sync_once(await _enable(live_feed_region="YUL,YQB"))
+        regions = [
+            r.url.params.get("region") for r in fake.requests if r.url.path == "/api/packets"
+        ]
+        assert regions == ["YUL", "YQB"]
+        assert await LiveFeedRepository.count() == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_entries_are_reported_until_the_channel_exists(self, test_db):
+        fake = FakeCoreScope(
+            {"Secret": [_live_message("A", "psst", NOW - 5)]}, keys={"Secret": SECRET_KEY_BYTES}
+        )
         live_feed._transport = fake.transport
         await live_feed.sync_once(await _enable(live_feed_channels=["Secret"]))
 
         status = await live_feed.get_status()
         assert status["unresolved_channels"] == ["Secret"]
-        messages = (await live_feed.list_messages("1d"))["messages"]
-        assert [m["source"] for m in messages] == ["live"]
-        assert messages[0]["channel_name"] == "Secret"
+        assert status["channels"] == []
+        assert await LiveFeedRepository.count() == 0
 
-        # Joining the channel locally makes the mirrored rows comparable.
-        await ChannelRepository.upsert("CD" * 16, "Secret")
-        await live_feed.sync_once(await AppSettingsRepository.get())
+        # Joining the channel locally gives the name a key, so its packets decrypt.
+        await ChannelRepository.upsert(SECRET_KEY_HEX, "Secret")
+        state = await live_feed.sync_once(await AppSettingsRepository.get())
+        assert state.unresolved_channels == []
         stats = await live_feed.get_compare_stats("1d")
         assert stats is not None
-        assert stats["channels"][0]["channel_key"] == "CD" * 16
+        assert stats["channels"][0]["channel_key"] == SECRET_KEY_HEX
+        assert stats["live_only"] == 1
 
     @pytest.mark.asyncio
     async def test_http_failure_is_recorded_not_raised(self, test_db):
@@ -388,7 +627,9 @@ class TestLiveFeedEndpoints:
         payload = response.json()
         assert payload["enabled"] is False
         assert payload["url"] == "https://live.meshcore.ca"
-        assert payload["channels"] == ["Public"]
+        # '*' resolved against a fresh node: its seeded channels plus Public.
+        assert "Public" in payload["channels"]
+        assert payload["source"] == "packets"
         assert payload["poll_interval"] == 300
         assert payload["mirrored_messages"] == 0
 
@@ -404,7 +645,7 @@ class TestLiveFeedEndpoints:
                 "live_feed_enabled": True,
                 "live_feed_url": "https://live.example.test/",
                 "live_feed_region": " yul ,yqb",
-                "live_feed_channels": ["Public", " #bot", "public"],
+                "live_feed_channels": ["Public", " #bot", "public", SECRET_KEY_HEX.lower()],
                 "live_feed_poll_interval": 5,
             },
         )
@@ -413,7 +654,7 @@ class TestLiveFeedEndpoints:
         assert payload["live_feed_enabled"] is True
         assert payload["live_feed_url"] == "https://live.example.test"
         assert payload["live_feed_region"] == "YUL,YQB"
-        assert payload["live_feed_channels"] == ["Public", "#bot"]
+        assert payload["live_feed_channels"] == ["Public", "#bot", SECRET_KEY_HEX.lower()]
         assert payload["live_feed_poll_interval"] == MIN_LIVE_FEED_POLL_INTERVAL
         assert live_feed._wake_requested()
         await live_feed.stop_live_feed()
@@ -506,4 +747,4 @@ class TestMigration088:
             "live_feed_channels",
             "live_feed_poll_interval",
         } <= settings_columns
-        assert json.loads(row["live_feed_channels"]) == ["Public"]
+        assert json.loads(row["live_feed_channels"]) == ["*"]

@@ -88,7 +88,7 @@ Ancillary AGENTS.md files which should generally not be reviewed unless specific
 - Raw packet feed — a debug/observation tool ("radio aquarium"); interesting to watch or copy packets from, but not critical infrastructure
 - Map view — visual display of node locations from advertisements
 - Network visualizer — force-directed graph of mesh topology
-- Live feed comparison — mirrors channel messages from a public CoreScope instance (live.meshcore.ca) and shows what this node heard vs missed; see `app/AGENTS.md` § "Live feed comparison"
+- Live feed comparison — decrypts the channel packets a public CoreScope instance (live.meshcore.ca) observed with this node's own keys (any channel, private ones included) and shows what this node heard vs missed; see `app/AGENTS.md` § "Live feed comparison"
 - Fanout integrations (MQTT, bots, webhooks, Apprise, SQS) — see `app/fanout/AGENTS_fanout.md`
 - Read state tracking / mark-all-read — convenience feature for unread badges; no need for transactional atomicity or race-condition hardening
 

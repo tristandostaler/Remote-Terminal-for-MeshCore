@@ -282,8 +282,10 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
     return [...byKey.entries()].map(([key, name]) => ({ key, name }));
   }, [stats, channels]);
 
-  const selectedChannelName =
-    channelOptions.find((c) => c.key === channelKey)?.name ?? status?.channels[0] ?? 'Public';
+  // The remote instance names only Public and hashtag channels; a private
+  // channel's local name means nothing there, so the link falls back to Public.
+  const selectedName = channelOptions.find((c) => c.key === channelKey)?.name;
+  const selectedChannelName = selectedName?.startsWith('#') ? selectedName : 'Public';
   const liveUrl = status ? liveChannelUrl(status.url, selectedChannelName) : null;
   const host = status ? liveHostLabel(status.url) : 'live.meshcore.ca';
   const allCount = counts.both + counts.node_only + counts.live_only;

@@ -565,6 +565,7 @@ export interface AppSettings {
   live_feed_url: string;
   /** CoreScope region filter: observer IATA code(s), comma-separated; '' = all. */
   live_feed_region: string;
+  /** '*' = every channel this node knows; otherwise channel keys (or Public / #hashtag names). */
   live_feed_channels: string[];
   live_feed_poll_interval: number;
 }
@@ -1220,8 +1221,10 @@ export interface LiveFeedStatus {
   last_error: string | null;
   last_fetched: number;
   mirrored_messages: number;
-  /** Configured channel names this node has no key for (can only ever be live-only). */
+  /** Configured entries that matched no channel key on this node. */
   unresolved_channels: string[];
+  /** 'packets' = remote packets decrypted locally (any channel with a key); 'channel_messages' = the instance's own decryption. */
+  source: 'packets' | 'channel_messages';
 }
 
 export interface LiveCompareCounts {

@@ -15,6 +15,9 @@ from app.send_attempts import (
 # Live feed comparison defaults (also mirrored in frontend/src/types.ts).
 DEFAULT_LIVE_FEED_URL = "https://live.meshcore.ca"
 DEFAULT_LIVE_FEED_CHANNEL = "Public"
+# Setting entry meaning "every channel this node knows" (its keys are what let
+# us decrypt the remote packet feed, so this covers private channels too).
+ALL_LIVE_FEED_CHANNELS = "*"
 DEFAULT_LIVE_FEED_POLL_INTERVAL = 300
 MIN_LIVE_FEED_POLL_INTERVAL = 60
 MAX_LIVE_FEED_POLL_INTERVAL = 86400
@@ -1724,8 +1727,12 @@ class AppSettings(BaseModel):
         ),
     )
     live_feed_channels: list[str] = Field(
-        default_factory=lambda: [DEFAULT_LIVE_FEED_CHANNEL],
-        description="Channel names to mirror from the live feed, as CoreScope names them",
+        default_factory=lambda: [ALL_LIVE_FEED_CHANNELS],
+        description=(
+            "Channels to compare: '*' for every channel this node knows (private ones "
+            "included), or channel keys / 'Public' / '#hashtag' names. Remote packets are "
+            "decrypted locally with these keys."
+        ),
     )
     live_feed_poll_interval: int = Field(
         default=DEFAULT_LIVE_FEED_POLL_INTERVAL,
@@ -1958,9 +1965,14 @@ class LiveFeedStatus(BaseModel):
     mirrored_messages: int = Field(default=0, description="Rows in the local mirror")
     unresolved_channels: list[str] = Field(
         default_factory=list,
+        description="Configured entries that matched no channel key on this node",
+    )
+    source: str = Field(
+        default="packets",
         description=(
-            "Configured channel names this node has no key for; their messages can only "
-            "ever show as live-only"
+            "'packets' when remote GRP_TXT packets are decrypted locally (any channel "
+            "this node has a key for); 'channel_messages' when only the remote "
+            "instance's own decryption of Public/hashtag channels was available"
         ),
     )
 
