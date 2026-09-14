@@ -444,7 +444,6 @@ async def sync_and_offload_channels(mc: MeshCore, max_channels: int | None = Non
 
     try:
         radio_manager.reset_channel_send_cache()
-        radio_manager.clear_resident_channels()
         channel_limit = get_radio_channel_limit(max_channels)
         slot_contents: dict[int, dict] = {}
 
@@ -468,11 +467,14 @@ async def sync_and_offload_channels(mc: MeshCore, max_channels: int | None = Non
             logger.debug("Synced channel %s: %s", key_hex[:8], result.payload.get("channel_name"))
 
         if settings.resident_channels_enabled:
-            await ensure_default_channels()
+            # The resident map is replaced atomically inside load_resident_channels;
+            # until then the previous set still answers slot lookups for any
+            # message pulled while the scan runs.
             loaded = await load_resident_channels(mc, slot_contents, channel_limit)
             resident = loaded["resident"]
             cleared = loaded["cleared"]
         else:
+            radio_manager.clear_resident_channels()
             for idx in slot_contents:
                 # Clear from radio (set empty name and zero key)
                 try:
@@ -530,9 +532,17 @@ async def add_resident_channel_to_radio(mc: MeshCore, channel: Channel) -> bool:
     return True
 
 
-async def remove_resident_channel_from_radio(mc: MeshCore, channel_key: str) -> bool:
-    """Unpin a deleted channel and clear its slot on the radio."""
-    slot = radio_manager.remove_resident_channel(channel_key)
+async def remove_resident_channel_from_radio(
+    mc: MeshCore, channel_key: str, *, slot: int | None = None
+) -> bool:
+    """Unpin a deleted channel and clear its slot on the radio.
+
+    ``slot`` is passed when the caller already dropped the in-memory mapping
+    (the router does so synchronously, so the slot stops answering lookups the
+    moment the channel is deleted, before the radio is even reachable).
+    """
+    if slot is None:
+        slot = radio_manager.remove_resident_channel(channel_key)
     if slot is None:
         return False
     try:
@@ -565,24 +575,45 @@ def _split_channel_sender_and_text(text: str) -> tuple[str | None, str]:
 async def _resolve_channel_for_pending_message(
     mc: MeshCore,
     channel_idx: int,
+    *,
+    lock_radio: bool = False,
 ) -> tuple[str | None, str | None]:
     """Resolve a pending channel message's slot to a channel key and name.
 
     A resident slot is answered from memory: this process pinned it and the
     periodic audit keeps it honest, and answering without a get_channel keeps
-    the link free while the library's auto-fetch loop is mid-pull. Any other
-    slot is a scratch slot that may hold whatever the last send loaded (on TCP
-    the send cache is not even maintained), so the radio is asked first and the
-    in-memory maps are only the fallback, as before.
+    the link free while the library's auto-fetch loop is mid-pull. A resident
+    slot whose channel is gone from the DB was just deleted and is about to be
+    cleared; its message is dropped rather than re-creating the channel. Any
+    other slot is a scratch slot that may hold whatever the last send loaded
+    (on TCP the send cache is not even maintained), so the radio is asked
+    first and the in-memory maps are only the fallback, as before.
+
+    ``lock_radio``: the event-handler path runs outside any radio operation,
+    and meshcore-py neither serializes commands nor tags replies, so its
+    get_channel must wait for the operation lock or a concurrent scan could
+    take its CHANNEL_INFO. Drain/poll callers already hold the lock.
     """
     resident_key = radio_manager.resident_channel_key_for_slot(channel_idx)
     if resident_key is not None:
         channel = await ChannelRepository.get_by_key(resident_key)
         if channel is not None:
             return resident_key, channel.name
+        logger.info(
+            "Dropping queued message for slot %d: its channel %s was deleted",
+            channel_idx,
+            resident_key[:8],
+        )
+        return None, None
 
     try:
-        result = await mc.commands.get_channel(channel_idx)
+        if lock_radio:
+            async with radio_manager.radio_operation(
+                "channel_slot_lookup", blocking=True
+            ) as locked:
+                result = await locked.commands.get_channel(channel_idx)
+        else:
+            result = await mc.commands.get_channel(channel_idx)
     except Exception as exc:
         logger.debug("Failed to fetch channel slot %s for pending message: %s", channel_idx, exc)
     else:
@@ -630,9 +661,11 @@ async def store_pulled_channel_message(mc: MeshCore, payload: dict) -> None:
     This is the channel counterpart of the DM fallback: the raw RX-log frame is
     the primary route, and when it arrived first this copy collapses onto the
     stored row through dedup. When the push path is stalled, this is the only
-    copy, and it is what keeps channel traffic flowing.
+    copy, and it is what keeps channel traffic flowing. Called from the event
+    handler, outside any radio operation, so a slot the maps cannot answer is
+    looked up under the operation lock.
     """
-    await _store_pending_channel_message(mc, payload)
+    await _store_pending_channel_message(mc, payload, lock_radio=True)
 
 
 async def _store_pending_direct_message(event) -> None:
@@ -643,7 +676,9 @@ async def _store_pending_direct_message(event) -> None:
         logger.warning("Failed to store pending direct message", exc_info=True)
 
 
-async def _store_pending_channel_message(mc: MeshCore, payload: dict) -> None:
+async def _store_pending_channel_message(
+    mc: MeshCore, payload: dict, *, lock_radio: bool = False
+) -> None:
     """Persist a CHANNEL_MSG_RECV event pulled via get_msg()."""
     from app.imaging.aeic.channel_data import is_grp_data_placeholder
 
@@ -664,7 +699,7 @@ async def _store_pending_channel_message(mc: MeshCore, payload: dict) -> None:
         return
 
     channel_key, channel_name = await _resolve_channel_for_pending_message(
-        mc, normalized_channel_idx
+        mc, normalized_channel_idx, lock_radio=lock_radio
     )
     if channel_key is None:
         logger.warning(
@@ -730,10 +765,10 @@ async def sync_and_offload_all(mc: MeshCore) -> dict:
     await ContactRepository.clear_on_radio_except([])
 
     contacts_result = await sync_contacts_from_radio(mc)
-    channels_result = await sync_and_offload_channels(mc)
 
-    # Ensure default channels exist
+    # Ensure default channels exist before the resident set is chosen from the DB.
     await ensure_default_channels()
+    channels_result = await sync_and_offload_channels(mc)
 
     snapshot_failed = "error" in contacts_result
     if snapshot_failed and not autoevict:
@@ -865,24 +900,41 @@ def _normalize_channel_secret(payload: dict) -> bytes:
     return bytes(secret)
 
 
-async def audit_resident_channels(mc: MeshCore) -> bool:
-    """Verify every resident channel still sits in its slot; re-pin any that do not.
+# Round-robin position for the throttled resident audit (aggressive poll mode).
+_resident_audit_cursor = 0
+
+
+async def audit_resident_channels(mc: MeshCore, *, limit: int | None = None) -> bool:
+    """Verify resident channels still sit in their slots; re-pin any that do not.
 
     A resident slot overwritten by another client (possible on TCP, where this
     backend has no exclusive access) would make the firmware attribute queued
     messages to the wrong channel, so a drifted slot is rewritten, not just
-    logged. Returns True when nothing had drifted.
+    logged. A resident channel that no longer exists in the DB has its slot
+    cleared on the radio, so the firmware stops queueing for it.
+
+    ``limit`` checks only that many resident slots per call, rotating through
+    the set across calls, so the aggressive 10-second poll does not spend its
+    whole window re-reading every slot. Returns True when nothing had drifted.
     """
+    global _resident_audit_cursor
+
     resident = radio_manager.get_resident_channels_snapshot()
     if not resident:
         return True
+    if limit is not None and limit < len(resident):
+        start = _resident_audit_cursor % len(resident)
+        rotated = resident[start:] + resident[:start]
+        resident = rotated[: max(1, limit)]
+        _resident_audit_cursor = (start + len(resident)) % max(1, len(rotated))
 
     drifted: list[str] = []
     for channel_key, slot in resident:
         channel = await ChannelRepository.get_by_key(channel_key)
         if channel is None:
-            # Deleted behind our back (router already unpins on delete); drop it.
-            radio_manager.remove_resident_channel(channel_key)
+            # Deleted while the radio was unreachable: unpin and clear the slot,
+            # or the firmware keeps decrypting for a channel nobody wants.
+            await remove_resident_channel_from_radio(mc, channel_key)
             continue
         try:
             result = await mc.commands.get_channel(slot)
@@ -983,7 +1035,9 @@ async def _message_poll_loop():
                     ) as mc:
                         count = await poll_for_messages(mc)
                         await audit_channel_send_cache(mc)
-                        await audit_resident_channels(mc)
+                        # Every slot on the hourly tick; one slot per tick when
+                        # polling every few seconds, so the audit never hogs the link.
+                        await audit_resident_channels(mc, limit=1 if aggressive_fallback else None)
                         if count > 0:
                             if aggressive_fallback:
                                 logger.warning(
@@ -1355,6 +1409,7 @@ async def _periodic_sync_loop():
                 async with radio_manager.radio_operation(
                     "periodic_sync",
                     blocking=False,
+                    suspend_auto_fetch=True,
                 ) as mc:
                     if await should_run_full_periodic_sync(mc):
                         await sync_and_offload_all(mc)

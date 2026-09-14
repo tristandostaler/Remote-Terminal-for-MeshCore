@@ -108,7 +108,11 @@ class RxSilenceWatchdog:
         if not rm.is_connected or not getattr(rm, "is_setup_complete", False):
             # Keep an open incident across the reconnect we may have caused
             # ourselves, or the escalation ladder would restart from the
-            # bottom every time; a clean idle state has nothing to keep.
+            # bottom every time; a clean idle state has nothing to keep. The
+            # last counter sample is dropped either way: packets the radio
+            # heard while the link was down were never ours to receive, so
+            # comparing across the gap would escalate on a healthy radio.
+            self.state.last_probe = None
             if not self.state.incident_open:
                 self._reset()
             return

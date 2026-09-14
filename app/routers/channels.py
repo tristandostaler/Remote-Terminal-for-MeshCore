@@ -261,17 +261,32 @@ async def create_channel(request: CreateChannelRequest) -> Channel:
 
 
 def _schedule_resident_slot_update(
-    *, add: Channel | None = None, remove_key: str | None = None
+    *,
+    add: Channel | None = None,
+    remove_key: str | None = None,
 ) -> None:
-    """Pin or unpin a channel on the radio in the background, best-effort.
+    """Pin or unpin a channel on the radio in the background.
 
-    Never blocks the HTTP response on the radio: a busy or disconnected radio
-    simply leaves the slot for the next full sync (or send-time loading).
+    Never blocks the HTTP response on the radio. A removal drops the in-memory
+    mapping *synchronously*, so from this moment the slot is treated as scratch
+    and a queued message for it can no longer resolve to the deleted channel;
+    the radio-side clear then waits its turn for the operation lock. A
+    disconnected radio leaves the slot for the next full sync, which rebuilds
+    the resident set from the DB anyway.
     """
     from app.config import settings as app_settings
-    from app.radio import RadioOperationBusyError, RadioOperationError
+    from app.radio import RadioOperationError
 
-    if not app_settings.resident_channels_enabled or not radio_manager.is_connected:
+    if not app_settings.resident_channels_enabled:
+        return
+
+    removed_slot: int | None = None
+    if remove_key is not None:
+        removed_slot = radio_manager.remove_resident_channel(remove_key)
+        if removed_slot is None:
+            remove_key = None
+
+    if not radio_manager.is_connected or (add is None and remove_key is None):
         return
 
     async def _run() -> None:
@@ -279,13 +294,13 @@ def _schedule_resident_slot_update(
 
         try:
             async with radio_manager.radio_operation(
-                "resident_channel_update", blocking=False
+                "resident_channel_update", blocking=True
             ) as mc:
                 if add is not None:
                     await add_resident_channel_to_radio(mc, add)
                 if remove_key is not None:
-                    await remove_resident_channel_from_radio(mc, remove_key)
-        except (RadioOperationBusyError, RadioOperationError) as exc:
+                    await remove_resident_channel_from_radio(mc, remove_key, slot=removed_slot)
+        except RadioOperationError as exc:
             logger.debug("Resident slot update skipped: %s", exc)
         except Exception:
             logger.warning("Resident slot update failed", exc_info=True)

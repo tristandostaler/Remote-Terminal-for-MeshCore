@@ -234,6 +234,31 @@ class TestWatchdog:
         assert wd.state.incident_open is True
 
 
+class TestWatchdogAcrossLinkDrops:
+    @pytest.mark.asyncio
+    async def test_external_disconnect_drops_the_stale_counter_sample(self):
+        """Packets heard while the link was down must not count as 'never pushed'."""
+        clock = FakeClock()
+        rm = _fake_manager(clock, [500, 503])
+        wd = RxSilenceWatchdog(rm, clock=clock)
+
+        clock.advance(300)
+        await wd.check()  # quiet mesh, first sample recv=500
+        assert wd.state.incident_open is True
+
+        rm.is_connected = False  # WiFi blip: library or keepalive drops the link
+        await wd.check()
+        assert wd.state.last_probe is None
+
+        rm.is_connected = True
+        rm._tracker.mark_rx_baseline(clock())
+        clock.advance(300)
+        await wd.check()  # recv=503: three packets heard during the outage
+
+        rm.reconnect_and_prepare.assert_not_awaited()
+        assert wd.state.escalation == 0
+
+
 class TestTcpKeepalive:
     def test_sets_keepalive_options_on_the_live_socket(self):
         rm = RadioManager()

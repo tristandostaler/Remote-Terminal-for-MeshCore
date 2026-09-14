@@ -238,6 +238,101 @@ class TestResidentSlotUpdates:
         assert radio_manager.get_resident_channel_slot(PUBLIC_CHANNEL_KEY) == 0
 
 
+class TestDeletedResidentChannel:
+    @pytest.mark.asyncio
+    async def test_remove_with_explicit_slot_after_router_unpinned_it(self, test_db):
+        radio_manager.max_channels = 4
+        radio_manager.set_resident_channels({PUBLIC_CHANNEL_KEY: 0, "11" * 16: 1})
+        slot = radio_manager.remove_resident_channel("11" * 16)  # what the router does inline
+        assert slot == 1
+        mock_mc = MagicMock()
+        mock_mc.commands.set_channel = AsyncMock(return_value=_ok())
+
+        assert await remove_resident_channel_from_radio(mock_mc, "11" * 16, slot=slot) is True
+
+        kwargs = mock_mc.commands.set_channel.await_args.kwargs
+        assert kwargs["channel_idx"] == 1 and kwargs["channel_name"] == ""
+
+    @pytest.mark.asyncio
+    async def test_queued_message_for_deleted_resident_channel_is_dropped_not_resurrected(
+        self, test_db
+    ):
+        """The slot is still pinned (clear pending) but the DB row is gone: no upsert, no message."""
+        radio_manager.set_resident_channels({PUBLIC_CHANNEL_KEY: 0, "11" * 16: 1})
+        mock_mc = MagicMock()
+        mock_mc.commands.get_channel = AsyncMock(side_effect=AssertionError("must not ask radio"))
+        radio_manager._meshcore = mock_mc
+
+        event = Event(
+            EventType.CHANNEL_MSG_RECV,
+            {"channel_idx": 1, "text": "Zed: ghost", "sender_timestamp": 1700000000},
+        )
+        with patch("app.radio_sync.broadcast_event"):
+            await on_channel_message(event)
+
+        assert await ChannelRepository.get_by_key("11" * 16) is None
+        assert await MessageRepository.get_all(msg_type="CHAN", conversation_key="11" * 16) == []
+
+    @pytest.mark.asyncio
+    async def test_audit_clears_slot_of_channel_deleted_while_radio_was_unreachable(self, test_db):
+        from app.radio_sync import audit_resident_channels
+
+        await ChannelRepository.upsert(key=PUBLIC_CHANNEL_KEY, name=PUBLIC_CHANNEL_NAME)
+        radio_manager.set_resident_channels({PUBLIC_CHANNEL_KEY: 0, "11" * 16: 1})
+        mock_mc = MagicMock()
+        mock_mc.commands.get_channel = AsyncMock(
+            return_value=_slot(PUBLIC_CHANNEL_NAME, PUBLIC_CHANNEL_KEY)
+        )
+        mock_mc.commands.set_channel = AsyncMock(return_value=_ok())
+
+        assert await audit_resident_channels(mock_mc) is True
+
+        kwargs = mock_mc.commands.set_channel.await_args.kwargs
+        assert kwargs["channel_idx"] == 1 and kwargs["channel_name"] == ""
+        assert radio_manager.get_resident_channel_slot("11" * 16) is None
+
+    @pytest.mark.asyncio
+    async def test_throttled_audit_rotates_through_resident_slots(self, test_db):
+        import app.radio_sync as radio_sync_module
+        from app.radio_sync import audit_resident_channels
+
+        for key, name in (
+            (PUBLIC_CHANNEL_KEY, PUBLIC_CHANNEL_NAME),
+            ("11" * 16, "#a"),
+            ("22" * 16, "#b"),
+        ):
+            await ChannelRepository.upsert(key=key, name=name)
+        radio_manager.set_resident_channels({PUBLIC_CHANNEL_KEY: 0, "11" * 16: 1, "22" * 16: 2})
+        radio_sync_module._resident_audit_cursor = 0
+        mock_mc = MagicMock()
+        mock_mc.commands.get_channel = AsyncMock(return_value=_empty())
+        mock_mc.commands.set_channel = AsyncMock(return_value=_ok())
+
+        for _ in range(3):
+            await audit_resident_channels(mock_mc, limit=1)
+
+        assert [c.args[0] for c in mock_mc.commands.get_channel.await_args_list] == [0, 1, 2]
+
+
+class TestDebugChannelAuditKnowsResidentSlots:
+    @pytest.mark.asyncio
+    async def test_resident_slots_count_as_matched(self):
+        from app.routers.debug import _build_channel_audit
+
+        radio_manager.max_channels = 2
+        radio_manager._connection_info = "Serial: /dev/ttyUSB0"
+        radio_manager.set_resident_channels({PUBLIC_CHANNEL_KEY: 0})
+        mock_mc = MagicMock()
+        mock_mc.commands.get_channel = AsyncMock(
+            side_effect=[_slot(PUBLIC_CHANNEL_NAME, PUBLIC_CHANNEL_KEY), _empty()]
+        )
+
+        audit = await _build_channel_audit(mock_mc)
+
+        assert audit.matched_slots == 2
+        assert audit.wrong_slots == []
+
+
 class TestQueuedChannelMessageFallback:
     @pytest.mark.asyncio
     async def test_handler_stores_queued_message_for_resident_slot(self, test_db):
@@ -268,6 +363,35 @@ class TestQueuedChannelMessageFallback:
         assert stored[0].text == "Bob: heard through the queue"
         assert stored[0].sender_name == "Bob"
         mock_mc.commands.get_channel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scratch_slot_lookup_from_the_handler_takes_the_radio_lock(self, test_db):
+        """The handler runs outside any radio operation; its get_channel must wait for the lock."""
+        radio_manager.set_resident_channels({PUBLIC_CHANNEL_KEY: 0})
+        mock_mc = MagicMock()
+        mock_mc.is_connected = True
+        radio_manager._meshcore = mock_mc
+        radio_manager._operation_lock = None
+
+        seen_locked: list[bool] = []
+
+        async def _get_channel(idx):
+            seen_locked.append(radio_manager._operation_lock.locked())
+            return _slot("#fresh", "11" * 16)
+
+        mock_mc.commands.get_channel = _get_channel
+
+        event = Event(
+            EventType.CHANNEL_MSG_RECV,
+            {"channel_idx": 3, "text": "Cara: via scratch slot", "sender_timestamp": 1700000000},
+        )
+        with patch("app.radio_sync.broadcast_event"):
+            await on_channel_message(event)
+
+        assert seen_locked == [True]
+        assert not radio_manager._operation_lock.locked()
+        stored = await MessageRepository.get_all(msg_type="CHAN", conversation_key="11" * 16)
+        assert len(stored) == 1
 
     @pytest.mark.asyncio
     async def test_scratch_slot_is_resolved_by_asking_the_radio(self, test_db):

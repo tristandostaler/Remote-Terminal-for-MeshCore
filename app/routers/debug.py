@@ -312,9 +312,13 @@ async def _build_contact_audit(
 
 
 async def _build_channel_audit(mc: Any, max_channels: int | None = None) -> DebugChannelAudit:
+    # Resident channels are pinned outside the send cache; both are expected.
     cache_key_by_slot = {
         slot: channel_key for channel_key, slot in radio_runtime.get_channel_send_cache_snapshot()
     }
+    cache_key_by_slot.update(
+        {slot: channel_key for channel_key, slot in radio_runtime.get_resident_channels_snapshot()}
+    )
 
     matched_slots = 0
     wrong_slots: list[DebugChannelSlotMismatch] = []
