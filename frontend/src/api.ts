@@ -57,6 +57,7 @@ import type {
   LiveCompareMessagesResponse,
   LiveCompareSource,
   LiveCompareStats,
+  LiveFeedProbeResponse,
   LiveFeedRegionsResponse,
   LiveFeedStatus,
   TraceResponse,
@@ -721,6 +722,7 @@ export const api = {
     fetchJson<LiveFeedStatus>('/live-feed/status', { signal }),
   syncLiveFeed: () => fetchJson<LiveFeedStatus>('/live-feed/sync', { method: 'POST' }),
   getLiveFeedRegions: () => fetchJson<LiveFeedRegionsResponse>('/live-feed/regions'),
+  probeLiveFeed: () => fetchJson<LiveFeedProbeResponse>('/live-feed/probe', { method: 'POST' }),
   getLiveCompareStats: (window: StatsWindow, signal?: AbortSignal) =>
     fetchJson<LiveCompareStats | null>(`/live-feed/stats?window=${encodeURIComponent(window)}`, {
       signal,

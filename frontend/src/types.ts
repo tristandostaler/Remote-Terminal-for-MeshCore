@@ -1219,6 +1219,8 @@ export interface LiveFeedStatus {
   last_sync_completed_at: number | null;
   last_success_at: number | null;
   last_error: string | null;
+  /** Set when the last sync completed but degraded (packet feed partly or wholly unavailable). */
+  last_warning: string | null;
   /** Messages checked by the last sync. */
   last_fetched: number;
   /** Rows the last sync inserted or refreshed. */
@@ -1301,6 +1303,21 @@ export interface LiveFeedRegion {
 export interface LiveFeedRegionsResponse {
   url: string;
   regions: LiveFeedRegion[];
+}
+
+export interface LiveFeedProbeAttempt {
+  label: string;
+  user_agent: string;
+  ok: boolean;
+  status: number | null;
+  error: string | null;
+  elapsed_ms: number;
+}
+
+/** One request to the instance's region list per User-Agent variant. */
+export interface LiveFeedProbeResponse {
+  url: string;
+  attempts: LiveFeedProbeAttempt[];
 }
 
 /** Contact-level multibyte path adoption (nodes, not traffic). */

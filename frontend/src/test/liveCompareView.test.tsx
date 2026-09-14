@@ -21,6 +21,7 @@ const status: LiveFeedStatus = {
   last_sync_completed_at: 1_700_000_010,
   last_success_at: 1_700_000_010,
   last_error: null,
+  last_warning: null,
   last_fetched: 3,
   last_changed: 0,
   last_sync_full: false,
@@ -182,6 +183,25 @@ describe('LiveCompareView', () => {
     });
     await userEvent.click(screen.getByRole('button', { name: /Open Live Compare settings/ }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('flags a degraded sync next to the synced time', async () => {
+    mockApi(
+      {
+        ...stats,
+        status: { ...status, last_warning: 'Packet feed unavailable (HTTP 404); compared Public' },
+      },
+      page
+    );
+
+    render(<LiveCompareView channels={[]} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('live-compare-sync-status')).toHaveTextContent(/Synced/);
+    });
+    expect(screen.getByTestId('live-compare-sync-status')).toHaveTextContent(
+      /degraded: Packet feed/
+    );
   });
 
   it('surfaces a failed sync in the status line', async () => {

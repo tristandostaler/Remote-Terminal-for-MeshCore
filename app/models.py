@@ -1961,6 +1961,14 @@ class LiveFeedStatus(BaseModel):
     last_sync_completed_at: int | None = None
     last_success_at: int | None = None
     last_error: str | None = None
+    last_warning: str | None = Field(
+        default=None,
+        description=(
+            "Set when the last sync completed but degraded: the packet feed failed for "
+            "some or all time slices, so the instance's own decryption was used or some "
+            "hours may be missing"
+        ),
+    )
     last_fetched: int = Field(default=0, description="Messages checked by the last sync")
     last_changed: int = Field(default=0, description="Rows the last sync inserted or refreshed")
     last_sync_full: bool = Field(
@@ -2063,6 +2071,22 @@ class LiveFeedRegion(BaseModel):
 class LiveFeedRegionsResponse(BaseModel):
     url: str
     regions: list[LiveFeedRegion]
+
+
+class LiveFeedProbeAttempt(BaseModel):
+    label: str
+    user_agent: str
+    ok: bool
+    status: int | None = None
+    error: str | None = None
+    elapsed_ms: int
+
+
+class LiveFeedProbeResponse(BaseModel):
+    """One request to the instance's region list per User-Agent variant."""
+
+    url: str
+    attempts: list[LiveFeedProbeAttempt]
 
 
 class StatisticsResponse(BaseModel):
