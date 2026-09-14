@@ -985,6 +985,62 @@ async def get_regions(settings: AppSettings | None = None) -> dict[str, Any]:
     return {"url": url, "regions": regions}
 
 
+PROBE_USER_AGENTS: tuple[tuple[str, str | None], ...] = (
+    ("RemoteTerm (what the sync uses)", None),
+    ("python-httpx default (what older builds sent)", "python-httpx/0.28.1"),
+    (
+        "browser-like",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36",
+    ),
+)
+
+
+async def probe_connection(settings: AppSettings | None = None) -> dict[str, Any]:
+    """Try the instance's region list with several User-Agents and report each outcome.
+
+    The RemoteTerm container ships no curl, so this is the operator's way to
+    tell a user-agent block (our UA works, python's is dropped) from a network
+    problem (every attempt fails the same way). No retries, one request each.
+    """
+    import httpx
+
+    settings = settings or await AppSettingsRepository.get()
+    url = settings.live_feed_url.rstrip("/")
+    attempts: list[dict[str, Any]] = []
+    for label, user_agent in PROBE_USER_AGENTS:
+        headers = {"Accept": "application/json"}
+        if user_agent:
+            headers["User-Agent"] = user_agent
+        else:
+            headers["User-Agent"] = _user_agent()
+        started = time.monotonic()
+        attempt: dict[str, Any] = {
+            "label": label,
+            "user_agent": headers["User-Agent"],
+            "ok": False,
+            "status": None,
+            "error": None,
+            "elapsed_ms": 0,
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=HTTP_TIMEOUT_SECONDS,
+                follow_redirects=True,
+                transport=_transport,
+                headers=headers,
+            ) as client:
+                response = await client.get(f"{url}/api/config/regions")
+            attempt["status"] = response.status_code
+            attempt["ok"] = response.status_code < 400
+            if not attempt["ok"]:
+                attempt["error"] = f"HTTP {response.status_code}"
+        except Exception as exc:
+            attempt["error"] = f"{exc.__class__.__name__}: {exc}"
+        attempt["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        attempts.append(attempt)
+    return {"url": url, "attempts": attempts}
+
+
 def _reset_for_tests() -> None:
     global _state, _transport
     _state = LiveFeedState()

@@ -1305,6 +1305,21 @@ export interface LiveFeedRegionsResponse {
   regions: LiveFeedRegion[];
 }
 
+export interface LiveFeedProbeAttempt {
+  label: string;
+  user_agent: string;
+  ok: boolean;
+  status: number | null;
+  error: string | null;
+  elapsed_ms: number;
+}
+
+/** One request to the instance's region list per User-Agent variant. */
+export interface LiveFeedProbeResponse {
+  url: string;
+  attempts: LiveFeedProbeAttempt[];
+}
+
 /** Contact-level multibyte path adoption (nodes, not traffic). */
 export interface MultibyteRolloutStats {
   contacts_with_route: number;
