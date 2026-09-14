@@ -111,6 +111,10 @@ class FakeCoreScope:
         self.strip_ciphertext = False
         # Serve the encrypted envelope in decoded_json instead of raw_hex.
         self.envelope_only = False
+        # Drop the connection on this many packet requests before serving normally.
+        self.drop_packet_requests = 0
+        # Drop the connection for packet slices entirely older than this timestamp.
+        self.drop_slices_older_than: int | None = None
 
     def all_packets(self) -> list[dict]:
         packets: list[dict] = []
@@ -147,11 +151,18 @@ class FakeCoreScope:
             if not self.packets_enabled:
                 return httpx.Response(404, json={"error": "not found"})
             assert request.url.params.get("type") == "5"
+            assert "RemoteTerm-LiveCompare/" in request.headers.get("user-agent", "")
             since = live_feed._parse_iso(request.url.params.get("since")) or 0
+            until = live_feed._parse_iso(request.url.params.get("until")) or 2**40
+            if self.drop_packet_requests > 0:
+                self.drop_packet_requests -= 1
+                raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+            if self.drop_slices_older_than is not None and until <= self.drop_slices_older_than:
+                raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
             packets = [
                 p
                 for p in self.all_packets()
-                if (live_feed._parse_iso(p["timestamp"]) or 0) >= since
+                if since <= (live_feed._parse_iso(p["timestamp"]) or 0) <= until
             ]
             limit = int(request.url.params.get("limit", "50"))
             offset = int(request.url.params.get("offset", "0"))
@@ -177,8 +188,10 @@ class FakeCoreScope:
 
 
 @pytest.fixture(autouse=True)
-def _reset_live_feed():
+def _reset_live_feed(monkeypatch):
     live_feed._reset_for_tests()
+    # Real retry backoff would add seconds to every failure-path test.
+    monkeypatch.setattr(live_feed, "RETRY_BACKOFF_SECONDS", (0.0, 0.0))
     yield
     live_feed._reset_for_tests()
 
@@ -447,7 +460,10 @@ class TestSyncAndCompare:
     @pytest.mark.asyncio
     async def test_packet_feed_is_paged_and_bounded_by_the_lookback(self, test_db, monkeypatch):
         monkeypatch.setattr(live_feed, "PAGE_LIMIT", 2)
-        recent = [_live_message("A", f"m{i}", NOW - i) for i in range(5)]
+        monkeypatch.setattr(live_feed, "PACKET_SLICE_SECONDS", live_feed.LOOKBACK_SECONDS)
+        # Observed a little before the sync starts: the walk is bounded by
+        # ``until = sync start``, and anything newer is the next poll's business.
+        recent = [_live_message("A", f"m{i}", NOW - 30 - i) for i in range(5)]
         ancient = [
             _live_message("Z", f"z{i}", NOW - live_feed.LOOKBACK_SECONDS - 86400 * (i + 1))
             for i in range(4)
@@ -551,6 +567,7 @@ class TestSyncAndCompare:
         state = await live_feed.sync_once(await _enable(live_feed_channels=["*"]))
         assert state.last_error is None
         assert state.source == "channel_messages"
+        assert state.last_warning is not None and "HTTP 404" in state.last_warning
         # Only channels the remote instance can name are asked for: Public and
         # hashtag channels, never the private one.
         asked = {r.url.path for r in fake.requests if r.url.path.startswith("/api/channels/")}
@@ -567,14 +584,28 @@ class TestSyncAndCompare:
         first = await live_feed.sync_once(settings)
         assert first.last_sync_full is True
         assert first.last_sync_started_at is not None
-        first_since = live_feed._parse_iso(fake.requests[0].url.params["since"])
-        assert first_since == first.last_sync_started_at - live_feed.LOOKBACK_SECONDS
+        packet_requests = [r for r in fake.requests if r.url.path == "/api/packets"]
+        # The week is walked in slices, newest first, none wider than a slice.
+        expected_slices = live_feed.LOOKBACK_SECONDS // live_feed.PACKET_SLICE_SECONDS
+        assert len(packet_requests) == expected_slices
+        bounds = [
+            (
+                live_feed._parse_iso(r.url.params["since"]),
+                live_feed._parse_iso(r.url.params["until"]),
+            )
+            for r in packet_requests
+        ]
+        assert bounds[0][1] == first.last_sync_started_at
+        assert bounds[-1][0] == first.last_sync_started_at - live_feed.LOOKBACK_SECONDS
+        assert all(u - s == live_feed.PACKET_SLICE_SECONDS for s, u in bounds)
 
         fake.requests.clear()
         second = await live_feed.sync_once(settings)
         assert second.last_sync_full is False
+        # Only what was observed since the previous sync started, minus the
+        # overlap: a single narrow slice.
+        assert len([r for r in fake.requests if r.url.path == "/api/packets"]) == 1
         second_since = live_feed._parse_iso(fake.requests[0].url.params["since"])
-        # Only what was observed since the previous sync started, minus the overlap.
         assert second_since == first.last_sync_started_at - live_feed.CURSOR_OVERLAP_SECONDS
         # Nothing moved on the remote side, so nothing was rewritten.
         assert second.last_fetched == 1
@@ -585,8 +616,12 @@ class TestSyncAndCompare:
         third = await live_feed.sync_once(await _enable(live_feed_region="YQB"))
         assert third.last_sync_full is True
         assert third.last_sync_started_at is not None
-        third_since = live_feed._parse_iso(fake.requests[0].url.params["since"])
-        assert third_since == third.last_sync_started_at - live_feed.LOOKBACK_SECONDS
+        oldest = min(
+            live_feed._parse_iso(r.url.params["since"]) or 0
+            for r in fake.requests
+            if r.url.path == "/api/packets"
+        )
+        assert oldest == third.last_sync_started_at - live_feed.LOOKBACK_SECONDS
 
     @pytest.mark.asyncio
     async def test_upsert_rewrites_only_rows_whose_observations_moved(self, test_db):
@@ -605,6 +640,65 @@ class TestSyncAndCompare:
         assert message["live_last_seen"] == base["last_seen"] + 60
 
     @pytest.mark.asyncio
+    async def test_dropped_connections_are_retried_with_a_fresh_connection(
+        self, test_db, monkeypatch
+    ):
+        monkeypatch.setattr(live_feed, "RETRY_BACKOFF_SECONDS", (0.0, 0.0))
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
+        fake.drop_packet_requests = 2
+        live_feed._transport = fake.transport
+        state = await live_feed.sync_once(await _enable())
+        assert state.last_error is None
+        assert state.last_warning is None
+        assert state.source == "packets"
+        assert await LiveFeedRepository.count() == 1
+
+    @pytest.mark.asyncio
+    async def test_a_dead_packet_feed_falls_back_and_warns(self, test_db, monkeypatch):
+        """Every request dropped: the sync still completes through the instance's
+        own decryption of Public, and says so instead of failing outright."""
+        monkeypatch.setattr(live_feed, "RETRY_BACKOFF_SECONDS", (0.0, 0.0))
+        monkeypatch.setattr(live_feed, "PACKET_SLICE_SECONDS", live_feed.LOOKBACK_SECONDS)
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
+        fake.drop_packet_requests = 10**6
+        live_feed._transport = fake.transport
+        state = await live_feed.sync_once(await _enable())
+        assert state.last_error is None
+        assert state.source == "channel_messages"
+        assert state.last_warning is not None
+        assert "Server disconnected" in state.last_warning
+        assert state.last_fetched == 1
+        # Retries happened: more than one packet request before giving up.
+        assert len([r for r in fake.requests if r.url.path == "/api/packets"]) == (
+            live_feed.RETRY_ATTEMPTS
+        )
+
+    @pytest.mark.asyncio
+    async def test_old_failing_slices_are_skipped_and_reported(self, test_db, monkeypatch):
+        monkeypatch.setattr(live_feed, "RETRY_BACKOFF_SECONDS", (0.0, 0.0))
+        fake = FakeCoreScope(
+            {
+                "Public": [
+                    _live_message("Alice", "fresh", NOW - 60),
+                    _live_message("Bob", "two days old", NOW - 2 * 86400),
+                ]
+            }
+        )
+        fake.drop_slices_older_than = NOW - 86400
+        live_feed._transport = fake.transport
+        state = await live_feed.sync_once(await _enable())
+        assert state.last_error is None
+        assert state.source == "packets"
+        assert state.last_warning is not None and "time slices" in state.last_warning
+        # The recent slice landed; the dropped hours did not, and the sync still
+        # advanced its cursor so the next poll is incremental.
+        assert [m["text"] for m in (await live_feed.list_messages("1w"))["messages"]] == [
+            "Alice: fresh"
+        ]
+        assert state.last_sync_full is True
+        assert state.cursor == state.last_sync_started_at
+
+    @pytest.mark.asyncio
     async def test_several_regions_walk_the_packet_feed_once_each(self, test_db):
         fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
         live_feed._transport = fake.transport
@@ -612,7 +706,7 @@ class TestSyncAndCompare:
         regions = [
             r.url.params.get("region") for r in fake.requests if r.url.path == "/api/packets"
         ]
-        assert regions == ["YUL", "YQB"]
+        assert list(dict.fromkeys(regions)) == ["YUL", "YQB"]
         assert await LiveFeedRepository.count() == 1
 
     @pytest.mark.asyncio
@@ -650,7 +744,7 @@ class TestSyncAndCompare:
 
     @pytest.mark.asyncio
     async def test_disabled_feature_does_not_sync_unless_forced(self, test_db):
-        fake = FakeCoreScope({"Public": [_live_message("A", "x", NOW)]})
+        fake = FakeCoreScope({"Public": [_live_message("A", "x", NOW - 30)]})
         live_feed._transport = fake.transport
         await AppSettingsRepository.update(live_feed_url="https://live.example.test")
         await live_feed.sync_once()
@@ -658,7 +752,7 @@ class TestSyncAndCompare:
         assert await live_feed.get_compare_stats("1d") is None
 
         await live_feed.sync_once(force=True)
-        assert len(fake.requests) == 1
+        assert len(fake.requests) >= 1
         assert await LiveFeedRepository.count() == 1
         assert await live_feed.get_compare_stats("1d") is not None
 

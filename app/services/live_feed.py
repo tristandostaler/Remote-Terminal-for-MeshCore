@@ -84,6 +84,13 @@ MIN_RETRY_AFTER_ERROR_SECONDS = 120
 # Incremental polls re-read this much before the previous sync started, so an
 # observation that landed while that sync was running is not missed.
 CURSOR_OVERLAP_SECONDS = 600
+# The packet feed is walked in time slices so no single request asks the remote
+# instance for days of packets at once; each slice is paged on its own.
+PACKET_SLICE_SECONDS = 6 * 3600
+# Transient failures (dropped connection, 5xx) are retried per request with a
+# fresh connection; anything still failing after this is reported.
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = (1.0, 3.0)
 # How long POST /live-feed/sync waits for the sync it started before answering
 # with "still syncing" -- short of common reverse-proxy timeouts.
 SYNC_REQUEST_WAIT_SECONDS = 20.0
@@ -104,6 +111,10 @@ class LiveFeedState:
     last_changed: int = 0
     unresolved_channels: list[str] = field(default_factory=list)
     source: str = "packets"
+    # Set when the sync completed but degraded: the packet feed failed for some
+    # or all time slices and the remote instance's own decryption was used, or
+    # some hours could not be fetched.
+    last_warning: str | None = None
     last_sync_full: bool = False
     # Observation-time watermark of the last successful sync and the
     # url|region|channels fingerprint it was taken under.
@@ -144,6 +155,25 @@ def _parse_iso(value: Any) -> int | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return int(parsed.timestamp())
+
+
+def _iso(ts: int) -> str:
+    return datetime.fromtimestamp(ts, tz=UTC).isoformat().replace("+00:00", "Z")
+
+
+def _user_agent() -> str:
+    """Identify ourselves honestly to the remote instance (its operators may
+    block anonymous scripted clients, and a contact URL lets them reach us)."""
+    try:
+        from app.version_info import get_app_build_info
+
+        version = get_app_build_info().version
+    except Exception:
+        version = "unknown"
+    return (
+        f"Mozilla/5.0 (compatible; RemoteTerm-LiveCompare/{version}; "
+        "+https://github.com/tristandostaler/Remote-Terminal-for-MeshCore)"
+    )
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -274,8 +304,16 @@ class LiveFeedClient:
             timeout=HTTP_TIMEOUT_SECONDS,
             follow_redirects=True,
             transport=self._transport,
-            headers={"Accept": "application/json"},
+            headers={"Accept": "application/json", "User-Agent": _user_agent()},
         )
+
+    async def _reset_pool(self) -> None:
+        """Drop the pooled connections after a transport error and start clean."""
+        if self._client is None:
+            return
+        old, self._client = self._client, self._new_client()
+        with contextlib.suppress(Exception):
+            await old.aclose()
 
     async def __aenter__(self) -> LiveFeedClient:
         self._client = self._new_client()
@@ -288,20 +326,30 @@ class LiveFeedClient:
 
     async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
-        try:
-            if self._client is not None:
-                response = await self._client.get(url, params=params or None)
-            else:
-                async with self._new_client() as client:
-                    response = await client.get(url, params=params or None)
-        except Exception as exc:  # httpx raises many transport subclasses
-            raise LiveFeedError(f"{url}: {exc.__class__.__name__}: {exc}") from exc
-        if response.status_code >= 400:
-            raise LiveFeedError(f"{url}: HTTP {response.status_code}")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise LiveFeedError(f"{url}: response is not JSON") from exc
+        last_error: str | None = None
+        for attempt in range(RETRY_ATTEMPTS):
+            if attempt:
+                await asyncio.sleep(RETRY_BACKOFF_SECONDS[min(attempt - 1, 1)])
+            try:
+                if self._client is not None:
+                    response = await self._client.get(url, params=params or None)
+                else:
+                    async with self._new_client() as client:
+                        response = await client.get(url, params=params or None)
+            except Exception as exc:  # httpx raises many transport subclasses
+                last_error = f"{url}: {exc.__class__.__name__}: {exc}"
+                await self._reset_pool()
+                continue
+            if response.status_code in (502, 503, 504):
+                last_error = f"{url}: HTTP {response.status_code}"
+                continue
+            if response.status_code >= 400:
+                raise LiveFeedError(f"{url}: HTTP {response.status_code}")
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise LiveFeedError(f"{url}: response is not JSON") from exc
+        raise LiveFeedError(last_error or f"{url}: request failed")
 
     async def fetch_channel_messages(
         self, channel_name: str, *, limit: int | None = None, offset: int = 0
@@ -325,18 +373,21 @@ class LiveFeedClient:
         self,
         *,
         since: int,
+        until: int | None = None,
         offset: int = 0,
         limit: int | None = None,
         region_code: str | None = None,
     ) -> tuple[list[dict[str, Any]], int | None]:
-        """One page of GRP_TXT transmissions heard since ``since`` (unix seconds)."""
+        """One page of GRP_TXT transmissions observed in ``[since, until]`` (unix seconds)."""
         params: dict[str, Any] = {
             "type": GROUP_TEXT_PAYLOAD_TYPE,
             "limit": limit or PAGE_LIMIT,
             "offset": offset,
             "order": "desc",
-            "since": datetime.fromtimestamp(since, tz=UTC).isoformat().replace("+00:00", "Z"),
+            "since": _iso(since),
         }
+        if until is not None:
+            params["until"] = _iso(until)
         if region_code:
             params["region"] = region_code
         payload = await self._get_json("/api/packets", params)
@@ -562,12 +613,73 @@ class _PacketSyncResult:
     changed: int = 0
     packets: int = 0
     with_ciphertext: int = 0
+    slices: int = 0
+    failed_slices: int = 0
+    last_failure: str | None = None
+
+    @property
+    def feed_unavailable(self) -> bool:
+        return self.slices > 0 and self.failed_slices == self.slices
+
+
+def _time_slices(since: int, until: int) -> list[tuple[int, int]]:
+    """``[since, until]`` cut into slices of ``PACKET_SLICE_SECONDS``, newest first."""
+    slices: list[tuple[int, int]] = []
+    end = until
+    while end > since:
+        start = max(since, end - PACKET_SLICE_SECONDS)
+        slices.append((start, end))
+        end = start
+    return slices or [(since, until)]
+
+
+async def _sync_packet_slice(
+    client: LiveFeedClient,
+    channels_by_hash: dict[int, list[ComparedChannel]],
+    seen: set[str],
+    result: _PacketSyncResult,
+    *,
+    since: int,
+    until: int,
+    region_code: str | None,
+) -> None:
+    offset = 0
+    for _page in range(MAX_PACKET_PAGES):
+        packets, total = await client.fetch_packets(
+            since=since, until=until, offset=offset, region_code=region_code
+        )
+        if not packets:
+            break
+        rows: list[dict[str, Any]] = []
+        for packet in packets:
+            payload_type = _coerce_int(packet.get("payload_type"))
+            if payload_type is not None and payload_type != GROUP_TEXT_PAYLOAD_TYPE:
+                continue
+            result.packets += 1
+            if _packet_payload(packet) is not None:
+                result.with_ciphertext += 1
+            row = decrypt_live_packet(packet, channels_by_hash)
+            if row is not None and row["packet_hash"] not in seen:
+                seen.add(row["packet_hash"])
+                rows.append(row)
+        inserted, updated = await LiveFeedRepository.upsert_many(rows)
+        result.fetched += len(rows)
+        result.changed += inserted + updated
+        offset += len(packets)
+        if len(packets) < PAGE_LIMIT or (total is not None and offset >= total):
+            break
 
 
 async def _sync_packets(
-    client: LiveFeedClient, channels: list[ComparedChannel], since: int
+    client: LiveFeedClient, channels: list[ComparedChannel], since: int, until: int
 ) -> _PacketSyncResult:
-    """Walk the remote GRP_TXT feed observed since ``since`` and decrypt what we can."""
+    """Walk the remote GRP_TXT feed observed in ``[since, until]`` and decrypt what we can.
+
+    The range is walked in time slices, newest first, so a request never asks
+    for days of packets at once. A slice that still fails after retries is
+    counted and skipped; the caller decides whether the feed is down (every
+    slice failed) or merely holed.
+    """
     result = _PacketSyncResult()
     channels_by_hash: dict[int, list[ComparedChannel]] = defaultdict(list)
     for channel in channels:
@@ -577,31 +689,27 @@ async def _sync_packets(
     region_codes: list[str | None] = [c for c in client.region.split(",") if c] or [None]
     seen: set[str] = set()
     for region_code in region_codes:
-        offset = 0
-        for _page in range(MAX_PACKET_PAGES):
-            packets, total = await client.fetch_packets(
-                since=since, offset=offset, region_code=region_code
-            )
-            if not packets:
-                break
-            rows: list[dict[str, Any]] = []
-            for packet in packets:
-                payload_type = _coerce_int(packet.get("payload_type"))
-                if payload_type is not None and payload_type != GROUP_TEXT_PAYLOAD_TYPE:
-                    continue
-                result.packets += 1
-                if _packet_payload(packet) is not None:
-                    result.with_ciphertext += 1
-                row = decrypt_live_packet(packet, channels_by_hash)
-                if row is not None and row["packet_hash"] not in seen:
-                    seen.add(row["packet_hash"])
-                    rows.append(row)
-            inserted, updated = await LiveFeedRepository.upsert_many(rows)
-            result.fetched += len(rows)
-            result.changed += inserted + updated
-            offset += len(packets)
-            if len(packets) < PAGE_LIMIT or (total is not None and offset >= total):
-                break
+        for slice_since, slice_until in _time_slices(since, until):
+            result.slices += 1
+            try:
+                await _sync_packet_slice(
+                    client,
+                    channels_by_hash,
+                    seen,
+                    result,
+                    since=slice_since,
+                    until=slice_until,
+                    region_code=region_code,
+                )
+            except LiveFeedError as exc:
+                result.failed_slices += 1
+                result.last_failure = str(exc)
+                logger.warning(
+                    "Live feed packet slice %s..%s failed: %s",
+                    _iso(slice_since),
+                    _iso(slice_until),
+                    exc,
+                )
     return result
 
 
@@ -674,36 +782,38 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
             fetched = 0
             changed = 0
             source = "packets"
+            warning: str | None = None
             async with LiveFeedClient(settings.live_feed_url, settings.live_feed_region) as client:
-                if not channels:
-                    packet_result = _PacketSyncResult()
-                    packet_feed_available = True
-                else:
-                    packet_feed_available = True
-                    try:
-                        packet_result = await _sync_packets(client, channels, since)
-                    except LiveFeedError as exc:
-                        # An instance without the packet feed (or one that hides
-                        # it) still serves its own decryption of public channels.
-                        if "HTTP 404" not in str(exc) and "HTTP 403" not in str(exc):
-                            raise
-                        logger.info("Live feed packet endpoint unavailable (%s); falling back", exc)
-                        packet_feed_available = False
-                        packet_result = _PacketSyncResult()
+                if channels:
+                    packet_result = await _sync_packets(client, channels, since, now)
                     fetched = packet_result.fetched
                     changed = packet_result.changed
                     # Fall back to the remote instance's own decryption when the
-                    # packet feed gave us nothing to decrypt: no feed at all, or
-                    # packets stripped of their ciphertext.
-                    if not packet_feed_available or (
+                    # packet feed gave us nothing to decrypt: every slice failed
+                    # (no such endpoint, or it drops our requests), or packets
+                    # stripped of their ciphertext.
+                    if packet_result.feed_unavailable or (
                         packet_result.packets > 0 and packet_result.with_ciphertext == 0
                     ):
                         source = "channel_messages"
+                        if packet_result.feed_unavailable:
+                            warning = (
+                                f"Packet feed unavailable ({packet_result.last_failure}); "
+                                "compared only what the instance decrypts itself "
+                                "(Public and hashtag channels)"
+                            )
                         for channel in channels:
                             got, moved = await _sync_channel_messages(client, channel, since)
                             fetched += got
                             changed += moved
+                    elif packet_result.failed_slices:
+                        warning = (
+                            f"{packet_result.failed_slices} of {packet_result.slices} time slices "
+                            f"of the packet feed failed (last: {packet_result.last_failure}); "
+                            "messages observed in those hours may be missing"
+                        )
             _state.source = source
+            _state.last_warning = warning
             _state.last_sync_full = full_walk
             _state.cursor = now
             _state.cursor_scope = scope

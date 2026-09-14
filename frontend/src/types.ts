@@ -1219,6 +1219,8 @@ export interface LiveFeedStatus {
   last_sync_completed_at: number | null;
   last_success_at: number | null;
   last_error: string | null;
+  /** Set when the last sync completed but degraded (packet feed partly or wholly unavailable). */
+  last_warning: string | null;
   /** Messages checked by the last sync. */
   last_fetched: number;
   /** Rows the last sync inserted or refreshed. */

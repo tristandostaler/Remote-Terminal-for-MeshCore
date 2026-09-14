@@ -126,5 +126,14 @@ export function describeSync(status: LiveFeedStatus, now: number): ReactNode {
     );
   }
   if (!status.last_success_at) return status.enabled ? 'Waiting for the first sync' : 'Not syncing';
-  return `Synced ${formatRelativeAge(status.last_success_at, now)}`;
+  const synced = `Synced ${formatRelativeAge(status.last_success_at, now)}`;
+  if (status.last_warning) {
+    return (
+      <>
+        {synced}
+        <span className="text-warning"> · degraded: {status.last_warning}</span>
+      </>
+    );
+  }
+  return synced;
 }

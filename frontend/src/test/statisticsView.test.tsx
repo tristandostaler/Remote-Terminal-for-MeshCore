@@ -112,6 +112,7 @@ describe('StatisticsView', () => {
           last_sync_completed_at: 1_700_000_010,
           last_success_at: 1_700_000_010,
           last_error: null,
+          last_warning: null,
           last_fetched: 12,
           last_changed: 0,
           last_sync_full: false,
