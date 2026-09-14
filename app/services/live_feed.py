@@ -434,6 +434,47 @@ class LiveFeedClient:
         regions.sort(key=lambda r: (r["label"].casefold(), r["code"]))
         return regions
 
+    async def fetch_packet_detail(self, packet_hash: str) -> dict[str, Any]:
+        """``GET /api/packets/{hash}``: the packet plus every observation of it.
+
+        Raises ``LiveFeedError`` when the instance no longer has the packet
+        (its retention is shorter than our mirror's) or cannot be reached.
+        """
+        payload = await self._get_json(f"/api/packets/{quote(packet_hash, safe='')}")
+        if not isinstance(payload, dict):
+            raise LiveFeedError("packet detail: unexpected response shape")
+        return payload
+
+    async def fetch_resolve_hops(
+        self, hops: list[str], *, observer: str | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """``GET /api/resolve-hops``: the instance's best identity for each hop hash.
+
+        ``observer`` lets it prefer relays near the node that heard the packet
+        when a prefix is shared by several. Returns ``{hop: resolution}`` keyed
+        exactly as passed; a hop it knows nothing about is simply absent.
+        """
+        if not hops:
+            return {}
+        params: dict[str, Any] = {"hops": ",".join(hops)}
+        if observer:
+            params["observer"] = observer
+        payload = await self._get_json("/api/resolve-hops", params)
+        resolved = payload.get("resolved") if isinstance(payload, dict) else None
+        if not isinstance(resolved, dict):
+            return {}
+        return {str(k): v for k, v in resolved.items() if isinstance(v, dict)}
+
+    async def fetch_observers(self) -> list[dict[str, Any]]:
+        """``GET /api/observers``: the nodes feeding the instance, with coordinates."""
+        payload = await self._get_json("/api/observers")
+        if isinstance(payload, list):
+            return [o for o in payload if isinstance(o, dict)]
+        observers = payload.get("observers") if isinstance(payload, dict) else None
+        if not isinstance(observers, list):
+            raise LiveFeedError("observers: missing 'observers' list")
+        return [o for o in observers if isinstance(o, dict)]
+
 
 # ─── Channel resolution ────────────────────────────────────────────────────
 

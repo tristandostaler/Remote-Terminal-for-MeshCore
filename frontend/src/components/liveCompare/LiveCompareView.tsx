@@ -12,8 +12,8 @@
  * without WebSocket plumbing and without re-running the comparison on a timer.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUpRight, ExternalLink, RefreshCw, Settings2 } from 'lucide-react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowUpRight, ExternalLink, RefreshCw, Route, Settings2 } from 'lucide-react';
 
 import { api, isAbortError } from '../../api';
 import { cn } from '@/lib/utils';
@@ -44,6 +44,10 @@ import {
   liveHostLabel,
 } from './liveCompareShared';
 
+const LiveCompareTraceDialog = lazy(() =>
+  import('./LiveCompareTraceDialog').then((m) => ({ default: m.LiveCompareTraceDialog }))
+);
+
 const PAGE_SIZE = 100;
 const STATUS_POLL_MS = 30_000;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -70,9 +74,11 @@ function splitText(message: LiveCompareMessage): { sender: string | null; body: 
 function MessageRow({
   message,
   showChannel,
+  onInspect,
 }: {
   message: LiveCompareMessage;
   showChannel: boolean;
+  onInspect: (message: LiveCompareMessage) => void;
 }) {
   const meta = SOURCE_META[message.source];
   const { sender, body } = splitText(message);
@@ -98,9 +104,9 @@ function MessageRow({
     if (message.live_snr !== null) bits.push(`SNR ${message.live_snr.toFixed(1)}`);
     details.push(bits.join(' · '));
   }
-  const observerTitle = message.live_observers.length
-    ? `Observers: ${message.live_observers.join(', ')}`
-    : undefined;
+  const inspectTitle =
+    'Show where this message travelled: every hop, relay and observer, on a map' +
+    (message.live_observers.length ? ` · observers: ${message.live_observers.join(', ')}` : '');
 
   return (
     <li
@@ -128,11 +134,17 @@ function MessageRow({
         {sender && <span className="font-medium">{sender}: </span>}
         <span className="whitespace-pre-wrap">{body}</span>
       </div>
-      {details.length > 0 && (
-        <div className="mt-0.5 text-[0.6875rem] text-muted-foreground" title={observerTitle}>
-          {details.join('  ·  ')}
-        </div>
-      )}
+      <button
+        type="button"
+        onClick={() => onInspect(message)}
+        className="mt-0.5 inline-flex max-w-full items-start gap-1 text-left text-[0.6875rem] text-muted-foreground hover:text-foreground hover:underline"
+        title={inspectTitle}
+        aria-label={inspectTitle}
+        data-testid="live-compare-inspect"
+      >
+        <Route className="mt-px h-3 w-3 shrink-0" aria-hidden="true" />
+        <span>{details.length > 0 ? details.join('  ·  ') : 'Trace'}</span>
+      </button>
     </li>
   );
 }
@@ -153,6 +165,7 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
   const [listError, setListError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  const [inspecting, setInspecting] = useState<LiveCompareMessage | null>(null);
 
   // The last completed sync we have rendered; a newer one reloads the list.
   const lastSyncRef = useRef<number | null>(null);
@@ -535,6 +548,7 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
                       key={message.key}
                       message={message}
                       showChannel={!channelKey && channelOptions.length > 1}
+                      onInspect={setInspecting}
                     />
                   ))}
                 </ul>
@@ -559,6 +573,11 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
           )}
         </div>
       </div>
+      {inspecting && (
+        <Suspense fallback={null}>
+          <LiveCompareTraceDialog message={inspecting} open onClose={() => setInspecting(null)} />
+        </Suspense>
+      )}
     </div>
   );
 }
