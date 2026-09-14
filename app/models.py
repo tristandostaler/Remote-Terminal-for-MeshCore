@@ -2077,22 +2077,6 @@ class LiveFeedRegionsResponse(BaseModel):
     regions: list[LiveFeedRegion]
 
 
-class LiveFeedProbeAttempt(BaseModel):
-    label: str
-    user_agent: str
-    ok: bool
-    status: int | None = None
-    error: str | None = None
-    elapsed_ms: int
-
-
-class LiveFeedProbeResponse(BaseModel):
-    """One request to the instance's region list per User-Agent variant."""
-
-    url: str
-    attempts: list[LiveFeedProbeAttempt]
-
-
 class StatisticsResponse(BaseModel):
     """Mesh statistics over one selectable time window.
 

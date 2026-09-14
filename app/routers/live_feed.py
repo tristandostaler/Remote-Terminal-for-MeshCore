@@ -7,7 +7,6 @@ from fastapi import APIRouter, HTTPException, Query
 from app.models import (
     LiveCompareMessagesResponse,
     LiveCompareStats,
-    LiveFeedProbeResponse,
     LiveFeedRegionsResponse,
     LiveFeedStatus,
 )
@@ -53,16 +52,6 @@ async def get_live_feed_regions() -> LiveFeedRegionsResponse:
         return LiveFeedRegionsResponse(**await live_feed.get_regions())
     except live_feed.LiveFeedError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@router.post("/probe", response_model=LiveFeedProbeResponse)
-async def probe_live_feed() -> LiveFeedProbeResponse:
-    """Connection test: fetch the instance's region list with several User-Agents.
-
-    Tells a user-agent block (ours works, python's is dropped) from a network
-    problem (everything fails alike) without a shell in the container.
-    """
-    return LiveFeedProbeResponse(**await live_feed.probe_connection())
 
 
 @router.get("/stats", response_model=LiveCompareStats | None)

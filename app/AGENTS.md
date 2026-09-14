@@ -515,7 +515,6 @@ Verified against the meshcore firmware (`examples/simple_room_server/MyMesh.cpp`
 - `GET /live-feed/status` — config in effect + sync state
 - `POST /live-feed/sync` — run one sync now (works while disabled)
 - `GET /live-feed/regions` — regions the configured CoreScope instance knows (502 if unreachable)
-- `POST /live-feed/probe` — connection test: fetches the instance's region list once per User-Agent variant (ours, python-httpx default, browser-like) and reports status/error/latency for each, so a user-agent block can be told from a network problem without a shell in the container
 - `GET /live-feed/stats?window=` — both / node-only / live-only counts, per channel and over time; `null` when nothing is mirrored
 - `GET /live-feed/messages?window=&channel_key=&source=both|node|live&q=&limit=&offset=` — merged, de-duplicated message list
 

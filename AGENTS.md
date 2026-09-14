@@ -428,7 +428,6 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | GET | `/api/live-feed/status` | Live feed comparison: config in effect plus the sync loop's last outcome |
 | POST | `/api/live-feed/sync` | Run one live feed sync now |
 | GET | `/api/live-feed/regions` | Regions (observer IATA codes) the configured CoreScope instance knows |
-| POST | `/api/live-feed/probe` | Connection test against the instance, one request per User-Agent variant |
 | GET | `/api/live-feed/stats` | Both / node-only / live-only counts for a `window` |
 | GET | `/api/live-feed/messages` | Node + live feed channel messages merged without duplicates, each marked with its source |
 | GET | `/api/push/vapid-public-key` | VAPID public key for browser push subscription |

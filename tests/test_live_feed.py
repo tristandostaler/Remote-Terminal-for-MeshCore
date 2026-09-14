@@ -115,8 +115,6 @@ class FakeCoreScope:
         self.drop_packet_requests = 0
         # Drop the connection for packet slices entirely older than this timestamp.
         self.drop_slices_older_than: int | None = None
-        # Drop every request whose User-Agent lacks this substring (a UA-blocking proxy).
-        self.drop_user_agents_without: str | None = None
 
     def all_packets(self) -> list[dict]:
         packets: list[dict] = []
@@ -146,11 +144,6 @@ class FakeCoreScope:
         self.requests.append(request)
         if self.fail_with is not None:
             return httpx.Response(self.fail_with, text="nope")
-        if (
-            self.drop_user_agents_without is not None
-            and self.drop_user_agents_without not in request.headers.get("user-agent", "")
-        ):
-            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
         path = request.url.path
         if path == "/api/config/regions":
             return httpx.Response(200, json=self.regions)
@@ -931,26 +924,6 @@ class TestLiveFeedEndpoints:
         assert bad.status_code == 422
         bad_source = await client.get("/api/live-feed/messages", params={"source": "mars"})
         assert bad_source.status_code == 422
-
-    @pytest.mark.asyncio
-    async def test_probe_reports_each_user_agent_separately(self, test_db, client):
-        fake = FakeCoreScope({})
-        fake.drop_user_agents_without = "RemoteTerm-LiveCompare/"
-        live_feed._transport = fake.transport
-        await _enable()
-
-        response = await client.post("/api/live-feed/probe")
-
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["url"] == "https://live.example.test"
-        by_label = {a["label"]: a for a in payload["attempts"]}
-        ours = by_label["RemoteTerm (what the sync uses)"]
-        assert ours["ok"] is True and ours["status"] == 200
-        assert "RemoteTerm-LiveCompare/" in ours["user_agent"]
-        python = by_label["python-httpx default (what older builds sent)"]
-        assert python["ok"] is False
-        assert "Server disconnected" in python["error"]
 
     @pytest.mark.asyncio
     async def test_regions_failure_is_a_502(self, test_db, client):
