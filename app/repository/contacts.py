@@ -17,6 +17,8 @@ from app.clock_drift import (
 )
 from app.database import db
 from app.models import (
+    CONTACT_TYPE_REPEATER,
+    CONTACT_TYPE_ROOM,
     ClockDriftBand,
     ClockDriftHistogramBin,
     ClockDriftHopBucket,
@@ -286,6 +288,17 @@ class ContactRepository:
                 [m.public_key for m in matches],
             )
         return None
+
+    @staticmethod
+    async def get_relays() -> list[Contact]:
+        """Every contact that can appear as a hop in a path: repeaters and rooms."""
+        async with db.readonly() as conn:
+            async with conn.execute(
+                "SELECT * FROM contacts WHERE type IN (?, ?) ORDER BY public_key",
+                (CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [ContactRepository._row_to_contact(row) for row in rows]
 
     @staticmethod
     async def get_by_name(name: str) -> list[Contact]:

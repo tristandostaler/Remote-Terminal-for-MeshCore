@@ -1270,6 +1270,8 @@ export type LiveCompareSource = 'both' | 'node' | 'live';
 export interface LiveCompareMessage {
   key: string;
   source: LiveCompareSource;
+  /** The remote packet hash when the live feed saw the message. */
+  packet_hash: string | null;
   channel_key: string | null;
   channel_name: string | null;
   sender: string | null;
@@ -1305,6 +1307,57 @@ export interface LiveFeedRegion {
 export interface LiveFeedRegionsResponse {
   url: string;
   regions: LiveFeedRegion[];
+}
+
+/** A node on a message's journey: sender, relay, observer, or this radio. */
+export interface LiveTraceNode {
+  public_key: string | null;
+  name: string | null;
+  lat: number | null;
+  lon: number | null;
+  /** This node holds the key as a contact. */
+  known_locally: boolean;
+  /** A contact this node has a learned zero-hop route to. */
+  direct_neighbour: boolean;
+}
+
+export interface LiveTraceHop {
+  /** The hop's hash bytes as hex, as carried in the packet. */
+  prefix: string;
+  /** Best identity; null when nobody matches. */
+  node: LiveTraceNode | null;
+  ambiguous: boolean;
+  candidates: LiveTraceNode[];
+  identified_by: 'live' | 'node' | null;
+}
+
+/** One reception of the message: by an observer feeding the instance, or by this node. */
+export interface LiveTraceRoute {
+  kind: 'observer' | 'node';
+  receiver: LiveTraceNode | null;
+  region: string | null;
+  heard_at: number | null;
+  snr: number | null;
+  rssi: number | null;
+  hops: LiveTraceHop[];
+}
+
+export interface LiveCompareTrace {
+  packet_hash: string | null;
+  live_url: string | null;
+  message_id: number | null;
+  heard_by_node: boolean;
+  outgoing: boolean;
+  sender: LiveTraceNode | null;
+  self_node: LiveTraceNode | null;
+  live_first_seen: number | null;
+  live_last_seen: number | null;
+  live_repeats: number | null;
+  /** This node's receptions first, then the observers', each oldest first. */
+  routes: LiveTraceRoute[];
+  live_error: string | null;
+  live_warning: string | null;
+  fetched_at: number;
 }
 
 /** Contact-level multibyte path adoption (nodes, not traffic). */

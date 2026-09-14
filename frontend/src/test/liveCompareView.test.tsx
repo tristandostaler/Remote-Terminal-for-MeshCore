@@ -3,6 +3,15 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { LiveCompareView } from '../components/liveCompare/LiveCompareView';
+
+vi.mock('react-leaflet', () => ({
+  MapContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  TileLayer: () => null,
+  Marker: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Polyline: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Tooltip: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
+  useMap: () => ({ setView: vi.fn(), fitBounds: vi.fn() }),
+}));
 import type {
   LiveCompareMessage,
   LiveCompareMessagesResponse,
@@ -49,6 +58,7 @@ function message(overrides: Partial<LiveCompareMessage>): LiveCompareMessage {
   return {
     key: 'k',
     source: 'both',
+    packet_hash: 'a1b2c3d4e5f60718',
     channel_key: 'AA'.repeat(16),
     channel_name: 'Public',
     sender: 'Alice',
@@ -78,6 +88,7 @@ const page: LiveCompareMessagesResponse = {
     message({
       key: 'h2',
       source: 'live',
+      packet_hash: 'b2c3d4e5f6071829',
       text: 'Bob: only the mesh heard this',
       sender: 'Bob',
       message_id: null,
@@ -87,6 +98,7 @@ const page: LiveCompareMessagesResponse = {
     message({
       key: 'm3',
       source: 'node',
+      packet_hash: null,
       text: 'Carol: only we heard this',
       sender: 'Carol',
       outgoing: true,
@@ -112,6 +124,24 @@ function mockApi(statsBody: LiveCompareStats | null, pageBody: LiveCompareMessag
     const url = String(input);
     if (url.includes('/live-feed/stats')) return jsonResponse(statsBody);
     if (url.includes('/live-feed/messages')) return jsonResponse(pageBody);
+    if (url.includes('/live-feed/trace')) {
+      return jsonResponse({
+        packet_hash: 'b2c3d4e5f6071829',
+        live_url: 'https://live.meshcore.ca/#/packets/b2c3d4e5f6071829',
+        message_id: null,
+        heard_by_node: false,
+        outgoing: false,
+        sender: null,
+        self_node: null,
+        live_first_seen: 1_700_000_003,
+        live_last_seen: 1_700_000_003,
+        live_repeats: 2,
+        routes: [],
+        live_error: null,
+        live_warning: null,
+        fetched_at: 1_700_000_100,
+      });
+    }
     return new Response('not found', { status: 404 });
   });
 }
@@ -203,6 +233,33 @@ describe('LiveCompareView', () => {
     expect(screen.getByTestId('live-compare-sync-status')).toHaveTextContent(
       /degraded: Packet feed/
     );
+  });
+
+  it('opens the trace dialog for a row from its hops line', async () => {
+    const fetchSpy = mockApi(stats, page);
+    const user = userEvent.setup();
+    render(<LiveCompareView channels={[]} />);
+    const rows = await screen.findAllByTestId('live-compare-row');
+    const liveRow = rows.find((row) => row.getAttribute('data-source') === 'live')!;
+    const inspect = within(liveRow).getByTestId('live-compare-inspect');
+    expect(inspect).toHaveTextContent('live heard');
+    expect(inspect).toHaveTextContent('2 observers');
+    expect(inspect).toHaveAttribute('title', expect.stringContaining('observers: obs-a, obs-b'));
+
+    await user.click(inspect);
+
+    const dialog = await screen.findByTestId('live-trace-dialog');
+    expect(dialog).toHaveTextContent('Where this message travelled');
+    expect(dialog).toHaveTextContent('Bob: only the mesh heard this');
+    await waitFor(() =>
+      expect(screen.getByTestId('live-trace-summary')).toHaveTextContent(
+        'Your node missed this message.'
+      )
+    );
+    const traceCall = fetchSpy.mock.calls.find((call) =>
+      String(call[0]).includes('/live-feed/trace')
+    );
+    expect(String(traceCall?.[0])).toContain('packet_hash=b2c3d4e5f6071829');
   });
 
   it('surfaces a failed sync in the status line', async () => {

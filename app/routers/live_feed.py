@@ -7,10 +7,11 @@ from fastapi import APIRouter, HTTPException, Query
 from app.models import (
     LiveCompareMessagesResponse,
     LiveCompareStats,
+    LiveCompareTrace,
     LiveFeedRegionsResponse,
     LiveFeedStatus,
 )
-from app.services import live_feed
+from app.services import live_feed, live_feed_trace
 from app.stats_windows import DEFAULT_STATS_WINDOW, STATS_WINDOWS, is_valid_window
 
 logger = logging.getLogger(__name__)
@@ -89,3 +90,25 @@ async def get_live_compare_messages(
             offset=offset,
         )
     )
+
+
+@router.get("/trace", response_model=LiveCompareTrace)
+async def get_live_compare_trace(
+    packet_hash: str | None = Query(
+        None, max_length=80, description="Remote packet hash of the row (from the merged list)"
+    ),
+    message_id: int | None = Query(None, ge=1, description="Local message id of the row"),
+) -> LiveCompareTrace:
+    """How one message travelled: every observer's reception and this node's, hops resolved.
+
+    Pass whichever identifiers the merged row carries; a live-only row has just
+    the hash, a node-only row just the id. Observations come from the instance
+    at request time (``live_error`` says when they could not), the node side
+    from the local database.
+    """
+    if not packet_hash and message_id is None:
+        raise HTTPException(status_code=422, detail="packet_hash or message_id is required")
+    trace = await live_feed_trace.get_trace(packet_hash=packet_hash or None, message_id=message_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Unknown message")
+    return LiveCompareTrace(**trace)

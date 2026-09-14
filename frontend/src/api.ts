@@ -55,6 +55,7 @@ import type {
   StatisticsResponse,
   StatsWindow,
   LiveCompareMessagesResponse,
+  LiveCompareTrace,
   LiveCompareSource,
   LiveCompareStats,
   LiveFeedRegionsResponse,
@@ -745,6 +746,15 @@ export const api = {
     return fetchJson<LiveCompareMessagesResponse>(`/live-feed/messages?${search.toString()}`, {
       signal,
     });
+  },
+  getLiveCompareTrace: (
+    params: { packetHash?: string | null; messageId?: number | null },
+    signal?: AbortSignal
+  ) => {
+    const search = new URLSearchParams();
+    if (params.packetHash) search.set('packet_hash', params.packetHash);
+    if (params.messageId != null) search.set('message_id', String(params.messageId));
+    return fetchJson<LiveCompareTrace>(`/live-feed/trace?${search.toString()}`, { signal });
   },
 
   // Granular repeater endpoints

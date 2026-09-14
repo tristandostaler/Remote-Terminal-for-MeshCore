@@ -45,6 +45,7 @@ app/
 │   ├── radio_commands.py        # Radio config/private-key command workflows
 │   ├── radio_stats.py           # Local radio stats sampling; persists the noise-floor series
 │   ├── live_feed.py             # Mirrors a CoreScope (live.meshcore.ca) channel feed; node-vs-live comparison
+│   ├── live_feed_trace.py       # Live Compare trace: a message's routes per observer and per this node, hops resolved
 │   └── radio_runtime.py         # Router/dependency seam over the global RadioManager
 ├── radio.py             # RadioManager transport/session state + lock management
 ├── radio_sync.py        # Polling, sync, periodic advertisement loop
@@ -278,6 +279,7 @@ live.meshcore.ca runs [CoreScope](https://github.com/Kpa-clawbot/CoreScope), who
 - **Matching** is the channel-echo dedup identity — `(conversation_key, text, COALESCE(sender_timestamp, 0))` — via a LEFT JOIN in `LiveFeedRepository._merged_cte`. Channel encryption is deterministic, so identical plaintext + sender clock is the same packet on the air. Verdicts: `both`, `node` (node only), `live` (live only). The join is evaluated at read time, so a late historical decrypt flips a row from live-only to both without a re-sync.
 - **Sync loop** starts in `main.py` lifespan and idles while disabled (default poll: 15 min). The first sync, and any sync after the URL, region or channel selection changed (`_sync_scope`), walks the packet feed back to `LOOKBACK_SECONDS` (7 days); every later sync asks only for packets observed since the previous sync started minus `CURSOR_OVERLAP_SECONDS` (10 min). The cursor is in memory, so a restart costs one full walk. `LiveFeedRepository.upsert_many` pre-reads the batch and rewrites only rows whose last-seen time or repeat count moved (or that gained a channel key), so a quiet poll is one indexed SELECT per batch and no writes; `LiveFeedState.last_fetched` / `last_changed` / `last_sync_full` report this. Rows older than `RETENTION_SECONDS` (90 days) are pruned after each sync. Requests carry a `Mozilla/5.0 (compatible; RemoteTerm-LiveCompare/<version>; +repo)` User-Agent and are retried up to 3 times on transport errors and 502/503/504 with a fresh connection pool. The packet feed is walked in `PACKET_SLICE_SECONDS` (6 h) `since`/`until` slices, newest first; a slice that still fails is skipped and reported in `LiveFeedState.last_warning` (every slice failing triggers the channel-messages fallback with a warning). Hard failures are recorded in `last_error` and back off to at least 2 minutes. `_transport` is the httpx test seam.
 - **Read side**: `GET /live-feed/stats?window=` (also embedded as `live_compare` in `GET /statistics`, `null` until enabled or something is mirrored), `GET /live-feed/messages?window=&channel_key=&source=&q=&limit=&offset=` (merged list ordered by `seen_at`, the earliest time either side saw the message; `counts` ignore `source` so filter chips can show numbers), `GET /live-feed/status`, `POST /live-feed/sync`, `GET /live-feed/regions` (502 when the instance is unreachable).
+- **Trace** (`app/services/live_feed_trace.py`, `GET /live-feed/trace`): the diagnosis behind a row. Fetches the packet's detail from the instance (`/api/packets/{hash}`: one observation per observer with its `path_json` relay hashes and, when the instance managed it, a `resolved_path` of full keys), the observer list for coordinates (cached 10 min) and `/api/resolve-hops` for hops this radio cannot name (at most `MAX_REMOTE_RESOLUTIONS` distinct paths, the rest share one lookup). Node-side routes come from `messages.paths`. `resolve_hop` precedence: the instance's per-packet `resolved_path` → a unique match among this node's repeater/room contacts (`ContactRepository.get_relays`) → the instance's best guess (flagged `ambiguous` with `candidates`) → unknown. A failed packet fetch is `live_error` (the node side still renders); failed observer/hop lookups only set `live_warning`. Synthetic (`syn:`) hashes and node-only rows never contact the instance.
 
 ### Statistics time windows
 
@@ -517,6 +519,7 @@ Verified against the meshcore firmware (`examples/simple_room_server/MyMesh.cpp`
 - `GET /live-feed/regions` — regions the configured CoreScope instance knows (502 if unreachable)
 - `GET /live-feed/stats?window=` — both / node-only / live-only counts, per channel and over time; `null` when nothing is mirrored
 - `GET /live-feed/messages?window=&channel_key=&source=both|node|live&q=&limit=&offset=` — merged, de-duplicated message list
+- `GET /live-feed/trace?packet_hash=&message_id=` — one row's routes: this node's paths and every observer's, relay hashes resolved (422 without an identifier, 404 for an unknown row)
 
 ### Push
 - `GET /push/vapid-public-key` — VAPID public key for browser `PushManager.subscribe()`
@@ -678,6 +681,7 @@ tests/
 ├── test_send_tracker.py        # In-flight send registry: cancel, supersede, housekeeping
 ├── test_statistics.py          # Statistics aggregation
 ├── test_live_feed.py           # Live feed mirror, node-vs-live comparison, and its endpoints
+├── test_live_feed_trace.py     # Live Compare trace: observer routes, hop resolution precedence, degraded lookups
 ├── test_stats_windows.py       # Statistics window keys and chart bucketing
 ├── test_telemetry_interval.py  # Telemetry interval scheduling math
 ├── test_version_info.py        # Version/build metadata resolution

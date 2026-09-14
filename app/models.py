@@ -2040,6 +2040,9 @@ class LiveCompareMessage(BaseModel):
 
     key: str = Field(description="Stable row key for the client (message id or packet hash)")
     source: LiveCompareSource
+    packet_hash: str | None = Field(
+        default=None, description="The remote packet hash when the live feed saw the message"
+    )
     channel_key: str | None = None
     channel_name: str | None = None
     sender: str | None = None
@@ -2075,6 +2078,83 @@ class LiveFeedRegion(BaseModel):
 class LiveFeedRegionsResponse(BaseModel):
     url: str
     regions: list[LiveFeedRegion]
+
+
+class LiveTraceNode(BaseModel):
+    """A node that took part in a message's journey: sender, relay, observer or this radio."""
+
+    public_key: str | None = Field(default=None, description="Full 64-hex key when identified")
+    name: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    known_locally: bool = Field(
+        default=False, description="This node holds the key as a contact (repeater or room)"
+    )
+    direct_neighbour: bool = Field(
+        default=False, description="A contact this node has a learned zero-hop route to"
+    )
+
+
+class LiveTraceHop(BaseModel):
+    """One relay hash from a packet's path, and who we think it was."""
+
+    prefix: str = Field(description="The hop's hash bytes as hex, as carried in the packet")
+    node: LiveTraceNode | None = Field(
+        default=None, description="Best identity for the hop; null when nobody matches"
+    )
+    ambiguous: bool = Field(
+        default=False, description="Several known nodes share this prefix; 'node' is a best guess"
+    )
+    candidates: list[LiveTraceNode] = Field(
+        default_factory=list, description="Every plausible identity when ambiguous"
+    )
+    identified_by: Literal["live", "node"] | None = Field(
+        default=None,
+        description="'node' when this radio's own contacts named it, 'live' when the instance did",
+    )
+
+
+class LiveTraceRoute(BaseModel):
+    """One reception of the message: by an observer feeding the instance, or by this node."""
+
+    kind: Literal["observer", "node"]
+    receiver: LiveTraceNode | None = Field(
+        default=None, description="The observer that heard it, or this radio for kind='node'"
+    )
+    region: str | None = Field(default=None, description="Observer IATA region on the instance")
+    heard_at: int | None = None
+    snr: float | None = None
+    rssi: float | None = None
+    hops: list[LiveTraceHop] = Field(default_factory=list)
+
+
+class LiveCompareTrace(BaseModel):
+    """Everything known about how one channel message travelled: every path the
+    live feed's observers recorded and every path this node heard, with the relay
+    hashes resolved to nodes so the routes can be drawn on a map."""
+
+    packet_hash: str | None = None
+    live_url: str | None = Field(default=None, description="The packet's page on the instance")
+    message_id: int | None = None
+    heard_by_node: bool = False
+    outgoing: bool = False
+    sender: LiveTraceNode | None = Field(
+        default=None, description="The sender when its name matches one contact"
+    )
+    self_node: LiveTraceNode | None = Field(default=None, description="This radio, for the map")
+    live_first_seen: int | None = None
+    live_last_seen: int | None = None
+    live_repeats: int | None = None
+    routes: list[LiveTraceRoute] = Field(
+        default_factory=list, description="This node's receptions first, then the observers'"
+    )
+    live_error: str | None = Field(
+        default=None, description="Why the instance's observations could not be fetched"
+    )
+    live_warning: str | None = Field(
+        default=None, description="A lookup that failed without emptying the trace"
+    )
+    fetched_at: int
 
 
 class StatisticsResponse(BaseModel):

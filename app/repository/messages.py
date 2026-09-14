@@ -764,6 +764,27 @@ class MessageRepository:
         return MessageRepository._row_to_message(row)
 
     @staticmethod
+    async def find_channel_twin(
+        channel_key: str, text: str, sender_timestamp: int | None
+    ) -> "Message | None":
+        """The local channel message carrying the same dedup identity, if any.
+
+        This is the key the channel-echo index uses -- ``(conversation_key,
+        text, COALESCE(sender_timestamp, 0))`` -- and the one the live feed
+        comparison joins on, so a hit here is the same packet on the air.
+        """
+        async with db.readonly() as conn:
+            async with conn.execute(
+                f"""SELECT {MessageRepository._message_select("messages")} FROM messages
+                    WHERE type = 'CHAN' AND conversation_key = ? AND text = ?
+                      AND COALESCE(sender_timestamp, 0) = ?
+                    ORDER BY id LIMIT 1""",
+                (channel_key, text, sender_timestamp or 0),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return MessageRepository._row_to_message(row) if row else None
+
+    @staticmethod
     async def record_send_attempt(message_id: int, *, state: str = "sending") -> tuple[int, int]:
         """Count one more transmission of an outgoing message.
 

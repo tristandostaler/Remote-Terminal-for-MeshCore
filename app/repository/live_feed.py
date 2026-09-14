@@ -154,6 +154,24 @@ class LiveFeedRepository:
     # ------------------------------------------------------------------- reads
 
     @staticmethod
+    async def get_by_hash(packet_hash: str) -> dict[str, Any] | None:
+        """One mirrored row by its remote packet hash, or ``None``."""
+        async with db.readonly() as conn:
+            async with conn.execute(
+                "SELECT * FROM live_feed_messages WHERE packet_hash = ?", (packet_hash,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            observers = json.loads(result.get("observers") or "[]")
+        except ValueError:
+            observers = []
+        result["observers"] = [str(o) for o in observers] if isinstance(observers, list) else []
+        return result
+
+    @staticmethod
     async def count() -> int:
         async with db.readonly() as conn:
             async with conn.execute("SELECT COUNT(*) AS n FROM live_feed_messages") as cursor:
@@ -439,6 +457,7 @@ class LiveFeedRepository:
         message_id = row["message_id"]
         return {
             "key": f"m{message_id}" if message_id is not None else f"h{row['packet_hash']}",
+            "packet_hash": row["packet_hash"],
             "source": row["source"],
             "channel_key": key,
             "channel_name": local_names.get(key) or row["live_channel_name"],
