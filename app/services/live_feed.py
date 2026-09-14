@@ -84,6 +84,9 @@ MIN_RETRY_AFTER_ERROR_SECONDS = 120
 # Incremental polls re-read this much before the previous sync started, so an
 # observation that landed while that sync was running is not missed.
 CURSOR_OVERLAP_SECONDS = 600
+# How long POST /live-feed/sync waits for the sync it started before answering
+# with "still syncing" -- short of common reverse-proxy timeouts.
+SYNC_REQUEST_WAIT_SECONDS = 20.0
 
 
 class LiveFeedError(Exception):
@@ -250,25 +253,47 @@ def normalize_live_message(
 
 
 class LiveFeedClient:
-    """Thin async client for the handful of CoreScope endpoints we read."""
+    """Thin async client for the handful of CoreScope endpoints we read.
+
+    Use it as an async context manager so a whole sync -- up to a hundred
+    pages -- rides one connection pool instead of a TCP+TLS handshake per page.
+    Outside a context each call opens a short-lived client, which is fine for
+    the one-off region lookup.
+    """
 
     def __init__(self, base_url: str, region: str = "", *, transport: Any = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.region = normalize_region(region)
         self._transport = transport if transport is not None else _transport
+        self._client: Any = None
 
-    async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def _new_client(self) -> Any:
         import httpx
 
+        return httpx.AsyncClient(
+            timeout=HTTP_TIMEOUT_SECONDS,
+            follow_redirects=True,
+            transport=self._transport,
+            headers={"Accept": "application/json"},
+        )
+
+    async def __aenter__(self) -> LiveFeedClient:
+        self._client = self._new_client()
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
+
+    async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
         try:
-            async with httpx.AsyncClient(
-                timeout=HTTP_TIMEOUT_SECONDS,
-                follow_redirects=True,
-                transport=self._transport,
-                headers={"Accept": "application/json"},
-            ) as client:
-                response = await client.get(url, params=params or None)
+            if self._client is not None:
+                response = await self._client.get(url, params=params or None)
+            else:
+                async with self._new_client() as client:
+                    response = await client.get(url, params=params or None)
         except Exception as exc:  # httpx raises many transport subclasses
             raise LiveFeedError(f"{url}: {exc.__class__.__name__}: {exc}") from exc
         if response.status_code >= 400:
@@ -639,10 +664,6 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
         try:
             channels, unresolved = await resolve_compared_channels(settings.live_feed_channels)
             _state.unresolved_channels = unresolved
-            await LiveFeedRepository.assign_channel_keys(
-                {channel.name: channel.key for channel in channels}
-            )
-            client = LiveFeedClient(settings.live_feed_url, settings.live_feed_region)
             scope = _sync_scope(settings, channels)
             full_walk = _state.cursor is None or _state.cursor_scope != scope
             since = (
@@ -653,31 +674,35 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
             fetched = 0
             changed = 0
             source = "packets"
-            if channels:
-                packet_feed_available = True
-                try:
-                    packet_result = await _sync_packets(client, channels, since)
-                except LiveFeedError as exc:
-                    # An instance without the packet feed (or one that hides it)
-                    # still serves its own decryption of the public channels.
-                    if "HTTP 404" not in str(exc) and "HTTP 403" not in str(exc):
-                        raise
-                    logger.info("Live feed packet endpoint unavailable (%s); falling back", exc)
-                    packet_feed_available = False
+            async with LiveFeedClient(settings.live_feed_url, settings.live_feed_region) as client:
+                if not channels:
                     packet_result = _PacketSyncResult()
-                fetched = packet_result.fetched
-                changed = packet_result.changed
-                # Fall back to the remote instance's own decryption when the
-                # packet feed gave us nothing to decrypt: no feed at all, or
-                # packets stripped of their ciphertext.
-                if not packet_feed_available or (
-                    packet_result.packets > 0 and packet_result.with_ciphertext == 0
-                ):
-                    source = "channel_messages"
-                    for channel in channels:
-                        got, moved = await _sync_channel_messages(client, channel, since)
-                        fetched += got
-                        changed += moved
+                    packet_feed_available = True
+                else:
+                    packet_feed_available = True
+                    try:
+                        packet_result = await _sync_packets(client, channels, since)
+                    except LiveFeedError as exc:
+                        # An instance without the packet feed (or one that hides
+                        # it) still serves its own decryption of public channels.
+                        if "HTTP 404" not in str(exc) and "HTTP 403" not in str(exc):
+                            raise
+                        logger.info("Live feed packet endpoint unavailable (%s); falling back", exc)
+                        packet_feed_available = False
+                        packet_result = _PacketSyncResult()
+                    fetched = packet_result.fetched
+                    changed = packet_result.changed
+                    # Fall back to the remote instance's own decryption when the
+                    # packet feed gave us nothing to decrypt: no feed at all, or
+                    # packets stripped of their ciphertext.
+                    if not packet_feed_available or (
+                        packet_result.packets > 0 and packet_result.with_ciphertext == 0
+                    ):
+                        source = "channel_messages"
+                        for channel in channels:
+                            got, moved = await _sync_channel_messages(client, channel, since)
+                            fetched += got
+                            changed += moved
             _state.source = source
             _state.last_sync_full = full_walk
             _state.cursor = now
@@ -716,6 +741,10 @@ async def _loop() -> None:
     _wake = asyncio.Event()
     wake = _wake
     while True:
+        # Clear *before* reading settings: a wake that lands while a sync is
+        # running must trigger another pass with the new settings, not be
+        # swallowed by a clear after the sync.
+        wake.clear()
         settings = None
         try:
             settings = await AppSettingsRepository.get()
@@ -733,7 +762,6 @@ async def _loop() -> None:
         interval = settings.live_feed_poll_interval if settings else 300
         if _state.last_error:
             interval = max(interval, MIN_RETRY_AFTER_ERROR_SECONDS)
-        wake.clear()
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(wake.wait(), timeout=interval)
 
@@ -757,6 +785,19 @@ async def stop_live_feed() -> None:
     _wake = None
 
 
+async def request_sync(wait_seconds: float = SYNC_REQUEST_WAIT_SECONDS) -> None:
+    """Start a sync now and wait for it up to ``wait_seconds``.
+
+    A first sync of a busy region can take minutes; an HTTP request that waits
+    for all of it dies at the first proxy timeout while the sync carries on.
+    So the sync runs as its own task, the caller gets a bounded wait, and the
+    UIs (which poll status anyway) pick the outcome up when it lands.
+    """
+    task = asyncio.create_task(sync_once(force=True))
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout=wait_seconds)
+
+
 def notify_settings_changed() -> None:
     """Wake the loop so a settings change takes effect now, not next interval."""
     if _wake is not None:
@@ -770,9 +811,12 @@ def _wake_requested() -> bool:
 # ─── Read side ─────────────────────────────────────────────────────────────
 
 
-async def get_status(settings: AppSettings | None = None) -> dict[str, Any]:
+async def get_status(
+    settings: AppSettings | None = None, channels: list[ComparedChannel] | None = None
+) -> dict[str, Any]:
     settings = settings or await AppSettingsRepository.get()
-    channels, _unresolved = await resolve_compared_channels(settings.live_feed_channels)
+    if channels is None:
+        channels, _unresolved = await resolve_compared_channels(settings.live_feed_channels)
     return {
         "enabled": settings.live_feed_enabled,
         "url": settings.live_feed_url,
@@ -787,11 +831,12 @@ async def get_status(settings: AppSettings | None = None) -> dict[str, Any]:
 async def get_compare_stats(window: str, settings: AppSettings | None = None) -> dict | None:
     """The statistics-page section; ``None`` when there is nothing to compare yet."""
     settings = settings or await AppSettingsRepository.get()
-    status = await get_status(settings)
+    channels, _unresolved = await resolve_compared_channels(settings.live_feed_channels)
+    status = await get_status(settings, channels)
     if not settings.live_feed_enabled and status["mirrored_messages"] == 0:
         return None
     now = int(time.time())
-    keys = await compare_channel_keys(settings)
+    keys = [channel.key for channel in channels]
     stats = await LiveFeedRepository.get_compare_stats(keys, window_cutoff(window, now), now)
     return {"status": status, **stats}
 

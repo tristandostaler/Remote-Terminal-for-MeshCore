@@ -26,6 +26,7 @@ from collections import defaultdict
 from typing import Any
 
 from app.database import db
+from app.repository.messages import escape_like
 from app.stats_windows import bucket_seconds_for_span
 
 logger = logging.getLogger(__name__)
@@ -56,10 +57,6 @@ def _placeholders(count: int) -> str:
     return ",".join("?" * count)
 
 
-def _escape_like(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
 class LiveFeedRepository:
     """CRUD for ``live_feed_messages`` plus the node-vs-live merge queries."""
 
@@ -83,7 +80,7 @@ class LiveFeedRepository:
             hashes = [row["packet_hash"] for row in batch]
             async with db.tx() as conn:
                 async with conn.execute(
-                    f"SELECT packet_hash, last_seen, repeats, channel_key FROM live_feed_messages "
+                    f"SELECT packet_hash, last_seen, repeats FROM live_feed_messages "
                     f"WHERE packet_hash IN ({_placeholders(len(hashes))})",
                     hashes,
                 ) as cursor:
@@ -97,10 +94,8 @@ class LiveFeedRepository:
                         continue
                     last_seen = int(row.get("last_seen") or row["first_seen"])
                     repeats = int(row.get("repeats") or 1)
-                    if (
-                        last_seen > (current["last_seen"] or 0)
-                        or repeats > (current["repeats"] or 0)
-                        or (current["channel_key"] is None and row.get("channel_key"))
+                    if last_seen > (current["last_seen"] or 0) or repeats > (
+                        current["repeats"] or 0
                     ):
                         updated += 1
                         to_write.append(row)
@@ -144,23 +139,6 @@ class LiveFeedRepository:
         return inserted, updated
 
     @staticmethod
-    async def assign_channel_keys(mapping: dict[str, str | None]) -> None:
-        """Resolve ``channel_key`` for rows mirrored before the channel was known locally.
-
-        A channel joined *after* its messages were mirrored suddenly makes those
-        rows comparable; this is what flips them from live-only to matchable.
-        """
-        updates = [(key, name) for name, key in mapping.items() if key]
-        if not updates:
-            return
-        async with db.tx() as conn:
-            await conn.executemany(
-                "UPDATE live_feed_messages SET channel_key = ? "
-                "WHERE channel_name = ? AND channel_key IS NULL",
-                updates,
-            )
-
-    @staticmethod
     async def prune_older_than(cutoff: int) -> int:
         async with db.tx() as conn:
             async with conn.execute(
@@ -181,15 +159,6 @@ class LiveFeedRepository:
             async with conn.execute("SELECT COUNT(*) AS n FROM live_feed_messages") as cursor:
                 row = await cursor.fetchone()
                 return int(row["n"]) if row else 0
-
-    @staticmethod
-    async def oldest_first_seen() -> int | None:
-        async with db.readonly() as conn:
-            async with conn.execute(
-                "SELECT MIN(first_seen) AS oldest FROM live_feed_messages"
-            ) as cursor:
-                row = await cursor.fetchone()
-                return row["oldest"] if row and row["oldest"] is not None else None
 
     @staticmethod
     def _merged_cte(channel_keys: list[str], cutoff: int | None) -> tuple[str, list[Any]]:
@@ -404,7 +373,7 @@ class LiveFeedRepository:
             filter_params.append(channel_key.upper())
         if q:
             clauses.append("text LIKE ? ESCAPE '\\'")
-            filter_params.append(f"%{_escape_like(q)}%")
+            filter_params.append(f"%{escape_like(q)}%")
         base_where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
         page_clauses = list(clauses)

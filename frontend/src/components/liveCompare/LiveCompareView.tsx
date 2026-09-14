@@ -39,6 +39,7 @@ import {
   SOURCE_ORDER,
   SourceBadge,
   describeSync,
+  formatPercent,
   liveChannelUrl,
   liveHostLabel,
 } from './liveCompareShared';
@@ -51,10 +52,6 @@ interface LiveCompareViewProps {
   channels: Channel[];
   /** Opens Settings › Live Compare. Absent when the host cannot open settings. */
   onOpenSettings?: () => void;
-}
-
-function formatPercent(value: number | null): string {
-  return value === null ? '—' : `${value.toFixed(value >= 10 ? 0 : 1)}%`;
 }
 
 /** Split the stored "Sender: body" back into its parts for display. */
@@ -141,7 +138,7 @@ function MessageRow({
 }
 
 export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewProps) {
-  const [window, setWindow] = useState<StatsWindow>(DEFAULT_STATS_WINDOW);
+  const [statsWindow, setStatsWindow] = useState<StatsWindow>(DEFAULT_STATS_WINDOW);
   const [channelKey, setChannelKey] = useState<string>('');
   const [source, setSource] = useState<LiveCompareSource | null>(null);
   const [query, setQuery] = useState('');
@@ -169,7 +166,7 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
   const loadStats = useCallback(
     async (signal?: AbortSignal) => {
       try {
-        const next = await api.getLiveCompareStats(window, signal);
+        const next = await api.getLiveCompareStats(statsWindow, signal);
         if (signal?.aborted) return;
         setStats(next);
         setStatsError(null);
@@ -180,7 +177,7 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
         setStatsError(err instanceof Error ? err.message : 'Failed to load the comparison');
       }
     },
-    [window]
+    [statsWindow]
   );
 
   // The comparison itself: on window change and whenever a sync completed.
@@ -200,8 +197,10 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
         if (controller.signal.aborted) return;
         setNow(Math.floor(Date.now() / 1000));
         setStats((prev) => (prev ? { ...prev, status: next } : prev));
+        // Any change -- including the very first completed sync on a page that
+        // loaded while the feature was off -- reloads the comparison.
         const completed = next.last_sync_completed_at ?? null;
-        if (lastSyncRef.current !== null && completed !== lastSyncRef.current) {
+        if (completed !== lastSyncRef.current) {
           lastSyncRef.current = completed;
           setSyncGeneration((g) => g + 1);
         }
@@ -225,7 +224,7 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
     api
       .getLiveCompareMessages(
         {
-          window,
+          window: statsWindow,
           channelKey: channelKey || null,
           source,
           q: debouncedQuery || undefined,
@@ -248,13 +247,13 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
         if (!controller.signal.aborted) setListLoading(false);
       });
     return () => controller.abort();
-  }, [window, channelKey, source, debouncedQuery, syncGeneration]);
+  }, [statsWindow, channelKey, source, debouncedQuery, syncGeneration]);
 
   const loadMore = useCallback(async () => {
     setListLoading(true);
     try {
       const page = await api.getLiveCompareMessages({
-        window,
+        window: statsWindow,
         channelKey: channelKey || null,
         source,
         q: debouncedQuery || undefined,
@@ -272,13 +271,19 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
     } finally {
       setListLoading(false);
     }
-  }, [window, channelKey, source, debouncedQuery, messages.length]);
+  }, [statsWindow, channelKey, source, debouncedQuery, messages.length]);
 
   const handleSyncNow = useCallback(async () => {
     setSyncing(true);
     try {
-      await api.syncLiveFeed();
-      setSyncGeneration((g) => g + 1);
+      const next = await api.syncLiveFeed();
+      setStats((prev) => (prev ? { ...prev, status: next } : prev));
+      // A long first walk answers while still syncing; the status poll picks
+      // up its completion. A quick one is done: reload now.
+      if (!next.syncing) {
+        lastSyncRef.current = next.last_sync_completed_at ?? null;
+        setSyncGeneration((g) => g + 1);
+      }
     } catch (err) {
       setStatsError(err instanceof Error ? err.message : 'Sync failed');
     } finally {
@@ -348,7 +353,11 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
               . Each message appears once and says who heard it.
             </p>
           </div>
-          <WindowSelector value={window} onChange={setWindow} ariaLabel="Live compare window" />
+          <WindowSelector
+            value={statsWindow}
+            onChange={setStatsWindow}
+            ariaLabel="Live compare window"
+          />
         </div>
         {status && (
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
@@ -359,9 +368,9 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
             {status.unresolved_channels.length > 0 && (
               <span
                 className="text-warning"
-                title="This node has no key for these channels, so their messages can only show as live-only"
+                title="These configured entries match no channel key on this node, so they are not compared"
               >
-                No local key for {status.unresolved_channels.join(', ')}
+                Not compared (no key here): {status.unresolved_channels.join(', ')}
               </span>
             )}
             <Button
@@ -516,7 +525,7 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
               {messages.length === 0 && !listLoading ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">
                   {allCount === 0
-                    ? `Nothing to compare in ${windowPhrase(window)} yet.`
+                    ? `Nothing to compare in ${windowPhrase(statsWindow)} yet.`
                     : 'No messages match these filters.'}
                 </div>
               ) : (

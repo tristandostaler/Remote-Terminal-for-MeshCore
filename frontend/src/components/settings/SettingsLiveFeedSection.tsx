@@ -181,20 +181,30 @@ export function SettingsLiveFeedSection({
   }, [channels]);
 
   const allChannels = appSettings.live_feed_channels.includes(ALL_CHANNELS);
-  // Entries may be keys or names (older configs); match either.
-  const selectedKeys = useMemo(() => {
-    const entries = appSettings.live_feed_channels.map((e) => e.trim());
-    const upper = new Set(entries.map((e) => e.toUpperCase()));
-    const names = new Set(entries.map((e) => e.toLowerCase()));
-    return new Set(
-      channelOptions
-        .filter((c) => upper.has(c.key) || names.has(c.name.toLowerCase()))
-        .map((c) => c.key)
-    );
+  // Entries may be keys or names (older configs); match either. Entries the
+  // checklist cannot show -- a '#hashtag' this node has not joined (the backend
+  // derives its key from the name) or a bare key -- are kept as "extras" so a
+  // checkbox toggle never silently drops them.
+  const { selectedKeys, extraEntries } = useMemo(() => {
+    const entries = appSettings.live_feed_channels
+      .map((e) => e.trim())
+      .filter((e) => e && e !== ALL_CHANNELS);
+    const selected = new Set<string>();
+    const extras: string[] = [];
+    for (const entry of entries) {
+      const match = channelOptions.find(
+        (c) => c.key === entry.toUpperCase() || c.name.toLowerCase() === entry.toLowerCase()
+      );
+      if (match) selected.add(match.key);
+      else extras.push(entry);
+    }
+    return { selectedKeys: selected, extraEntries: extras };
   }, [appSettings.live_feed_channels, channelOptions]);
 
-  const saveChannels = (keys: Set<string>) =>
-    save('channels', { live_feed_channels: keys.size ? [...keys] : [PUBLIC_CHANNEL_KEY] });
+  const saveChannels = (keys: Set<string>, extras: string[] = extraEntries) => {
+    const next = [...keys, ...extras];
+    return save('channels', { live_feed_channels: next.length ? next : [PUBLIC_CHANNEL_KEY] });
+  };
 
   const toggleChannel = (key: string, checked: boolean) => {
     const next = new Set(allChannels ? channelOptions.map((c) => c.key) : selectedKeys);
@@ -203,8 +213,14 @@ export function SettingsLiveFeedSection({
     void saveChannels(next);
   };
 
+  const removeExtra = (entry: string) =>
+    void saveChannels(
+      new Set(allChannels ? channelOptions.map((c) => c.key) : selectedKeys),
+      extraEntries.filter((e) => e !== entry)
+    );
+
   const setAllChannels = (checked: boolean) => {
-    if (checked) void save('channels', { live_feed_channels: [ALL_CHANNELS] });
+    if (checked) void save('channels', { live_feed_channels: [ALL_CHANNELS, ...extraEntries] });
     else void saveChannels(new Set(selectedKeys.size ? selectedKeys : [PUBLIC_CHANNEL_KEY]));
   };
 
@@ -390,6 +406,26 @@ export function SettingsLiveFeedSection({
                 </li>
               );
             })}
+            {extraEntries.map((entry) => (
+              <li key={`extra-${entry}`} className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  id={`live-feed-extra-${entry}`}
+                  checked
+                  disabled={busy === 'channels'}
+                  onCheckedChange={() => removeExtra(entry)}
+                />
+                <Label
+                  htmlFor={`live-feed-extra-${entry}`}
+                  className="flex min-w-0 cursor-pointer items-center gap-1.5 font-normal"
+                  title="Configured but not a channel this node has joined; hashtag names still compare because their key derives from the name"
+                >
+                  <span className="truncate">{entry}</span>
+                  <span className="shrink-0 text-[0.625rem] uppercase tracking-wider text-muted-foreground">
+                    {entry.startsWith('#') ? 'not joined' : 'unknown'}
+                  </span>
+                </Label>
+              </li>
+            ))}
           </ul>
           {status && status.source === 'channel_messages' ? (
             <p className="text-[0.8125rem] text-warning">
@@ -470,8 +506,8 @@ export function SettingsLiveFeedSection({
             </div>
             {status.unresolved_channels.length > 0 && (
               <div className="text-warning">
-                This node has no key for {status.unresolved_channels.join(', ')}; those channels can
-                only ever show as live-only.
+                Not compared: {status.unresolved_channels.join(', ')} match no channel key on this
+                node.
               </div>
             )}
             <a

@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -680,11 +681,9 @@ class TestLiveFeedEndpoints:
         assert payload["mirrored_messages"] == 0
 
     @pytest.mark.asyncio
-    async def test_settings_patch_normalizes_and_wakes_the_loop(self, test_db, client):
-        fake = FakeCoreScope({})
-        live_feed._transport = fake.transport
-        await live_feed.start_live_feed()
-        await asyncio.sleep(0)  # let the loop create its wake event
+    async def test_settings_patch_normalizes_and_wakes_the_loop(self, test_db, client, monkeypatch):
+        woken = MagicMock()
+        monkeypatch.setattr(live_feed, "notify_settings_changed", woken)
         response = await client.patch(
             "/api/settings",
             json={
@@ -702,8 +701,35 @@ class TestLiveFeedEndpoints:
         assert payload["live_feed_region"] == "YUL,YQB"
         assert payload["live_feed_channels"] == ["Public", "#bot", SECRET_KEY_HEX.lower()]
         assert payload["live_feed_poll_interval"] == MIN_LIVE_FEED_POLL_INTERVAL
-        assert live_feed._wake_requested()
-        await live_feed.stop_live_feed()
+        woken.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_wake_during_a_sync_is_not_lost(self, test_db):
+        """The loop clears its wake flag before reading settings, so a settings
+        change that lands mid-sync triggers another pass instead of waiting a
+        full poll interval."""
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
+        live_feed._transport = fake.transport
+        await _enable()
+        reads: list[float] = []
+        original_get = AppSettingsRepository.get
+
+        async def counting_get():
+            reads.append(time.monotonic())
+            settings = await original_get()
+            if len(reads) == 1:
+                live_feed.notify_settings_changed()  # arrives while this pass runs
+            return settings
+
+        with patch.object(AppSettingsRepository, "get", counting_get):
+            await live_feed.start_live_feed()
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if len(reads) >= 2:
+                    break
+            await live_feed.stop_live_feed()
+        # A second pass ran right away rather than after the 900 s interval.
+        assert len(reads) >= 2
 
     @pytest.mark.asyncio
     async def test_settings_patch_rejects_non_http_url(self, test_db, client):

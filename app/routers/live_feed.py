@@ -36,8 +36,12 @@ async def get_live_feed_status() -> LiveFeedStatus:
 
 @router.post("/sync", response_model=LiveFeedStatus)
 async def sync_live_feed() -> LiveFeedStatus:
-    """Run one sync now (even while disabled) and report the outcome."""
-    await live_feed.sync_once(force=True)
+    """Start a sync now (even while disabled).
+
+    Waits a bounded time for it; a long first walk answers with ``syncing``
+    still true and the outcome shows up in ``GET /live-feed/status``.
+    """
+    await live_feed.request_sync()
     return LiveFeedStatus(**await live_feed.get_status())
 
 

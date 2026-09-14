@@ -95,6 +95,11 @@ export function liveHostLabel(baseUrl: string): string {
   }
 }
 
+/** Coverage percentages: whole numbers once they are large enough to read that way. */
+export function formatPercent(value: number | null): string {
+  return value === null ? '—' : `${value.toFixed(value >= 10 ? 0 : 1)}%`;
+}
+
 export function formatRelativeAge(epochSeconds: number | null | undefined, now: number): string {
   if (!epochSeconds) return 'never';
   const delta = Math.max(0, now - epochSeconds);

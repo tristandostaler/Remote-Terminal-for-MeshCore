@@ -16,6 +16,11 @@ from app.models import (
 from app.reactions import parse_reactions_json
 
 
+def escape_like(value: str) -> str:
+    """Escape a user string for a ``LIKE ? ESCAPE '\\'`` pattern."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class MessageRepository:
     @dataclass
     class _SearchQuery:
@@ -293,7 +298,7 @@ class MessageRepository:
 
     @staticmethod
     def _escape_like(value: str) -> str:
-        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return escape_like(value)
 
     @staticmethod
     def _looks_like_hex_prefix(value: str) -> bool:

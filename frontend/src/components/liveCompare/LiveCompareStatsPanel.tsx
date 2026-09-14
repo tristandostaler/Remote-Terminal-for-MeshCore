@@ -18,11 +18,7 @@ import {
   TOOLTIP_STYLE,
   windowPhrase,
 } from '../nodeStats/nodeStatsShared';
-import { SOURCE_META, describeSync, liveHostLabel } from './liveCompareShared';
-
-function formatPercent(value: number | null): string {
-  return value === null ? '—' : `${value.toFixed(value >= 10 ? 0 : 1)}%`;
-}
+import { SOURCE_META, describeSync, formatPercent, liveHostLabel } from './liveCompareShared';
 
 function bucketLabeller(bucketSeconds: number): (ts: number) => string {
   if (bucketSeconds >= 86400) {
@@ -176,17 +172,7 @@ export function LiveComparePanel({
                         key={channel.channel_key ?? channel.channel_name}
                         className="border-t border-border/60"
                       >
-                        <td className="py-1 pr-3">
-                          {channel.channel_name}
-                          {!channel.channel_key && (
-                            <span
-                              className="ml-1 text-[0.625rem] text-warning"
-                              title="This node has no key for this channel"
-                            >
-                              no key
-                            </span>
-                          )}
-                        </td>
+                        <td className="py-1 pr-3">{channel.channel_name}</td>
                         <td className="py-1 pr-3 text-right tabular-nums text-success">
                           {channel.both}
                         </td>
