@@ -1219,7 +1219,12 @@ export interface LiveFeedStatus {
   last_sync_completed_at: number | null;
   last_success_at: number | null;
   last_error: string | null;
+  /** Messages checked by the last sync. */
   last_fetched: number;
+  /** Rows the last sync inserted or refreshed. */
+  last_changed: number;
+  /** True when the last sync walked the whole lookback window instead of only what changed. */
+  last_sync_full: boolean;
   mirrored_messages: number;
   /** Configured entries that matched no channel key on this node. */
   unresolved_channels: string[];

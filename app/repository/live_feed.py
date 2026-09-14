@@ -66,23 +66,46 @@ class LiveFeedRepository:
     # ------------------------------------------------------------------ writes
 
     @staticmethod
-    async def upsert_many(rows: list[dict[str, Any]]) -> int:
-        """Insert or refresh mirrored rows. Returns how many were new."""
+    async def upsert_many(rows: list[dict[str, Any]]) -> tuple[int, int]:
+        """Insert new rows and refresh the ones whose observations moved.
+
+        Returns ``(inserted, updated)``. A row already holding the same
+        last-seen time and repeat count is left alone, so a poll that re-reads
+        an unchanged window costs one indexed SELECT per batch and no writes.
+        """
         if not rows:
-            return 0
+            return 0, 0
         now = int(time.time())
-        new_rows = 0
+        inserted = 0
+        updated = 0
         for start in range(0, len(rows), UPSERT_BATCH):
             batch = rows[start : start + UPSERT_BATCH]
             hashes = [row["packet_hash"] for row in batch]
             async with db.tx() as conn:
                 async with conn.execute(
-                    f"SELECT packet_hash FROM live_feed_messages "
+                    f"SELECT packet_hash, last_seen, repeats, channel_key FROM live_feed_messages "
                     f"WHERE packet_hash IN ({_placeholders(len(hashes))})",
                     hashes,
                 ) as cursor:
-                    existing = {r["packet_hash"] for r in await cursor.fetchall()}
-                new_rows += sum(1 for h in hashes if h not in existing)
+                    existing = {r["packet_hash"]: r for r in await cursor.fetchall()}
+                to_write: list[dict[str, Any]] = []
+                for row in batch:
+                    current = existing.get(row["packet_hash"])
+                    if current is None:
+                        inserted += 1
+                        to_write.append(row)
+                        continue
+                    last_seen = int(row.get("last_seen") or row["first_seen"])
+                    repeats = int(row.get("repeats") or 1)
+                    if (
+                        last_seen > (current["last_seen"] or 0)
+                        or repeats > (current["repeats"] or 0)
+                        or (current["channel_key"] is None and row.get("channel_key"))
+                    ):
+                        updated += 1
+                        to_write.append(row)
+                if not to_write:
+                    continue
                 await conn.executemany(
                     f"""
                     INSERT INTO live_feed_messages ({", ".join(_LIVE_COLUMNS)})
@@ -115,10 +138,10 @@ class LiveFeedRepository:
                             row.get("scope_name"),
                             now,
                         )
-                        for row in batch
+                        for row in to_write
                     ],
                 )
-        return new_rows
+        return inserted, updated
 
     @staticmethod
     async def assign_channel_keys(mapping: dict[str, str | None]) -> None:

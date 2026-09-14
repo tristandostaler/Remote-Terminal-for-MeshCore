@@ -18,7 +18,7 @@ DEFAULT_LIVE_FEED_CHANNEL = "Public"
 # Setting entry meaning "every channel this node knows" (its keys are what let
 # us decrypt the remote packet feed, so this covers private channels too).
 ALL_LIVE_FEED_CHANNELS = "*"
-DEFAULT_LIVE_FEED_POLL_INTERVAL = 300
+DEFAULT_LIVE_FEED_POLL_INTERVAL = 900
 MIN_LIVE_FEED_POLL_INTERVAL = 60
 MAX_LIVE_FEED_POLL_INTERVAL = 86400
 
@@ -1961,7 +1961,15 @@ class LiveFeedStatus(BaseModel):
     last_sync_completed_at: int | None = None
     last_success_at: int | None = None
     last_error: str | None = None
-    last_fetched: int = Field(default=0, description="Messages fetched by the last sync")
+    last_fetched: int = Field(default=0, description="Messages checked by the last sync")
+    last_changed: int = Field(default=0, description="Rows the last sync inserted or refreshed")
+    last_sync_full: bool = Field(
+        default=False,
+        description=(
+            "True when the last sync walked the whole lookback window (first sync, or the "
+            "URL/region/channels changed) rather than only what was observed since the one before"
+        ),
+    )
     mirrored_messages: int = Field(default=0, description="Rows in the local mirror")
     unresolved_channels: list[str] = Field(
         default_factory=list,

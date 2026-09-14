@@ -22,6 +22,8 @@ const status: LiveFeedStatus = {
   last_success_at: 1_700_000_010,
   last_error: null,
   last_fetched: 3,
+  last_changed: 0,
+  last_sync_full: false,
   mirrored_messages: 2,
   unresolved_channels: [],
   source: 'packets',

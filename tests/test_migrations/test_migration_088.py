@@ -70,7 +70,7 @@ class TestMigration088:
             assert row["live_feed_enabled"] == 0
             assert row["live_feed_url"] == "https://live.meshcore.ca"
             assert row["live_feed_channels"] == '["*"]'
-            assert row["live_feed_poll_interval"] == 300
+            assert row["live_feed_poll_interval"] == 900
         finally:
             await conn.close()
 

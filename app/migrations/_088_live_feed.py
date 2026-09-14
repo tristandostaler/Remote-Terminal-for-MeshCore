@@ -9,7 +9,7 @@ LIVE_FEED_SETTINGS_COLUMNS: tuple[tuple[str, str], ...] = (
     ("live_feed_url", "TEXT DEFAULT 'https://live.meshcore.ca'"),
     ("live_feed_region", "TEXT DEFAULT ''"),
     ("live_feed_channels", "TEXT DEFAULT '[\"*\"]'"),
-    ("live_feed_poll_interval", "INTEGER DEFAULT 300"),
+    ("live_feed_poll_interval", "INTEGER DEFAULT 900"),
 )
 
 

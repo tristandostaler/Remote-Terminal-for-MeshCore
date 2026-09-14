@@ -113,6 +113,8 @@ describe('StatisticsView', () => {
           last_success_at: 1_700_000_010,
           last_error: null,
           last_fetched: 12,
+          last_changed: 0,
+          last_sync_full: false,
           mirrored_messages: 40,
           unresolved_channels: [],
           source: 'packets',

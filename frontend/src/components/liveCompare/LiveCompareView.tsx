@@ -6,9 +6,10 @@
  * The page owns one window, one channel filter, one source filter and a
  * search box; the summary tiles and the list always describe the same
  * selection. Two requests back it: `/live-feed/stats` (status + tiles) and
- * `/live-feed/messages` (the page). The status is re-polled every
- * `STATUS_POLL_MS`; when the backend reports a newer completed sync the list
- * is reloaded, so the page follows the sync loop without WebSocket plumbing.
+ * `/live-feed/messages` (the page). Only the cheap `/live-feed/status` is
+ * re-polled every `STATUS_POLL_MS`; the stats query and the list are reloaded
+ * when it reports a newer completed sync, so the page follows the sync loop
+ * without WebSocket plumbing and without re-running the comparison on a timer.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -173,12 +174,7 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
         setStats(next);
         setStatsError(null);
         setNow(Math.floor(Date.now() / 1000));
-        const completed = next?.status.last_sync_completed_at ?? null;
-        if (completed !== lastSyncRef.current) {
-          const isFirst = lastSyncRef.current === null;
-          lastSyncRef.current = completed;
-          if (!isFirst) setSyncGeneration((g) => g + 1);
-        }
+        lastSyncRef.current = next?.status.last_sync_completed_at ?? null;
       } catch (err) {
         if (isAbortError(err)) return;
         setStatsError(err instanceof Error ? err.message : 'Failed to load the comparison');
@@ -187,16 +183,39 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
     [window]
   );
 
-  // Stats: on window change, then on a timer so the page follows the sync loop.
+  // The comparison itself: on window change and whenever a sync completed.
   useEffect(() => {
     const controller = new AbortController();
     void loadStats(controller.signal);
-    const timer = setInterval(() => void loadStats(controller.signal), STATUS_POLL_MS);
+    return () => controller.abort();
+  }, [loadStats, syncGeneration]);
+
+  // Follow the sync loop through the cheap status endpoint; a newer completed
+  // sync bumps the generation, which reloads the stats and the list above.
+  useEffect(() => {
+    const controller = new AbortController();
+    const poll = async () => {
+      try {
+        const next = await api.getLiveFeedStatus(controller.signal);
+        if (controller.signal.aborted) return;
+        setNow(Math.floor(Date.now() / 1000));
+        setStats((prev) => (prev ? { ...prev, status: next } : prev));
+        const completed = next.last_sync_completed_at ?? null;
+        if (lastSyncRef.current !== null && completed !== lastSyncRef.current) {
+          lastSyncRef.current = completed;
+          setSyncGeneration((g) => g + 1);
+        }
+      } catch (err) {
+        if (isAbortError(err)) return;
+        // A failed status poll is not worth an error banner; the next tick retries.
+      }
+    };
+    const timer = setInterval(() => void poll(), STATUS_POLL_MS);
     return () => {
       controller.abort();
       clearInterval(timer);
     };
-  }, [loadStats]);
+  }, []);
 
   // The first page whenever a filter changes or a sync completes.
   useEffect(() => {
@@ -259,14 +278,13 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
     setSyncing(true);
     try {
       await api.syncLiveFeed();
-      await loadStats();
       setSyncGeneration((g) => g + 1);
     } catch (err) {
       setStatsError(err instanceof Error ? err.message : 'Sync failed');
     } finally {
       setSyncing(false);
     }
-  }, [loadStats]);
+  }, []);
 
   const status = stats?.status ?? null;
 

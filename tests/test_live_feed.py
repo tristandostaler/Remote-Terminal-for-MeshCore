@@ -558,6 +558,52 @@ class TestSyncAndCompare:
         assert state.last_fetched == 1
 
     @pytest.mark.asyncio
+    async def test_later_syncs_are_incremental_and_a_scope_change_walks_again(self, test_db):
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
+        live_feed._transport = fake.transport
+        settings = await _enable()
+
+        first = await live_feed.sync_once(settings)
+        assert first.last_sync_full is True
+        assert first.last_sync_started_at is not None
+        first_since = live_feed._parse_iso(fake.requests[0].url.params["since"])
+        assert first_since == first.last_sync_started_at - live_feed.LOOKBACK_SECONDS
+
+        fake.requests.clear()
+        second = await live_feed.sync_once(settings)
+        assert second.last_sync_full is False
+        second_since = live_feed._parse_iso(fake.requests[0].url.params["since"])
+        # Only what was observed since the previous sync started, minus the overlap.
+        assert second_since == first.last_sync_started_at - live_feed.CURSOR_OVERLAP_SECONDS
+        # Nothing moved on the remote side, so nothing was rewritten.
+        assert second.last_fetched == 1
+        assert second.last_changed == 0
+
+        # A different region is a different feed: back to a full walk once.
+        fake.requests.clear()
+        third = await live_feed.sync_once(await _enable(live_feed_region="YQB"))
+        assert third.last_sync_full is True
+        assert third.last_sync_started_at is not None
+        third_since = live_feed._parse_iso(fake.requests[0].url.params["since"])
+        assert third_since == third.last_sync_started_at - live_feed.LOOKBACK_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_upsert_rewrites_only_rows_whose_observations_moved(self, test_db):
+        base = live_feed.normalize_live_message(
+            _live_message("Alice", "hi", NOW - 20, repeats=1), "Public", PUBLIC_CHANNEL_KEY
+        )
+        assert base is not None
+        assert await LiveFeedRepository.upsert_many([base]) == (1, 0)
+        assert await LiveFeedRepository.upsert_many([dict(base)]) == (0, 0)
+        moved = dict(base, repeats=3, observers=["a", "b", "c"])
+        assert await LiveFeedRepository.upsert_many([moved]) == (0, 1)
+        later = dict(base, last_seen=base["last_seen"] + 60)
+        assert await LiveFeedRepository.upsert_many([later]) == (0, 1)
+        message = (await live_feed.list_messages("1d"))["messages"][0]
+        assert message["live_repeats"] == 3
+        assert message["live_last_seen"] == base["last_seen"] + 60
+
+    @pytest.mark.asyncio
     async def test_several_regions_walk_the_packet_feed_once_each(self, test_db):
         fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
         live_feed._transport = fake.transport
@@ -630,7 +676,7 @@ class TestLiveFeedEndpoints:
         # '*' resolved against a fresh node: its seeded channels plus Public.
         assert "Public" in payload["channels"]
         assert payload["source"] == "packets"
-        assert payload["poll_interval"] == 300
+        assert payload["poll_interval"] == 900
         assert payload["mirrored_messages"] == 0
 
     @pytest.mark.asyncio

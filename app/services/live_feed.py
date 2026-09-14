@@ -24,11 +24,14 @@ Region: CoreScope tags every observation with the observer's IATA region code
 to messages heard by observers in those regions. This is a geographic filter
 on the *remote* side and has nothing to do with MeshCore flood-scope regions.
 
-Polling: each sync walks the packet feed back to ``LOOKBACK_SECONDS`` (bounded
-by ``since=`` and a page cap), upserting by packet hash. Cheap, idempotent, and
-it needs no cursor state to survive restarts. The fallback list is ordered by
-latest observation, so it is walked until a whole page is older than the
-horizon.
+Polling: the first sync (and any sync after the URL, region or channel
+selection changed) walks the packet feed back to ``LOOKBACK_SECONDS``. Every
+later sync asks only for packets *observed* since the previous sync started,
+minus ``CURSOR_OVERLAP_SECONDS`` -- CoreScope's ``since=`` is on observation
+time, so a late repeat of an old message still comes through and refreshes its
+counts. The cursor lives in memory: a restart costs one full walk, nothing
+more. Rows whose observation count and last-seen time did not move are not
+rewritten, so a quiet poll is a handful of reads and no writes.
 """
 
 from __future__ import annotations
@@ -78,6 +81,9 @@ REGIONS_CACHE_SECONDS = 600
 # Wait this long after a failed sync before letting the loop retry, whatever
 # the configured interval says -- a dead host should not be hammered.
 MIN_RETRY_AFTER_ERROR_SECONDS = 120
+# Incremental polls re-read this much before the previous sync started, so an
+# observation that landed while that sync was running is not missed.
+CURSOR_OVERLAP_SECONDS = 600
 
 
 class LiveFeedError(Exception):
@@ -92,8 +98,14 @@ class LiveFeedState:
     last_success_at: int | None = None
     last_error: str | None = None
     last_fetched: int = 0
+    last_changed: int = 0
     unresolved_channels: list[str] = field(default_factory=list)
     source: str = "packets"
+    last_sync_full: bool = False
+    # Observation-time watermark of the last successful sync and the
+    # url|region|channels fingerprint it was taken under.
+    cursor: int | None = None
+    cursor_scope: str | None = None
 
 
 _state = LiveFeedState()
@@ -522,19 +534,19 @@ def decrypt_live_packet(
 @dataclass
 class _PacketSyncResult:
     fetched: int = 0
+    changed: int = 0
     packets: int = 0
     with_ciphertext: int = 0
 
 
 async def _sync_packets(
-    client: LiveFeedClient, channels: list[ComparedChannel], now: int
+    client: LiveFeedClient, channels: list[ComparedChannel], since: int
 ) -> _PacketSyncResult:
-    """Walk the remote GRP_TXT feed back to the horizon and decrypt what we can."""
+    """Walk the remote GRP_TXT feed observed since ``since`` and decrypt what we can."""
     result = _PacketSyncResult()
     channels_by_hash: dict[int, list[ComparedChannel]] = defaultdict(list)
     for channel in channels:
         channels_by_hash[channel.hash_byte].append(channel)
-    since = now - LOOKBACK_SECONDS
     # The packet endpoint takes one region at a time; several codes mean one
     # walk each, de-duplicated by hash in the upsert.
     region_codes: list[str | None] = [c for c in client.region.split(",") if c] or [None]
@@ -559,21 +571,28 @@ async def _sync_packets(
                 if row is not None and row["packet_hash"] not in seen:
                     seen.add(row["packet_hash"])
                     rows.append(row)
-            await LiveFeedRepository.upsert_many(rows)
+            inserted, updated = await LiveFeedRepository.upsert_many(rows)
             result.fetched += len(rows)
+            result.changed += inserted + updated
             offset += len(packets)
             if len(packets) < PAGE_LIMIT or (total is not None and offset >= total):
                 break
     return result
 
 
-async def _sync_channel_messages(client: LiveFeedClient, channel: ComparedChannel, now: int) -> int:
-    """Fallback: walk the remote instance's own decryption of one channel."""
+async def _sync_channel_messages(
+    client: LiveFeedClient, channel: ComparedChannel, horizon: int
+) -> tuple[int, int]:
+    """Fallback: walk the remote instance's own decryption of one channel.
+
+    Returns ``(fetched, changed)``. The list is newest-activity first, so it is
+    walked until a whole page is older than ``horizon``.
+    """
     remote_name = channel.remote_name
     if remote_name is None:
-        return 0
-    horizon = now - LOOKBACK_SECONDS
+        return 0, 0
     fetched = 0
+    changed = 0
     offset = 0
     for _page in range(MAX_PAGES_PER_CHANNEL):
         messages, total = await client.fetch_channel_messages(remote_name, offset=offset)
@@ -584,16 +603,23 @@ async def _sync_channel_messages(client: LiveFeedClient, channel: ComparedChanne
             for row in (normalize_live_message(m, channel.name, channel.key) for m in messages)
             if row is not None
         ]
-        await LiveFeedRepository.upsert_many(rows)
+        inserted, updated = await LiveFeedRepository.upsert_many(rows)
         fetched += len(rows)
+        changed += inserted + updated
         offset += len(messages)
         if len(messages) < PAGE_LIMIT or (total is not None and offset >= total):
             break
-        # The list is newest-activity first; once a whole page is older than the
-        # horizon nothing further down can be newer.
         if rows and max(row["last_seen"] for row in rows) < horizon:
             break
-    return fetched
+    return fetched, changed
+
+
+def _sync_scope(settings: AppSettings, channels: list[ComparedChannel]) -> str:
+    """What the cursor is valid for; any change here means a full walk."""
+    keys = ",".join(sorted(channel.key for channel in channels))
+    return (
+        f"{settings.live_feed_url.rstrip('/')}|{normalize_region(settings.live_feed_region)}|{keys}"
+    )
 
 
 async def sync_once(settings: AppSettings | None = None, *, force: bool = False) -> LiveFeedState:
@@ -617,12 +643,20 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
                 {channel.name: channel.key for channel in channels}
             )
             client = LiveFeedClient(settings.live_feed_url, settings.live_feed_region)
+            scope = _sync_scope(settings, channels)
+            full_walk = _state.cursor is None or _state.cursor_scope != scope
+            since = (
+                now - LOOKBACK_SECONDS
+                if full_walk or _state.cursor is None
+                else max(now - LOOKBACK_SECONDS, _state.cursor - CURSOR_OVERLAP_SECONDS)
+            )
             fetched = 0
+            changed = 0
             source = "packets"
             if channels:
                 packet_feed_available = True
                 try:
-                    packet_result = await _sync_packets(client, channels, now)
+                    packet_result = await _sync_packets(client, channels, since)
                 except LiveFeedError as exc:
                     # An instance without the packet feed (or one that hides it)
                     # still serves its own decryption of the public channels.
@@ -632,6 +666,7 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
                     packet_feed_available = False
                     packet_result = _PacketSyncResult()
                 fetched = packet_result.fetched
+                changed = packet_result.changed
                 # Fall back to the remote instance's own decryption when the
                 # packet feed gave us nothing to decrypt: no feed at all, or
                 # packets stripped of their ciphertext.
@@ -640,15 +675,23 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
                 ):
                     source = "channel_messages"
                     for channel in channels:
-                        fetched += await _sync_channel_messages(client, channel, now)
+                        got, moved = await _sync_channel_messages(client, channel, since)
+                        fetched += got
+                        changed += moved
             _state.source = source
+            _state.last_sync_full = full_walk
+            _state.cursor = now
+            _state.cursor_scope = scope
             await LiveFeedRepository.prune_older_than(now - RETENTION_SECONDS)
             _state.last_fetched = fetched
+            _state.last_changed = changed
             _state.last_success_at = int(time.time())
             _state.last_error = None
             logger.info(
-                "Live feed sync: %d messages from %s (%s, %d channels, via %s)",
+                "Live feed sync (%s): %d messages checked, %d changed, from %s (%s, %d channels, via %s)",
+                "full" if full_walk else "incremental",
                 fetched,
+                changed,
                 settings.live_feed_url,
                 settings.live_feed_region or "all regions",
                 len(channels),
@@ -737,7 +780,7 @@ async def get_status(settings: AppSettings | None = None) -> dict[str, Any]:
         "channels": [channel.name for channel in channels],
         "poll_interval": settings.live_feed_poll_interval,
         "mirrored_messages": await LiveFeedRepository.count(),
-        **asdict(_state),
+        **{k: v for k, v in asdict(_state).items() if k not in ("cursor", "cursor_scope")},
     }
 
 

@@ -456,7 +456,9 @@ export function SettingsLiveFeedSection({
             <div>
               <span className="text-muted-foreground">Mirrored messages:</span>{' '}
               {status.mirrored_messages.toLocaleString()}
-              {status.last_fetched ? ` · ${status.last_fetched} checked on the last sync` : ''}
+              {status.last_success_at
+                ? ` · last sync ${status.last_sync_full ? 'walked the whole week' : 'was incremental'}: ${status.last_fetched} checked, ${status.last_changed} new or updated`
+                : ''}
             </div>
             <div>
               <span className="text-muted-foreground">Comparing:</span>{' '}
