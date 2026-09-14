@@ -1983,6 +1983,10 @@ class LiveFeedStatus(BaseModel):
         default_factory=list,
         description="Configured entries that matched no channel key on this node",
     )
+    recent_log: list[str] = Field(
+        default_factory=list,
+        description="The last few sync events (timestamped, oldest first), for live debugging",
+    )
     source: str = Field(
         default="packets",
         description=(
@@ -2071,22 +2075,6 @@ class LiveFeedRegion(BaseModel):
 class LiveFeedRegionsResponse(BaseModel):
     url: str
     regions: list[LiveFeedRegion]
-
-
-class LiveFeedProbeAttempt(BaseModel):
-    label: str
-    user_agent: str
-    ok: bool
-    status: int | None = None
-    error: str | None = None
-    elapsed_ms: int
-
-
-class LiveFeedProbeResponse(BaseModel):
-    """One request to the instance's region list per User-Agent variant."""
-
-    url: str
-    attempts: list[LiveFeedProbeAttempt]
 
 
 class StatisticsResponse(BaseModel):

@@ -118,6 +118,7 @@ describe('StatisticsView', () => {
           last_sync_full: false,
           mirrored_messages: 40,
           unresolved_channels: [],
+          recent_log: [],
           source: 'packets',
         },
         both: 30,

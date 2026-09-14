@@ -42,7 +42,7 @@ import hashlib
 import json
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -91,9 +91,17 @@ PACKET_SLICE_SECONDS = 6 * 3600
 # fresh connection; anything still failing after this is reported.
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = (1.0, 3.0)
+# How many sync events the status keeps for the settings page's activity view.
+RECENT_LOG_ENTRIES = 40
 # How long POST /live-feed/sync waits for the sync it started before answering
 # with "still syncing" -- short of common reverse-proxy timeouts.
 SYNC_REQUEST_WAIT_SECONDS = 20.0
+
+
+def _log(message: str) -> None:
+    """Record a sync event for the operator's activity view (and the server log)."""
+    stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
+    _state.recent_log.append(f"{stamp} {message}")
 
 
 class LiveFeedError(Exception):
@@ -120,6 +128,12 @@ class LiveFeedState:
     # url|region|channels fingerprint it was taken under.
     cursor: int | None = None
     cursor_scope: str | None = None
+    # url|region the mirror currently holds rows for. Rows do not record the
+    # region they were fetched under, so when this changes the mirror is
+    # cleared and re-walked rather than mixing regions.
+    feed_scope: str | None = None
+    # Last few sync events, newest last, for the settings page's activity view.
+    recent_log: deque[str] = field(default_factory=lambda: deque(maxlen=RECENT_LOG_ENTRIES))
 
 
 _state = LiveFeedState()
@@ -710,6 +724,7 @@ async def _sync_packets(
                     _iso(slice_until),
                     exc,
                 )
+                _log(f"packet slice {_iso(slice_since)}..{_iso(slice_until)} failed: {exc}")
     return result
 
 
@@ -747,12 +762,15 @@ async def _sync_channel_messages(
     return fetched, changed
 
 
+def _feed_scope(settings: AppSettings) -> str:
+    """Which remote feed the mirror holds: instance and region filter."""
+    return f"{settings.live_feed_url.rstrip('/')}|{normalize_region(settings.live_feed_region)}"
+
+
 def _sync_scope(settings: AppSettings, channels: list[ComparedChannel]) -> str:
     """What the cursor is valid for; any change here means a full walk."""
     keys = ",".join(sorted(channel.key for channel in channels))
-    return (
-        f"{settings.live_feed_url.rstrip('/')}|{normalize_region(settings.live_feed_region)}|{keys}"
-    )
+    return f"{_feed_scope(settings)}|{keys}"
 
 
 async def sync_once(settings: AppSettings | None = None, *, force: bool = False) -> LiveFeedState:
@@ -773,6 +791,14 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
             channels, unresolved = await resolve_compared_channels(settings.live_feed_channels)
             _state.unresolved_channels = unresolved
             scope = _sync_scope(settings, channels)
+            feed_scope = _feed_scope(settings)
+            if _state.feed_scope is not None and _state.feed_scope != feed_scope:
+                # A different instance or region is a different set of
+                # observations; rows fetched under the old one would otherwise
+                # keep showing up as "live" for the new selection.
+                await LiveFeedRepository.clear()
+                _state.cursor = None
+                _log(f"instance/region changed to {feed_scope}: mirror cleared, walking again")
             full_walk = _state.cursor is None or _state.cursor_scope != scope
             since = (
                 now - LOOKBACK_SECONDS
@@ -783,6 +809,10 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
             changed = 0
             source = "packets"
             warning: str | None = None
+            _log(
+                f"sync started ({'full' if full_walk else 'incremental'} since {_iso(since)}, "
+                f"{len(channels)} channels, region {normalize_region(settings.live_feed_region) or 'all'})"
+            )
             async with LiveFeedClient(settings.live_feed_url, settings.live_feed_region) as client:
                 if channels:
                     packet_result = await _sync_packets(client, channels, since, now)
@@ -814,6 +844,9 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
                         )
             _state.source = source
             _state.last_warning = warning
+            _state.feed_scope = feed_scope
+            if warning:
+                _log(f"degraded: {warning}")
             _state.last_sync_full = full_walk
             _state.cursor = now
             _state.cursor_scope = scope
@@ -822,6 +855,10 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
             _state.last_changed = changed
             _state.last_success_at = int(time.time())
             _state.last_error = None
+            _log(
+                f"sync done via {source}: {fetched} checked, {changed} new or updated, "
+                f"{await LiveFeedRepository.count()} mirrored"
+            )
             logger.info(
                 "Live feed sync (%s): %d messages checked, %d changed, from %s (%s, %d channels, via %s)",
                 "full" if full_walk else "incremental",
@@ -834,11 +871,13 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
             )
         except LiveFeedError as exc:
             _state.last_error = str(exc)
+            _log(f"sync failed: {exc}")
             logger.warning("Live feed sync failed: %s", exc)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             _state.last_error = f"{exc.__class__.__name__}: {exc}"
+            _log(f"sync crashed: {_state.last_error}")
             logger.exception("Live feed sync crashed")
         finally:
             _state.syncing = False
@@ -934,7 +973,12 @@ async def get_status(
         "channels": [channel.name for channel in channels],
         "poll_interval": settings.live_feed_poll_interval,
         "mirrored_messages": await LiveFeedRepository.count(),
-        **{k: v for k, v in asdict(_state).items() if k not in ("cursor", "cursor_scope")},
+        **{
+            k: v
+            for k, v in asdict(_state).items()
+            if k not in ("cursor", "cursor_scope", "feed_scope", "recent_log")
+        },
+        "recent_log": list(_state.recent_log),
     }
 
 
@@ -983,62 +1027,6 @@ async def get_regions(settings: AppSettings | None = None) -> dict[str, Any]:
     regions = await LiveFeedClient(url).fetch_regions()
     _regions_cache[url] = (time.monotonic(), regions)
     return {"url": url, "regions": regions}
-
-
-PROBE_USER_AGENTS: tuple[tuple[str, str | None], ...] = (
-    ("RemoteTerm (what the sync uses)", None),
-    ("python-httpx default (what older builds sent)", "python-httpx/0.28.1"),
-    (
-        "browser-like",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36",
-    ),
-)
-
-
-async def probe_connection(settings: AppSettings | None = None) -> dict[str, Any]:
-    """Try the instance's region list with several User-Agents and report each outcome.
-
-    The RemoteTerm container ships no curl, so this is the operator's way to
-    tell a user-agent block (our UA works, python's is dropped) from a network
-    problem (every attempt fails the same way). No retries, one request each.
-    """
-    import httpx
-
-    settings = settings or await AppSettingsRepository.get()
-    url = settings.live_feed_url.rstrip("/")
-    attempts: list[dict[str, Any]] = []
-    for label, user_agent in PROBE_USER_AGENTS:
-        headers = {"Accept": "application/json"}
-        if user_agent:
-            headers["User-Agent"] = user_agent
-        else:
-            headers["User-Agent"] = _user_agent()
-        started = time.monotonic()
-        attempt: dict[str, Any] = {
-            "label": label,
-            "user_agent": headers["User-Agent"],
-            "ok": False,
-            "status": None,
-            "error": None,
-            "elapsed_ms": 0,
-        }
-        try:
-            async with httpx.AsyncClient(
-                timeout=HTTP_TIMEOUT_SECONDS,
-                follow_redirects=True,
-                transport=_transport,
-                headers=headers,
-            ) as client:
-                response = await client.get(f"{url}/api/config/regions")
-            attempt["status"] = response.status_code
-            attempt["ok"] = response.status_code < 400
-            if not attempt["ok"]:
-                attempt["error"] = f"HTTP {response.status_code}"
-        except Exception as exc:
-            attempt["error"] = f"{exc.__class__.__name__}: {exc}"
-        attempt["elapsed_ms"] = int((time.monotonic() - started) * 1000)
-        attempts.append(attempt)
-    return {"url": url, "attempts": attempts}
 
 
 def _reset_for_tests() -> None:

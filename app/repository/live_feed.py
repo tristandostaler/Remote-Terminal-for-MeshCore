@@ -164,15 +164,21 @@ class LiveFeedRepository:
     def _merged_cte(channel_keys: list[str], cutoff: int | None) -> tuple[str, list[Any]]:
         """The three-way merge as a ``WITH merged AS (...)`` prefix plus its params."""
         params: list[Any] = []
-        live_where = ""
         node_time = ""
-        if cutoff is not None:
-            live_where = "WHERE lf.first_seen >= ?"
-            params.append(cutoff)
+        # Both sides are restricted to the channels being compared: a channel
+        # deselected in settings keeps its mirrored rows (they are still valid
+        # observations) but must not show up as live-only.
         if channel_keys:
+            live_clauses = [f"lf.channel_key IN ({_placeholders(len(channel_keys))})"]
+            params.extend(channel_keys)
             node_channels = f"m.conversation_key IN ({_placeholders(len(channel_keys))})"
         else:
+            live_clauses = ["0"]
             node_channels = "0"
+        if cutoff is not None:
+            live_clauses.append("lf.first_seen >= ?")
+            params.append(cutoff)
+        live_where = "WHERE " + " AND ".join(live_clauses)
         node_params: list[Any] = list(channel_keys)
         if cutoff is not None:
             node_time = " AND m.received_at >= ?"

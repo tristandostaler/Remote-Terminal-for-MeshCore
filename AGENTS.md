@@ -12,13 +12,13 @@ If instructed to "run all tests" or "get ready for a commit" or other summative,
 
 This is the repo's end-to-end quality gate. It runs backend/frontend autofixers first, then type checking, tests, and the standard frontend build. All checks must pass green, and the script may leave formatting/lint edits behind.
 
-**When creating a pull request, always ask the user whether the `version` in `config.yaml` should be bumped — and propose a specific bump.** Base the suggestion on the change, following semantic versioning (`MAJOR.MINOR.PATCH`):
+**Every pull request MUST bump the `version` in `config.yaml`. No exceptions.** This includes follow-up PRs opened after an earlier PR from the same branch was merged: a merged PR's bump is spent, and the next PR needs its own. Before opening a PR, check that `config.yaml` on the branch is strictly greater than `config.yaml` on `main`; if it is not, bump it in the PR. Pick the level by semantic versioning (`MAJOR.MINOR.PATCH`) and state the bump and its reasoning in the PR description so the user can override it:
 
 - **Patch** — bug fixes and small/minor changes (e.g. `1.0.0` → `1.0.1`).
 - **Minor** — enhancements or non-trivial new functionality that isn't just a tiny tweak, with no breaking changes (e.g. `1.0.0` → `1.1.0`).
 - **Major** — breaking changes (e.g. `1.0.0` → `2.0.0`).
 
-Suggest the bump you think fits, but let the user confirm (or override) the version before it is changed; do not bump it silently.
+When unsure between two levels, ask before opening the PR; never open one without a bump.
 
 ## Overview
 
@@ -428,7 +428,6 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | GET | `/api/live-feed/status` | Live feed comparison: config in effect plus the sync loop's last outcome |
 | POST | `/api/live-feed/sync` | Run one live feed sync now |
 | GET | `/api/live-feed/regions` | Regions (observer IATA codes) the configured CoreScope instance knows |
-| POST | `/api/live-feed/probe` | Connection test against the instance, one request per User-Agent variant |
 | GET | `/api/live-feed/stats` | Both / node-only / live-only counts for a `window` |
 | GET | `/api/live-feed/messages` | Node + live feed channel messages merged without duplicates, each marked with its source |
 | GET | `/api/push/vapid-public-key` | VAPID public key for browser push subscription |

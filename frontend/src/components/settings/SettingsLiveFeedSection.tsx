@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ExternalLink, RefreshCw, Stethoscope } from 'lucide-react';
+import { ExternalLink, RefreshCw } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import { api } from '../../api';
@@ -16,7 +16,6 @@ import type {
   AppSettings,
   AppSettingsUpdate,
   Channel,
-  LiveFeedProbeResponse,
   LiveFeedRegion,
   LiveFeedStatus,
 } from '../../types';
@@ -78,7 +77,6 @@ export function SettingsLiveFeedSection({
   const [regionsError, setRegionsError] = useState<string | null>(null);
   const [regionsLoading, setRegionsLoading] = useState(false);
   const [status, setStatus] = useState<LiveFeedStatus | null>(null);
-  const [probe, setProbe] = useState<LiveFeedProbeResponse | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
@@ -145,18 +143,6 @@ export function SettingsLiveFeedSection({
     const next = parseRegionList(value);
     setRegionText(next);
     if (next !== appSettings.live_feed_region) void save('region', { live_feed_region: next });
-  };
-
-  const handleProbe = async () => {
-    setBusy('probe');
-    setError(null);
-    try {
-      setProbe(await api.probeLiveFeed());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Connection test failed');
-    } finally {
-      setBusy(null);
-    }
   };
 
   const handleSyncNow = async () => {
@@ -490,63 +476,17 @@ export function SettingsLiveFeedSection({
             <span className="text-muted-foreground">Status:</span>{' '}
             {status ? describeSync(status, now) : 'Loading…'}
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => void handleProbe()}
-              disabled={busy === 'probe'}
-              title="Fetch the instance's region list with several User-Agents to tell a blocked client from a network problem"
-            >
-              <Stethoscope
-                className={cn('mr-1.5 h-4 w-4', busy === 'probe' && 'animate-pulse')}
-                aria-hidden
-              />
-              Test connection
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void handleSyncNow()}
-              disabled={syncBusy}
-            >
-              <RefreshCw className={cn('mr-1.5 h-4 w-4', syncBusy && 'animate-spin')} aria-hidden />
-              Sync now
-            </Button>
-          </div>
-        </div>
-        {probe ? (
-          <ul
-            className="space-y-1 rounded-md bg-muted/40 p-3 text-xs"
-            data-testid="live-feed-probe"
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void handleSyncNow()}
+            disabled={syncBusy}
           >
-            <li className="text-muted-foreground">
-              Connection test against {probe.url}/api/config/regions
-            </li>
-            {probe.attempts.map((attempt) => (
-              <li key={attempt.label} className="flex flex-wrap items-baseline gap-x-2">
-                <span className={attempt.ok ? 'text-success' : 'text-warning'}>
-                  {attempt.ok ? 'OK' : 'FAIL'}
-                </span>
-                <span>{attempt.label}</span>
-                <span className="text-muted-foreground">
-                  {attempt.status !== null ? `HTTP ${attempt.status}` : attempt.error}
-                  {attempt.status !== null && attempt.error ? ` · ${attempt.error}` : ''}
-                  {` · ${attempt.elapsed_ms} ms`}
-                </span>
-              </li>
-            ))}
-            <li className="pt-1 text-muted-foreground">
-              {probe.attempts[0]?.ok
-                ? 'The sync’s own identity gets through; if syncs still fail, the packet endpoint itself is the problem.'
-                : probe.attempts.every((a) => !a.ok)
-                  ? 'Every identity fails the same way: this looks like a network path problem between this server and the instance, not a client block.'
-                  : 'Only some identities get through: the instance filters clients by User-Agent.'}
-            </li>
-          </ul>
-        ) : null}
+            <RefreshCw className={cn('mr-1.5 h-4 w-4', syncBusy && 'animate-spin')} aria-hidden />
+            Sync now
+          </Button>
+        </div>
         {status ? (
           <>
             <div>
@@ -578,6 +518,21 @@ export function SettingsLiveFeedSection({
             >
               Open {firstChannel} on {host} <ExternalLink className="h-3 w-3" aria-hidden="true" />
             </a>
+            <details className="text-xs" data-testid="live-feed-activity">
+              <summary className="cursor-pointer text-muted-foreground">
+                Recent activity ({status.recent_log.length}) — what each sync did, refreshed every
+                15 s
+              </summary>
+              {status.recent_log.length ? (
+                <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-muted/40 p-2 font-mono text-[0.6875rem] leading-relaxed">
+                  {[...status.recent_log].reverse().join('\n')}
+                </pre>
+              ) : (
+                <p className="mt-2 text-muted-foreground">
+                  No sync has run since the server started.
+                </p>
+              )}
+            </details>
           </>
         ) : null}
       </div>

@@ -1230,6 +1230,8 @@ export interface LiveFeedStatus {
   mirrored_messages: number;
   /** Configured entries that matched no channel key on this node. */
   unresolved_channels: string[];
+  /** The last few sync events, timestamped, oldest first. */
+  recent_log: string[];
   /** 'packets' = remote packets decrypted locally (any channel with a key); 'channel_messages' = the instance's own decryption. */
   source: 'packets' | 'channel_messages';
 }
@@ -1303,21 +1305,6 @@ export interface LiveFeedRegion {
 export interface LiveFeedRegionsResponse {
   url: string;
   regions: LiveFeedRegion[];
-}
-
-export interface LiveFeedProbeAttempt {
-  label: string;
-  user_agent: string;
-  ok: boolean;
-  status: number | null;
-  error: string | null;
-  elapsed_ms: number;
-}
-
-/** One request to the instance's region list per User-Agent variant. */
-export interface LiveFeedProbeResponse {
-  url: string;
-  attempts: LiveFeedProbeAttempt[];
 }
 
 /** Contact-level multibyte path adoption (nodes, not traffic). */

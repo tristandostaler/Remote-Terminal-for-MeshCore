@@ -115,8 +115,6 @@ class FakeCoreScope:
         self.drop_packet_requests = 0
         # Drop the connection for packet slices entirely older than this timestamp.
         self.drop_slices_older_than: int | None = None
-        # Drop every request whose User-Agent lacks this substring (a UA-blocking proxy).
-        self.drop_user_agents_without: str | None = None
 
     def all_packets(self) -> list[dict]:
         packets: list[dict] = []
@@ -146,11 +144,6 @@ class FakeCoreScope:
         self.requests.append(request)
         if self.fail_with is not None:
             return httpx.Response(self.fail_with, text="nope")
-        if (
-            self.drop_user_agents_without is not None
-            and self.drop_user_agents_without not in request.headers.get("user-agent", "")
-        ):
-            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
         path = request.url.path
         if path == "/api/config/regions":
             return httpx.Response(200, json=self.regions)
@@ -706,6 +699,62 @@ class TestSyncAndCompare:
         assert state.cursor == state.last_sync_started_at
 
     @pytest.mark.asyncio
+    async def test_deselected_channels_drop_out_of_the_comparison(self, test_db):
+        await ChannelRepository.upsert(SECRET_KEY_HEX, "Secret")
+        fake = FakeCoreScope(
+            {
+                "Secret": [_live_message("Zed", "private", NOW - 40)],
+                "Public": [_live_message("Alice", "public", NOW - 50)],
+            },
+            keys={"Secret": SECRET_KEY_BYTES},
+        )
+        live_feed._transport = fake.transport
+        await live_feed.sync_once(await _enable(live_feed_channels=["*"]))
+        assert (await live_feed.list_messages("1d"))["total"] == 2
+
+        # Compare Public only: Secret's mirrored rows stay but must not show.
+        await AppSettingsRepository.update(live_feed_channels=["Public"])
+        listed = await live_feed.list_messages("1d")
+        assert [m["channel_name"] for m in listed["messages"]] == ["Public"]
+        stats = await live_feed.get_compare_stats("1d")
+        assert stats is not None
+        assert [c["channel_name"] for c in stats["channels"]] == ["Public"]
+        assert await LiveFeedRepository.count() == 2
+
+    @pytest.mark.asyncio
+    async def test_region_change_clears_the_mirror_but_channel_change_does_not(
+        self, test_db, monkeypatch
+    ):
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
+        live_feed._transport = fake.transport
+        cleared: list[int] = []
+        original_clear = LiveFeedRepository.clear
+
+        async def counting_clear():
+            cleared.append(1)
+            await original_clear()
+
+        monkeypatch.setattr(LiveFeedRepository, "clear", counting_clear)
+        await live_feed.sync_once(await _enable(live_feed_region="YUL"))
+        assert cleared == []
+        await live_feed.sync_once(await _enable(live_feed_channels=["Public"]))
+        assert cleared == []  # channel selection: full walk, rows kept
+        state = await live_feed.sync_once(await _enable(live_feed_region="YQB"))
+        assert cleared == [1]  # another region: the old rows are not its observations
+        assert state.last_sync_full is True
+        assert await LiveFeedRepository.count() == 1
+        assert any("mirror cleared" in line for line in state.recent_log)
+
+    @pytest.mark.asyncio
+    async def test_status_carries_a_recent_activity_log(self, test_db):
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
+        live_feed._transport = fake.transport
+        await live_feed.sync_once(await _enable())
+        status = await live_feed.get_status()
+        assert any("sync started (full" in line for line in status["recent_log"])
+        assert any("sync done via packets" in line for line in status["recent_log"])
+
+    @pytest.mark.asyncio
     async def test_several_regions_walk_the_packet_feed_once_each(self, test_db):
         fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
         live_feed._transport = fake.transport
@@ -875,26 +924,6 @@ class TestLiveFeedEndpoints:
         assert bad.status_code == 422
         bad_source = await client.get("/api/live-feed/messages", params={"source": "mars"})
         assert bad_source.status_code == 422
-
-    @pytest.mark.asyncio
-    async def test_probe_reports_each_user_agent_separately(self, test_db, client):
-        fake = FakeCoreScope({})
-        fake.drop_user_agents_without = "RemoteTerm-LiveCompare/"
-        live_feed._transport = fake.transport
-        await _enable()
-
-        response = await client.post("/api/live-feed/probe")
-
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["url"] == "https://live.example.test"
-        by_label = {a["label"]: a for a in payload["attempts"]}
-        ours = by_label["RemoteTerm (what the sync uses)"]
-        assert ours["ok"] is True and ours["status"] == 200
-        assert "RemoteTerm-LiveCompare/" in ours["user_agent"]
-        python = by_label["python-httpx default (what older builds sent)"]
-        assert python["ok"] is False
-        assert "Server disconnected" in python["error"]
 
     @pytest.mark.asyncio
     async def test_regions_failure_is_a_502(self, test_db, client):
