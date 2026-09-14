@@ -20,6 +20,7 @@ from app.services.dm_ingest import (
     resolve_direct_message_sender_metadata,
     resolve_fallback_direct_message_context,
 )
+from app.services.radio_runtime import radio_runtime as radio_manager
 from app.websocket import broadcast_event
 
 if TYPE_CHECKING:
@@ -140,6 +141,7 @@ async def on_rx_log_data(event: "Event") -> None:
     """
     payload = event.payload
     logger.debug("Received RX log data packet")
+    radio_manager.note_rx_log_frame()
 
     if "payload" not in payload:
         logger.warning("RX_LOG_DATA event missing 'payload' field")
@@ -153,6 +155,44 @@ async def on_rx_log_data(event: "Event") -> None:
         snr=payload.get("snr"),
         rssi=payload.get("rssi"),
     )
+
+
+async def on_channel_message(event: "Event") -> None:
+    """Store a channel message the firmware decrypted and queued (fallback path).
+
+    Channel text is primarily sniffed off the raw RX-log frame in
+    ``process_raw_packet``; this handler is the channel counterpart of
+    :func:`on_contact_message`. It only ever sees messages for channels resident
+    in a radio slot (the firmware cannot decrypt the others), pulled by the
+    library's auto-fetch after a MESSAGES_WAITING push. When the raw frame got
+    here first the store collapses onto it through dedup; when the raw push path
+    is stalled -- the case this exists for -- it is the only copy.
+
+    Stands down while a drain/poll loop is pulling inline: that loop stores what
+    it pulls itself, and the event for its own get_msg would otherwise be stored
+    twice. The check is the first statement on purpose, before any await, so it
+    runs while the loop is still parked on its get_msg.
+    """
+    from app import radio_sync
+
+    if radio_sync.is_inline_pull_active():
+        return
+
+    payload = event.payload
+    if not isinstance(payload, dict):
+        return
+    mc = radio_manager.meshcore
+    if mc is None:
+        return
+    try:
+        await radio_sync.store_pulled_channel_message(mc, payload)
+    except Exception:
+        logger.warning("Failed to store queued channel message", exc_info=True)
+    else:
+        logger.debug(
+            "Channel message from slot %s handled by event handler (fallback path)",
+            payload.get("channel_idx"),
+        )
 
 
 async def on_path_update(event: "Event") -> None:
@@ -502,9 +542,11 @@ def install_channel_data_adapter(meshcore) -> None:
 def register_event_handlers(meshcore) -> None:
     """Register event handlers with the MeshCore instance.
 
-    Note: CHANNEL_MSG_RECV and ADVERTISEMENT events are NOT subscribed.
-    These are handled by the packet processor via RX_LOG_DATA to avoid
-    duplicate processing and ensure consistent handling.
+    Note: ADVERTISEMENT events are NOT subscribed; adverts are handled by the
+    packet processor via RX_LOG_DATA. CHANNEL_MSG_RECV is subscribed as a
+    fallback only: the raw RX-log frame stays the primary route for channel
+    text, and a queued copy the firmware decrypted (resident channels) collapses
+    onto it through dedup -- or stands in for it when the push path stalls.
 
     This function is safe to call multiple times (e.g., after reconnect).
     Existing handlers are unsubscribed before new ones are registered.
@@ -523,6 +565,7 @@ def register_event_handlers(meshcore) -> None:
 
     # Register handlers and track subscriptions
     _active_subscriptions.append(meshcore.subscribe(EventType.CONTACT_MSG_RECV, on_contact_message))
+    _active_subscriptions.append(meshcore.subscribe(EventType.CHANNEL_MSG_RECV, on_channel_message))
     _active_subscriptions.append(meshcore.subscribe(EventType.RX_LOG_DATA, on_rx_log_data))
     _active_subscriptions.append(meshcore.subscribe(EventType.PATH_UPDATE, on_path_update))
     _active_subscriptions.append(meshcore.subscribe(EventType.NEW_CONTACT, on_new_contact))

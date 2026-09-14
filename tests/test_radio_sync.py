@@ -47,7 +47,10 @@ def reset_sync_state():
     prev_slot_by_key = radio_manager._channel_slot_by_key.copy()
     prev_key_by_slot = radio_manager._channel_key_by_slot.copy()
     prev_pending_channel_key_by_slot = radio_manager._pending_message_channel_key_by_slot.copy()
+    prev_resident_by_key = radio_manager._resident_channel_slot_by_key.copy()
+    prev_resident_by_slot = radio_manager._resident_channel_key_by_slot.copy()
     prev_contact_reconcile_task = radio_sync._contact_reconcile_task
+    radio_manager.clear_resident_channels()
 
     radio_sync._polling_pause_count = 0
     radio_sync._last_contact_sync = 0.0
@@ -68,6 +71,8 @@ def reset_sync_state():
     radio_manager._channel_slot_by_key = prev_slot_by_key
     radio_manager._channel_key_by_slot = prev_key_by_slot
     radio_manager._pending_message_channel_key_by_slot = prev_pending_channel_key_by_slot
+    radio_manager._resident_channel_slot_by_key = prev_resident_by_key
+    radio_manager._resident_channel_key_by_slot = prev_resident_by_slot
 
 
 KEY_A = "aa" * 32
@@ -1206,7 +1211,13 @@ class TestBackgroundContactReconcile:
 
 
 class TestSyncAndOffloadChannels:
-    """Test sync_and_offload_channels: pull channels from radio, save to DB, clear from radio."""
+    """Test sync_and_offload_channels in legacy mode: pull channels from radio, save to DB,
+    clear every slot from the radio (``MESHCORE_RESIDENT_CHANNELS_ENABLED=false``)."""
+
+    @pytest.fixture(autouse=True)
+    def _legacy_offload_mode(self):
+        with patch("app.radio_sync.settings.resident_channels_enabled", False):
+            yield
 
     @pytest.mark.asyncio
     async def test_syncs_valid_channel_and_clears(self, test_db):

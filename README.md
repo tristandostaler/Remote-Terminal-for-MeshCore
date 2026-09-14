@@ -23,7 +23,7 @@ For advanced setup and troubleshooting see [README_ADVANCED.md](README_ADVANCED.
 ![Screenshot of the application's web interface](app_screenshot.png)
 
 > [!WARNING]
-> RemoteTerm does *full* management of the radio, meaning that once a radio is connected to RemoteTerm, all contacts/channels will be imported and offloaded to RemoteTerm and the contacts actually synced to the device will be governed by RemoteTerm. This means that RemoteTerm can be a poor fit for users who are looking to swap radios in and out, maintaining radio state (favorites, channels, etc.) irrespective of app usage.
+> RemoteTerm does *full* management of the radio, meaning that once a radio is connected to RemoteTerm, all contacts/channels will be imported and offloaded to RemoteTerm and the contacts actually synced to the device will be governed by RemoteTerm. This means that RemoteTerm can be a poor fit for users who are looking to swap radios in and out, maintaining radio state (favorites, channels, etc.) irrespective of app usage. Channels are kept loaded on the radio (Public first, then favorites and the most recently active, up to the slot count minus one) so the radio can decrypt and queue their messages as a fallback; set `MESHCORE_RESIDENT_CHANNELS_ENABLED=false` to wipe the slots instead.
 
 ## Requirements
 
@@ -202,6 +202,9 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_SERIAL_BAUDRATE` | 115200 | Serial baud rate |
 | `MESHCORE_TCP_HOST` | | TCP host (mutually exclusive with serial/BLE) |
 | `MESHCORE_TCP_PORT` | 5000 | TCP port |
+| `MESHCORE_TCP_KEEPALIVE_IDLE_SECONDS` | 30 | TCP keepalive idle time on a WiFi companion link, so a dead peer is noticed within about a minute; `0` leaves the OS default |
+| `MESHCORE_RESIDENT_CHANNELS_ENABLED` | true | Keep channels loaded in the radio's slots (Public first, then favorites and the most recently active) so the radio itself decrypts and queues their messages as a fallback when raw packet pushes stall. `false` wipes every slot at startup and loads channels only when sending |
+| `MESHCORE_RX_SILENCE_TIMEOUT_SECONDS` | 300 | Seconds without a raw packet from the radio before RemoteTerm probes its packet counters; a radio that heard packets it never forwarded is reconnected, then rebooted. `0` disables |
 | `MESHCORE_BLE_ADDRESS` | | BLE device address (mutually exclusive with serial/TCP) |
 | `MESHCORE_BLE_PIN` | | BLE PIN (required when BLE address is set) |
 | `MESHCORE_LOG_LEVEL` | INFO | `DEBUG`, `INFO`, `WARNING`, `ERROR` |

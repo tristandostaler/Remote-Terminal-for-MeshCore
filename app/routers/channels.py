@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status
@@ -15,6 +16,7 @@ from app.models import Channel, ChannelDetail, ChannelMessageCounts, ChannelTopS
 from app.packet_processor import create_message_from_decrypted
 from app.region_scope import UNSCOPED_OVERRIDE_MARKER, is_unscoped, normalize_region_scope
 from app.repository import ChannelRepository, MessageRepository, RawPacketRepository
+from app.services.radio_runtime import radio_runtime as radio_manager
 from app.websocket import broadcast_event, broadcast_success
 
 logger = logging.getLogger(__name__)
@@ -231,8 +233,10 @@ async def get_channel_detail(key: str) -> ChannelDetail:
 async def create_channel(request: CreateChannelRequest) -> Channel:
     """Create a channel in the database.
 
-    Channels are NOT pushed to radio on creation. They are loaded to the radio
-    automatically when sending a message (see messages.py send_channel_message).
+    With resident channels on (the default) the new channel is also pinned into
+    a free radio slot, best-effort, so the firmware can decrypt and queue its
+    messages as a fallback. Otherwise -- or when no slot is free -- it is loaded
+    on the radio at send time only (see messages.py send_channel_message).
     """
     requested_name = request.name
     key_hex, channel_name, is_hashtag = _derive_channel_identity(requested_name, request.key)
@@ -252,7 +256,41 @@ async def create_channel(request: CreateChannelRequest) -> Channel:
         raise HTTPException(status_code=500, detail="Channel was created but could not be reloaded")
 
     _broadcast_channel_update(stored)
+    _schedule_resident_slot_update(add=stored)
     return stored
+
+
+def _schedule_resident_slot_update(
+    *, add: Channel | None = None, remove_key: str | None = None
+) -> None:
+    """Pin or unpin a channel on the radio in the background, best-effort.
+
+    Never blocks the HTTP response on the radio: a busy or disconnected radio
+    simply leaves the slot for the next full sync (or send-time loading).
+    """
+    from app.config import settings as app_settings
+    from app.radio import RadioOperationBusyError, RadioOperationError
+
+    if not app_settings.resident_channels_enabled or not radio_manager.is_connected:
+        return
+
+    async def _run() -> None:
+        from app.radio_sync import add_resident_channel_to_radio, remove_resident_channel_from_radio
+
+        try:
+            async with radio_manager.radio_operation(
+                "resident_channel_update", blocking=False
+            ) as mc:
+                if add is not None:
+                    await add_resident_channel_to_radio(mc, add)
+                if remove_key is not None:
+                    await remove_resident_channel_from_radio(mc, remove_key)
+        except (RadioOperationBusyError, RadioOperationError) as exc:
+            logger.debug("Resident slot update skipped: %s", exc)
+        except Exception:
+            logger.warning("Resident slot update failed", exc_info=True)
+
+    asyncio.create_task(_run())
 
 
 @router.post("/bulk-hashtag", response_model=BulkCreateHashtagChannelsResponse)
@@ -405,8 +443,8 @@ async def set_channel_path_hash_mode_override(
 async def delete_channel(key: str) -> dict:
     """Delete a channel from the database by key.
 
-    Note: This does not clear the channel from the radio. The radio's channel
-    slots are managed separately (channels are loaded temporarily when sending).
+    A channel pinned in a resident radio slot is unpinned and its slot cleared
+    in the background, best-effort; scratch (send-time) slots are left alone.
     """
     if is_public_channel_key(key):
         raise HTTPException(
@@ -417,5 +455,6 @@ async def delete_channel(key: str) -> dict:
     await ChannelRepository.delete(key)
 
     broadcast_event("channel_deleted", {"key": key})
+    _schedule_resident_slot_update(remove_key=key)
 
     return {"status": "ok"}
