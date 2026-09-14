@@ -578,6 +578,21 @@ export function SettingsLiveFeedSection({
             >
               Open {firstChannel} on {host} <ExternalLink className="h-3 w-3" aria-hidden="true" />
             </a>
+            <details className="text-xs" data-testid="live-feed-activity">
+              <summary className="cursor-pointer text-muted-foreground">
+                Recent activity ({status.recent_log.length}) — what each sync did, refreshed every
+                15 s
+              </summary>
+              {status.recent_log.length ? (
+                <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-muted/40 p-2 font-mono text-[0.6875rem] leading-relaxed">
+                  {[...status.recent_log].reverse().join('\n')}
+                </pre>
+              ) : (
+                <p className="mt-2 text-muted-foreground">
+                  No sync has run since the server started.
+                </p>
+              )}
+            </details>
           </>
         ) : null}
       </div>

@@ -1230,6 +1230,8 @@ export interface LiveFeedStatus {
   mirrored_messages: number;
   /** Configured entries that matched no channel key on this node. */
   unresolved_channels: string[];
+  /** The last few sync events, timestamped, oldest first. */
+  recent_log: string[];
   /** 'packets' = remote packets decrypted locally (any channel with a key); 'channel_messages' = the instance's own decryption. */
   source: 'packets' | 'channel_messages';
 }

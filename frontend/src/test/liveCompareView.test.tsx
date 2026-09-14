@@ -27,6 +27,7 @@ const status: LiveFeedStatus = {
   last_sync_full: false,
   mirrored_messages: 2,
   unresolved_channels: [],
+  recent_log: [],
   source: 'packets',
 };
 

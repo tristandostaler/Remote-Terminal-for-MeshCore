@@ -1983,6 +1983,10 @@ class LiveFeedStatus(BaseModel):
         default_factory=list,
         description="Configured entries that matched no channel key on this node",
     )
+    recent_log: list[str] = Field(
+        default_factory=list,
+        description="The last few sync events (timestamped, oldest first), for live debugging",
+    )
     source: str = Field(
         default="packets",
         description=(

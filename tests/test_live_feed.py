@@ -706,6 +706,62 @@ class TestSyncAndCompare:
         assert state.cursor == state.last_sync_started_at
 
     @pytest.mark.asyncio
+    async def test_deselected_channels_drop_out_of_the_comparison(self, test_db):
+        await ChannelRepository.upsert(SECRET_KEY_HEX, "Secret")
+        fake = FakeCoreScope(
+            {
+                "Secret": [_live_message("Zed", "private", NOW - 40)],
+                "Public": [_live_message("Alice", "public", NOW - 50)],
+            },
+            keys={"Secret": SECRET_KEY_BYTES},
+        )
+        live_feed._transport = fake.transport
+        await live_feed.sync_once(await _enable(live_feed_channels=["*"]))
+        assert (await live_feed.list_messages("1d"))["total"] == 2
+
+        # Compare Public only: Secret's mirrored rows stay but must not show.
+        await AppSettingsRepository.update(live_feed_channels=["Public"])
+        listed = await live_feed.list_messages("1d")
+        assert [m["channel_name"] for m in listed["messages"]] == ["Public"]
+        stats = await live_feed.get_compare_stats("1d")
+        assert stats is not None
+        assert [c["channel_name"] for c in stats["channels"]] == ["Public"]
+        assert await LiveFeedRepository.count() == 2
+
+    @pytest.mark.asyncio
+    async def test_region_change_clears_the_mirror_but_channel_change_does_not(
+        self, test_db, monkeypatch
+    ):
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
+        live_feed._transport = fake.transport
+        cleared: list[int] = []
+        original_clear = LiveFeedRepository.clear
+
+        async def counting_clear():
+            cleared.append(1)
+            await original_clear()
+
+        monkeypatch.setattr(LiveFeedRepository, "clear", counting_clear)
+        await live_feed.sync_once(await _enable(live_feed_region="YUL"))
+        assert cleared == []
+        await live_feed.sync_once(await _enable(live_feed_channels=["Public"]))
+        assert cleared == []  # channel selection: full walk, rows kept
+        state = await live_feed.sync_once(await _enable(live_feed_region="YQB"))
+        assert cleared == [1]  # another region: the old rows are not its observations
+        assert state.last_sync_full is True
+        assert await LiveFeedRepository.count() == 1
+        assert any("mirror cleared" in line for line in state.recent_log)
+
+    @pytest.mark.asyncio
+    async def test_status_carries_a_recent_activity_log(self, test_db):
+        fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
+        live_feed._transport = fake.transport
+        await live_feed.sync_once(await _enable())
+        status = await live_feed.get_status()
+        assert any("sync started (full" in line for line in status["recent_log"])
+        assert any("sync done via packets" in line for line in status["recent_log"])
+
+    @pytest.mark.asyncio
     async def test_several_regions_walk_the_packet_feed_once_each(self, test_db):
         fake = FakeCoreScope({"Public": [_live_message("Alice", "hi", NOW - 20)]})
         live_feed._transport = fake.transport
