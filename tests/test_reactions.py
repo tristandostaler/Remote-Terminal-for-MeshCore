@@ -357,10 +357,16 @@ class TestChannelReactionIngest:
         assert (await MessageRepository.get_by_id(older)).reactions is None
 
     @pytest.mark.asyncio
-    async def test_unmatched_reaction_is_stored_but_lost(self, test_db, captured_broadcasts):
+    async def test_unmatched_reaction_stays_visible(self, test_db):
+        """A reaction that addressed nothing we hold is shown, not swallowed."""
         from app.services.messages import create_message_from_decrypted
 
-        broadcasts, mock_broadcast = captured_broadcasts
+        # Local capture: this one asserts on the broadcast's keyword arguments,
+        # which the shared fixture drops.
+        broadcasts: list[dict] = []
+
+        def mock_broadcast(event_type, data, **kwargs):
+            broadcasts.append({"type": event_type, "data": data, "kwargs": kwargs})
 
         reaction_id = await create_message_from_decrypted(
             packet_id=1,
@@ -371,8 +377,20 @@ class TestChannelReactionIngest:
             broadcast_fn=mock_broadcast,
         )
         assert reaction_id is not None
-        assert not [b for b in broadcasts if b["type"] in ("message", "message_reaction")]
-        assert await MessageRepository.get_all(conversation_key=CHANNEL_KEY) == []
+        assert not [b for b in broadcasts if b["type"] == "message_reaction"]
+
+        stored = await MessageRepository.get_by_id(reaction_id)
+        assert stored is not None and stored.is_reaction is False
+        assert [m.id for m in await MessageRepository.get_all(conversation_key=CHANNEL_KEY)] == [
+            reaction_id
+        ]
+
+        # Broadcast so the open chat shows it, but non-realtime: fanout, bots and
+        # push must not start seeing raw r:HHHH:II payloads.
+        message_broadcasts = [b for b in broadcasts if b["type"] == "message"]
+        assert len(message_broadcasts) == 1
+        assert message_broadcasts[0]["data"]["is_reaction"] is False
+        assert message_broadcasts[0]["kwargs"] == {"realtime": False}
 
 
 class TestDirectReactionIngest:
@@ -427,6 +445,39 @@ class TestDirectReactionIngest:
         assert (await MessageRepository.get_by_id(outgoing_id)).reactions == {"❤️": 1}
         assert (await MessageRepository.get_by_id(incoming_id)).reactions is None
         assert not [b for b in broadcasts if b["type"] == "message"]
+
+    @pytest.mark.asyncio
+    async def test_unmatched_dm_reaction_stays_visible(self, test_db, captured_broadcasts):
+        """An incoming DM reaction we cannot attribute is shown, not swallowed.
+
+        The peer hashed a message we either never stored or stored differently;
+        hiding the row would leave the chat showing nothing at all, so it stays
+        as a generic reaction bubble.
+        """
+        broadcasts, mock_broadcast = captured_broadcasts
+        await ContactRepository.upsert({"public_key": CONTACT_PUB, "name": "Peer", "type": 1})
+
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text="Hello world",
+            conversation_key=CONTACT_PUB,
+            sender_timestamp=TS,
+            received_at=TS,
+            outgoing=True,
+        )
+        broadcasts.clear()
+
+        # A hash over a timestamp we never sent: the peer's view of the message
+        # and ours disagree, which is exactly what silently dropped the reaction.
+        stray_hash = compute_reaction_hash(TS + 7, None, "Hello world")
+        stored = await self._store_incoming_reaction(mock_broadcast, CONTACT_PUB, stray_hash)
+        assert stored is not None
+        assert stored.is_reaction is False
+
+        persisted = await MessageRepository.get_by_id(stored.id)
+        assert persisted is not None and persisted.is_reaction is False
+        assert [b["type"] for b in broadcasts if b["type"] == "message"] == ["message"]
+        assert not [b for b in broadcasts if b["type"] == "message_reaction"]
 
     @pytest.mark.asyncio
     async def test_room_reaction_matches_by_author_name(self, test_db, captured_broadcasts):

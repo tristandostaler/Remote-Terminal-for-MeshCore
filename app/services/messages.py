@@ -127,6 +127,39 @@ def broadcast_message(
         broadcast_fn("message", payload, realtime=realtime)
 
 
+async def unhide_unmatched_reaction(
+    *,
+    message: Message,
+    broadcast_fn: BroadcastFn,
+    packet_hash: str | None = None,
+    message_repository=MessageRepository,
+) -> Message:
+    """Make a reaction that addressed nothing we hold visible again.
+
+    Ingest stores every reaction payload hidden, because the normal outcome is
+    that its emoji lands on the target row and a raw ``r:HHHH:II`` bubble would
+    be noise. When the scan finds no target -- the peer hashed a message we
+    never stored, or stored differently -- hiding it instead loses the one fact
+    we do have: that someone reacted. MCO Advanced drops such a reaction because
+    it only has an in-memory window to match against; we keep it, and the chat
+    renders it generically ("👍 reacted") through the same path it already uses
+    for reaction payloads whose target it cannot resolve.
+
+    Broadcast non-realtime on purpose: the chat should show it, but fanout, bots
+    and push notifications should not start receiving ``r:HHHH:II`` protocol
+    payloads just because the hash missed.
+    """
+    await message_repository.set_is_reaction(message.id, False)
+    visible = message.model_copy(update={"is_reaction": False})
+    broadcast_message(
+        message=visible,
+        broadcast_fn=broadcast_fn,
+        realtime=False,
+        packet_hash=packet_hash,
+    )
+    return visible
+
+
 async def build_stored_outgoing_channel_message(
     *,
     message_id: int,
@@ -389,15 +422,39 @@ async def create_message_from_decrypted(
         )
         return None
 
+    message = build_message_model(
+        message_id=msg_id,
+        msg_type="CHAN",
+        conversation_key=channel_key_normalized,
+        text=text,
+        sender_timestamp=timestamp,
+        received_at=received,
+        paths=build_message_paths(path, received, path_len, rssi=rssi, snr=snr),
+        sender_name=sender,
+        sender_key=resolved_sender_key,
+        channel_name=channel_name,
+        packet_id=packet_id,
+        transport_code=transport_code,
+        region=region,
+        compression=compression,
+        is_reaction=reaction is not None,
+    )
+
     if reaction is not None:
         await RawPacketRepository.mark_decrypted(packet_id, msg_id)
-        await apply_reaction(
+        applied = await apply_reaction(
             msg_type="CHAN",
             conversation_key=channel_key_normalized,
             reaction=reaction,
             reactor_is_self=False,
             broadcast_fn=broadcast_fn,
         )
+        if applied is None:
+            await unhide_unmatched_reaction(
+                message=message,
+                broadcast_fn=broadcast_fn,
+                packet_hash=packet_hash,
+            )
         return msg_id
 
     logger.info(
@@ -410,22 +467,7 @@ async def create_message_from_decrypted(
     await RawPacketRepository.mark_decrypted(packet_id, msg_id)
 
     broadcast_message(
-        message=build_message_model(
-            message_id=msg_id,
-            msg_type="CHAN",
-            conversation_key=channel_key_normalized,
-            text=text,
-            sender_timestamp=timestamp,
-            received_at=received,
-            paths=build_message_paths(path, received, path_len, rssi=rssi, snr=snr),
-            sender_name=sender,
-            sender_key=resolved_sender_key,
-            channel_name=channel_name,
-            packet_id=packet_id,
-            transport_code=transport_code,
-            region=region,
-            compression=compression,
-        ),
+        message=message,
         broadcast_fn=broadcast_fn,
         realtime=realtime,
         packet_hash=packet_hash,
@@ -579,16 +621,6 @@ async def create_fallback_channel_message(
         )
         return None
 
-    if reaction is not None:
-        await apply_reaction(
-            msg_type="CHAN",
-            conversation_key=conversation_key_normalized,
-            reaction=reaction,
-            reactor_is_self=False,
-            broadcast_fn=broadcast_fn,
-        )
-        return None
-
     message = build_message_model(
         message_id=msg_id,
         msg_type="CHAN",
@@ -602,7 +634,25 @@ async def create_fallback_channel_message(
         sender_key=resolved_sender_key,
         channel_name=channel_name,
         compression=compression,
+        is_reaction=reaction is not None,
     )
+
+    if reaction is not None:
+        applied = await apply_reaction(
+            msg_type="CHAN",
+            conversation_key=conversation_key_normalized,
+            reaction=reaction,
+            reactor_is_self=False,
+            broadcast_fn=broadcast_fn,
+        )
+        if applied is None:
+            await unhide_unmatched_reaction(
+                message=message,
+                broadcast_fn=broadcast_fn,
+                message_repository=message_repository,
+            )
+        return None
+
     broadcast_message(message=message, broadcast_fn=broadcast_fn)
 
     # Third and last AEIC ingest route: the get_msg() drain. Must feed the
