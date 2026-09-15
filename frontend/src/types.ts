@@ -20,6 +20,8 @@ export interface RadioConfig {
   radio: RadioSettings;
   path_hash_mode: number;
   path_hash_mode_supported: boolean;
+  /** True once the radio refused a CLI command as unknown; false means untried or working. */
+  cli_unsupported?: boolean;
   advert_location_source?: 'off' | 'current';
   multi_acks_enabled?: boolean;
   telemetry_mode_base?: number;

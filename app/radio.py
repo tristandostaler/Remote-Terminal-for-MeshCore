@@ -185,6 +185,11 @@ class RadioManager:
         # does not have and go straight to their text fallback. Per connection:
         # cleared below, because the node on the other end of the cable can change.
         self.raw_data_unsupported: bool = False
+        # Set once this node answers ERR_CODE_UNSUPPORTED_CMD to
+        # CMD_RUN_CLI_COMMAND, so the settings panel can say "this firmware has
+        # no CLI" instead of failing identically on every attempt. Per
+        # connection, like the flag above: the node on the cable can change.
+        self.cli_unsupported: bool = False
         # Companion repeat ("relay") mode: whether the firmware reports the flag
         # at all, its current value, and the frequencies it will repeat on.
         self.repeat_supported: bool = False
@@ -251,6 +256,7 @@ class RadioManager:
         self.path_hash_mode = 0
         self.path_hash_mode_supported = False
         self.raw_data_unsupported = False
+        self.cli_unsupported = False
         self.repeat_supported = False
         self.repeat_enabled = False
         self.allowed_repeat_freqs = []
