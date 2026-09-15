@@ -1399,3 +1399,128 @@ class TestDiscoverRegions:
 
         assert response.repeaters_queried == 2
         assert anon.await_count == 2
+
+
+class TestRadioChannelSlots:
+    @pytest.mark.asyncio
+    async def test_reads_every_slot_and_flags_residency(self, test_db):
+        from app.channel_constants import PUBLIC_CHANNEL_KEY, PUBLIC_CHANNEL_NAME
+        from app.repository import ChannelRepository
+        from app.routers.radio import get_radio_channel_slots
+
+        await ChannelRepository.upsert(key=PUBLIC_CHANNEL_KEY, name=PUBLIC_CHANNEL_NAME)
+
+        def _slot(name, key_hex):
+            return _radio_result(
+                EventType.CHANNEL_INFO,
+                {"channel_name": name, "channel_secret": bytes.fromhex(key_hex)},
+            )
+
+        mock_mc = MagicMock()
+        mock_mc.commands.get_channel = AsyncMock(
+            side_effect=[
+                _slot(PUBLIC_CHANNEL_NAME, PUBLIC_CHANNEL_KEY),
+                _slot("#unknown", "ab" * 16),
+                _radio_result(EventType.ERROR, {"error": "empty"}),
+            ]
+        )
+        mock_rm = MagicMock()
+        mock_rm.is_connected = True
+        mock_rm.is_setup_complete = True
+        mock_rm.is_setup_in_progress = False
+        mock_rm.meshcore = mock_mc
+        mock_rm.max_channels = 3
+        mock_rm.require_connected = MagicMock(return_value=mock_mc)
+        mock_rm.radio_operation = _noop_radio_operation(mock_mc)
+        mock_rm.get_resident_channels_snapshot = MagicMock(return_value=[(PUBLIC_CHANNEL_KEY, 0)])
+        mock_rm.get_channel_send_cache_snapshot = MagicMock(return_value=[("AB" * 16, 1)])
+
+        with (
+            patch("app.routers.radio.radio_manager", _runtime(mock_rm)),
+            patch("app.radio_sync.radio_manager", mock_rm),
+        ):
+            response = await get_radio_channel_slots()
+
+        assert response.max_channels == 3
+        assert [s.slot for s in response.slots] == [0, 1, 2]
+        public, unknown, empty = response.slots
+        assert public.resident is True and public.known_name == PUBLIC_CHANNEL_NAME
+        assert unknown.resident is False and unknown.send_cache is True
+        assert unknown.known_name is None and unknown.key == "AB" * 16
+        assert empty.empty is True and empty.name is None
+
+
+class TestRadioCliEndpoint:
+    @pytest.mark.asyncio
+    async def test_returns_reply_from_service(self):
+        from app.routers.radio import RadioCliRequest, run_radio_cli_command
+
+        mock_mc = MagicMock()
+        mock_rm = MagicMock()
+        mock_rm.is_connected = True
+        mock_rm.is_setup_complete = True
+        mock_rm.is_setup_in_progress = False
+        mock_rm.firmware_ver_code = 14
+        mock_rm.require_connected = MagicMock(return_value=mock_mc)
+        mock_rm.radio_operation = _noop_radio_operation(mock_mc)
+
+        with (
+            patch("app.routers.radio.radio_manager", _runtime(mock_rm)),
+            patch(
+                "app.services.radio_cli.run_cli_command", new=AsyncMock(return_value="v1.9.0")
+            ) as run,
+        ):
+            response = await run_radio_cli_command(RadioCliRequest(command=" ver "))
+
+        assert response.reply == "v1.9.0"
+        assert response.command == "ver"
+        assert run.await_args.kwargs["firmware_ver_code"] == 14
+
+    @pytest.mark.asyncio
+    async def test_old_firmware_is_a_501(self):
+        from app.routers.radio import RadioCliRequest, run_radio_cli_command
+        from app.services.radio_cli import CliUnsupportedError
+
+        mock_rm = MagicMock()
+        mock_rm.is_connected = True
+        mock_rm.is_setup_complete = True
+        mock_rm.is_setup_in_progress = False
+        mock_rm.firmware_ver_code = 12
+        mock_rm.require_connected = MagicMock(return_value=MagicMock())
+        mock_rm.radio_operation = _noop_radio_operation(MagicMock())
+
+        with (
+            patch("app.routers.radio.radio_manager", _runtime(mock_rm)),
+            patch(
+                "app.services.radio_cli.run_cli_command",
+                new=AsyncMock(side_effect=CliUnsupportedError("too old")),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await run_radio_cli_command(RadioCliRequest(command="ver"))
+
+        assert exc_info.value.status_code == 501
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_a_504(self):
+        from app.routers.radio import RadioCliRequest, run_radio_cli_command
+
+        mock_rm = MagicMock()
+        mock_rm.is_connected = True
+        mock_rm.is_setup_complete = True
+        mock_rm.is_setup_in_progress = False
+        mock_rm.firmware_ver_code = 14
+        mock_rm.require_connected = MagicMock(return_value=MagicMock())
+        mock_rm.radio_operation = _noop_radio_operation(MagicMock())
+
+        with (
+            patch("app.routers.radio.radio_manager", _runtime(mock_rm)),
+            patch(
+                "app.services.radio_cli.run_cli_command",
+                new=AsyncMock(side_effect=TimeoutError()),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await run_radio_cli_command(RadioCliRequest(command="ver"))
+
+        assert exc_info.value.status_code == 504

@@ -16,6 +16,8 @@ import type {
   MessagesAroundResponse,
   RawPacket,
   RadioAdvertMode,
+  RadioChannelSlotsResponse,
+  RadioCliResponse,
   RadioConfig,
   RadioConfigUpdate,
   RadioDiscoveryResponse,
@@ -367,6 +369,14 @@ export const api = {
   reconnectRadio: () =>
     fetchJson<{ status: string; message: string; connected: boolean }>('/radio/reconnect', {
       method: 'POST',
+    }),
+  /** Every channel slot read straight from the radio; a few seconds on TCP. */
+  getRadioChannelSlots: () => fetchJson<RadioChannelSlotsResponse>('/radio/channel-slots'),
+  /** Run one firmware CLI command on the companion radio (protocol 14+). */
+  runRadioCli: (command: string) =>
+    fetchJson<RadioCliResponse>('/radio/cli', {
+      method: 'POST',
+      body: JSON.stringify({ command }),
     }),
 
   // Contacts

@@ -822,6 +822,129 @@ async def disconnect_radio() -> dict:
     }
 
 
+class RadioChannelSlot(BaseModel):
+    slot: int
+    empty: bool
+    name: str | None = None
+    key: str | None = None
+    known_name: str | None = Field(
+        default=None, description="Name of this key in RemoteTerm's channel list, if joined"
+    )
+    resident: bool = Field(default=False, description="Pinned by RemoteTerm for the session")
+    send_cache: bool = Field(default=False, description="Loaded by a recent send (scratch slot)")
+
+
+class RadioChannelSlotsResponse(BaseModel):
+    max_channels: int
+    resident_enabled: bool
+    slots: list[RadioChannelSlot]
+
+
+@router.get("/channel-slots", response_model=RadioChannelSlotsResponse)
+async def get_radio_channel_slots() -> RadioChannelSlotsResponse:
+    """Read every channel slot straight from the radio.
+
+    One get_channel per slot, so it takes a few seconds on a TCP link; meant
+    for the settings screen's refresh button, not for polling.
+    """
+    from app.config import settings as app_settings
+    from app.radio_sync import get_radio_channel_limit
+    from app.repository import ChannelRepository
+
+    radio_manager.require_connected()
+    limit = get_radio_channel_limit()
+    known = {channel.key.upper(): channel.name for channel in await ChannelRepository.get_all()}
+    resident_by_slot = {slot: key for key, slot in radio_manager.get_resident_channels_snapshot()}
+    cached_by_slot = {slot: key for key, slot in radio_manager.get_channel_send_cache_snapshot()}
+
+    slots: list[RadioChannelSlot] = []
+    async with radio_manager.radio_operation("radio_channel_slots") as mc:
+        for idx in range(limit):
+            try:
+                result = await mc.commands.get_channel(idx)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502, detail=f"Radio did not answer for slot {idx}: {exc}"
+                ) from exc
+            name = None
+            key_hex = None
+            if result.type == EventType.CHANNEL_INFO:
+                raw_name = (result.payload.get("channel_name") or "").strip("\x00")
+                secret = result.payload.get("channel_secret", b"")
+                secret_bytes = secret if isinstance(secret, bytes) else bytes(secret)
+                if raw_name and any(secret_bytes):
+                    name = raw_name
+                    key_hex = secret_bytes.hex().upper()
+            slots.append(
+                RadioChannelSlot(
+                    slot=idx,
+                    empty=key_hex is None,
+                    name=name,
+                    key=key_hex,
+                    known_name=known.get(key_hex) if key_hex else None,
+                    resident=key_hex is not None and resident_by_slot.get(idx) == key_hex,
+                    send_cache=key_hex is not None and cached_by_slot.get(idx) == key_hex,
+                )
+            )
+
+    return RadioChannelSlotsResponse(
+        max_channels=limit,
+        resident_enabled=app_settings.resident_channels_enabled,
+        slots=slots,
+    )
+
+
+class RadioCliRequest(BaseModel):
+    command: str = Field(min_length=1, max_length=160)
+
+
+class RadioCliResponse(BaseModel):
+    command: str
+    reply: str
+    elapsed_ms: int
+
+
+@router.post("/cli", response_model=RadioCliResponse)
+async def run_radio_cli_command(request: RadioCliRequest) -> RadioCliResponse:
+    """Run one firmware CLI command on the companion radio and return its reply.
+
+    Needs companion protocol 14 or newer. The command runs on the radio with
+    the same effect as typing it on the device's own console, so commands that
+    change radio parameters or reboot the node do exactly that.
+    """
+    from app.services.radio_cli import (
+        CliCommandError,
+        CliUnsupportedError,
+        run_cli_command,
+    )
+
+    radio_manager.require_connected()
+    started = _monotonic()
+    try:
+        async with radio_manager.radio_operation("radio_cli") as mc:
+            reply = await run_cli_command(
+                mc,
+                request.command,
+                firmware_ver_code=radio_manager.firmware_ver_code,
+            )
+    except CliUnsupportedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CliCommandError as exc:
+        raise HTTPException(status_code=502, detail=f"Radio rejected the command: {exc}") from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504, detail="The radio did not answer the CLI command in time"
+        ) from exc
+    logger.info("Radio CLI: %r -> %r", request.command, reply[:120])
+    return RadioCliResponse(
+        command=request.command.strip(),
+        reply=reply,
+        elapsed_ms=int((_monotonic() - started) * 1000),
+    )
+
+
 @router.post("/reboot")
 async def reboot_radio() -> dict:
     """Reboot the radio, or reconnect if not currently connected.

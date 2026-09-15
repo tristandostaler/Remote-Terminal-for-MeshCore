@@ -185,11 +185,54 @@ class TestWatchdog:
 
         rm.note_rx_log_frame(clock())
         clock.advance(10)
-        with patch("app.websocket.broadcast_success") as success:
+        with (
+            patch("app.websocket.broadcast_success") as success,
+            patch("app.websocket.broadcast_error") as error,
+        ):
             await wd.check()
 
         assert wd.state.incident_open is False
-        success.assert_called_once()
+        success.assert_not_called()
+        error.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_probe_on_a_quiet_mesh_does_not_toast(self):
+        clock = FakeClock()
+        rm = _fake_manager(clock, [500, 500])
+        wd = RxSilenceWatchdog(rm, clock=clock)
+
+        with patch("app.websocket.broadcast_error") as error:
+            clock.advance(300)
+            await wd.check()
+            clock.advance(300)
+            await wd.check()
+
+        error.assert_not_called()
+        assert wd.state.warned is True
+
+    @pytest.mark.asyncio
+    async def test_never_toasts_even_when_it_reconnects_and_reboots(self):
+        """The watchdog is log-only end to end: reconnect and reboot included."""
+        clock = FakeClock()
+        rm = _fake_manager(clock, [500, 512, 600, 640])
+        wd = RxSilenceWatchdog(rm, clock=clock)
+
+        with (
+            patch("app.websocket.broadcast_error") as error,
+            patch("app.websocket.broadcast_success") as success,
+        ):
+            for _ in range(2):
+                clock.advance(300)
+                await wd.check()
+            rm._tracker.mark_rx_baseline(clock())
+            for _ in range(2):
+                clock.advance(300)
+                await wd.check()
+
+        rm.reconnect_and_prepare.assert_awaited_once()
+        rm._mc.commands.reboot.assert_awaited_once()
+        error.assert_not_called()
+        success.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_firmware_without_packet_stats_only_probes(self):
