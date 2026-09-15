@@ -863,7 +863,10 @@ export function SettingsRadioSection({
         </p>
 
         <RadioChannelSlotsPanel connected={radioState === 'connected'} />
-        <RadioCliConsole connected={radioState === 'connected'} />
+        <RadioCliConsole
+          connected={radioState === 'connected'}
+          unsupported={config.cli_unsupported ?? false}
+        />
       </div>
 
       <Separator />
