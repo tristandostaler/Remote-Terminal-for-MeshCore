@@ -211,6 +211,57 @@ class TestHashInputs:
         assert hash_inputs_for_message(msg, is_room=False, our_name=None) is None
 
 
+class TestMismatchProbe:
+    """The probe turns "matched nothing" into the reason the two ends disagree."""
+
+    def _probe(self, target_hash: str, messages, *, is_room=False, our_name="Me"):
+        from app.reactions import _probe_reaction_mismatch
+
+        return _probe_reaction_mismatch(
+            reaction=ReactionInfo(target_hash=target_hash, emoji="❤️"),
+            eligible=[(m, None) for m in messages],
+            is_room=is_room,
+            our_name=our_name,
+        )
+
+    def test_names_a_timestamp_offset(self):
+        msg = _message(7, text="Hello world", sender_timestamp=TS)
+        target = compute_reaction_hash(TS + 4, None, "Hello world")
+        assert self._probe(target, [msg]) == (
+            f"msg 7 hashed at ts={TS + 4} (+4s from the {TS} we stored)"
+        )
+
+    def test_names_a_whole_hour_offset(self):
+        msg = _message(7, text="Hello world", sender_timestamp=TS)
+        target = compute_reaction_hash(TS - 5 * 3600, None, "Hello world")
+        explanation = self._probe(target, [msg])
+        assert explanation is not None and f"ts={TS - 5 * 3600}" in explanation
+
+    def test_names_a_room_versus_direct_disagreement(self):
+        """We hashed it as a 1:1; the peer added our name, as it would for a room."""
+        msg = _message(7, text="Hello world", sender_timestamp=TS, outgoing=True)
+        target = compute_reaction_hash(TS, "Me", "Hello world")
+        assert self._probe(target, [msg]) == (
+            "msg 7 hashed with sender 'Me' (peer treats this as a room)"
+        )
+
+    def test_names_a_trailing_nul(self):
+        msg = _message(7, text="Hello world", sender_timestamp=TS)
+        target = compute_reaction_hash(TS, None, "Hello world\x00")
+        assert self._probe(target, [msg]) == (
+            "msg 7 hashed with a trailing NUL from the companion frame"
+        )
+
+    def test_reports_nothing_when_no_variant_explains_it(self):
+        msg = _message(7, text="Hello world", sender_timestamp=TS)
+        # A hash no variant produces must not be explained away.
+        stray = compute_reaction_hash(TS, None, "totally different body")
+        assert self._probe(stray, [msg]) is None
+
+    def test_skips_messages_it_cannot_hash(self):
+        assert self._probe("dead", [_message(7, sender_timestamp=None)]) is None
+
+
 def _channel_reaction_text(sender: str, target_ts: int, target_sender: str, target_body: str):
     """Wire text a client would send to react 👍 to a channel message."""
     target_hash = compute_reaction_hash(target_ts, target_sender, target_body)

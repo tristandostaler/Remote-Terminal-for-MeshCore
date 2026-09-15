@@ -278,6 +278,93 @@ async def _conversation_is_room(msg_type: str, conversation_key: str) -> bool:
 # dumping a conversation into the log.
 UNMATCHED_REACTION_LOG_CANDIDATES = 5
 
+# How many of the newest eligible messages the mismatch probe re-hashes, and how
+# far either side of their stored timestamp it looks. 15 minutes covers a clock
+# that drifted or a node that stamped its own send; the hour multiples on top
+# catch a peer working in local time instead of UTC. Bounded on purpose: this
+# runs on the ingest path (~85ms when nothing explains the miss, which is the
+# worst case since a hit returns early), and it is a diagnosis, never a match.
+MISMATCH_PROBE_CANDIDATES = 10
+MISMATCH_PROBE_SECONDS = 900
+MISMATCH_PROBE_HOUR_OFFSETS = tuple(
+    hours * 3600 for hours in range(-14, 15) if abs(hours * 3600) > MISMATCH_PROBE_SECONDS
+)
+
+
+def _probe_reaction_mismatch(
+    *,
+    reaction: ReactionInfo,
+    eligible: list[tuple[Message, str | None]],
+    is_room: bool,
+    our_name: str | None,
+) -> str | None:
+    """Name what would have made this reaction match, or None if nothing does.
+
+    The hash cannot be inverted, but the ways two clients disagree about one
+    message are few and each is a rule we can re-hash under. Finding which rule
+    hits turns "matched nothing" into the actual fault: a timestamp offset means
+    the copy the peer hashed is stamped differently from ours, a sender-name
+    variant means the two ends disagree about whether the conversation is a room
+    (so one adds the author to the hash and the other does not), and a body
+    variant means we normalised the text and they did not, or the other way
+    round.
+
+    Diagnosis only. None of these are accepted as a match: a 16-bit hash tried
+    under thousands of variants would start colliding, and attaching a reaction
+    to the wrong message is worse than leaving it unattached.
+    """
+    for candidate, _ in eligible[:MISMATCH_PROBE_CANDIDATES]:
+        inputs = hash_inputs_for_message(candidate, is_room=is_room, our_name=our_name)
+        if inputs is None:
+            continue
+        timestamp_secs, sender_name, text = inputs
+
+        # The sender half: whichever of the two rules we did not use.
+        for label, other_sender in (
+            ("hashed with no sender (peer treats this as a 1:1)", None),
+            (f"hashed with sender {our_name!r} (peer treats this as a room)", our_name),
+            (
+                f"hashed with sender {candidate.sender_name!r} (peer treats this as a room)",
+                candidate.sender_name,
+            ),
+        ):
+            if other_sender == sender_name:
+                continue
+            if compute_reaction_hash(timestamp_secs, other_sender, text) == reaction.target_hash:
+                return f"msg {candidate.id} {label}"
+
+        # The body half: normalisations either end may have applied.
+        for label, other_text in (
+            ("with surrounding whitespace kept/stripped", text.strip()),
+            ("with a trailing NUL from the companion frame", f"{text}\x00"),
+            ("with the reply mention stripped", clean_channel_body_for_hash(text)),
+        ):
+            if other_text == text:
+                continue
+            if (
+                compute_reaction_hash(timestamp_secs, sender_name, other_text)
+                == reaction.target_hash
+            ):
+                return f"msg {candidate.id} hashed {label}"
+
+        # The timestamp half last, so the cheap explanations for this candidate
+        # are preferred over its widest search. Candidates are still tried
+        # newest-first throughout: the newest is the one a reaction addresses.
+        offsets = [*range(-MISMATCH_PROBE_SECONDS, MISMATCH_PROBE_SECONDS + 1)]
+        offsets.extend(MISMATCH_PROBE_HOUR_OFFSETS)
+        for offset in offsets:
+            if offset == 0:
+                continue
+            if (
+                compute_reaction_hash(timestamp_secs + offset, sender_name, text)
+                == reaction.target_hash
+            ):
+                return (
+                    f"msg {candidate.id} hashed at ts={timestamp_secs + offset} "
+                    f"({offset:+d}s from the {timestamp_secs} we stored)"
+                )
+    return None
+
 
 def _log_unmatched_reaction(
     *,
@@ -307,9 +394,15 @@ def _log_unmatched_reaction(
         len(eligible),
         is_room,
     )
+    our_name = _our_radio_name()
+    explanation = _probe_reaction_mismatch(
+        reaction=reaction, eligible=eligible, is_room=is_room, our_name=our_name
+    )
+    if explanation is not None:
+        logger.warning("  it would have matched %s", explanation)
+
     if not logger.isEnabledFor(logging.INFO):
         return
-    our_name = _our_radio_name()
     for candidate, candidate_hash in eligible[:UNMATCHED_REACTION_LOG_CANDIDATES]:
         inputs = hash_inputs_for_message(candidate, is_room=is_room, our_name=our_name)
         if inputs is None:
