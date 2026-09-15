@@ -20,6 +20,7 @@ from app.services.dm_ingest import (
     resolve_direct_message_sender_metadata,
     resolve_fallback_direct_message_context,
 )
+from app.services.radio_cli import install_cli_reply_adapter
 from app.services.radio_runtime import radio_runtime as radio_manager
 from app.websocket import broadcast_event
 
@@ -573,6 +574,7 @@ def register_event_handlers(meshcore) -> None:
     _active_subscriptions.append(meshcore.subscribe(EventType.RAW_DATA, on_raw_data))
     install_full_raw_data_adapter(meshcore)
     install_channel_data_adapter(meshcore)
+    install_cli_reply_adapter(meshcore)
     # The virtual companion node sees every inbound frame: it caches identity
     # frames, completes the commands it forwarded for apps, and relays pushes.
     from app.virtual_node.server import install_frame_tap

@@ -99,7 +99,7 @@ class RxSilenceWatchdog:
 
     async def check(self) -> None:
         """One watchdog tick. Safe to call as often as you like."""
-        from app.websocket import broadcast_error, broadcast_success
+        from app.websocket import broadcast_error
 
         timeout = self.timeout
         if timeout <= 0:
@@ -128,11 +128,13 @@ class RxSilenceWatchdog:
                 # A fresh connection restarted the silence clock; no frame has
                 # actually arrived yet, so the incident is still open.
                 return
+            # Log only: a quiet mesh comes and goes, and a toast for every
+            # lull (and every recovery) is noise. Confirmed stalls still toast
+            # below, because those change the radio's state.
             logger.info(
                 "Radio RX-log frames resumed after %s",
                 " -> ".join(self.state.log) or "a silent period",
             )
-            broadcast_success("Radio packet stream recovered")
             self._reset()
             return
 
@@ -155,12 +157,6 @@ class RxSilenceWatchdog:
                 "No raw RX-log frame from the radio for %ds; probing the link (packet stats: %s)",
                 int(silence),
                 "unsupported" if sample.recv is None else f"recv={sample.recv}",
-            )
-            broadcast_error(
-                "No radio packets heard for a while",
-                f"RemoteTerm has not received a raw packet from the radio in {int(silence // 60)} "
-                "minutes and is probing the link. A quiet mesh is harmless; a stalled radio "
-                "link will be reconnected automatically.",
             )
 
         previous = last

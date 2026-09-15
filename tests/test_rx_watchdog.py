@@ -185,11 +185,31 @@ class TestWatchdog:
 
         rm.note_rx_log_frame(clock())
         clock.advance(10)
-        with patch("app.websocket.broadcast_success") as success:
+        with (
+            patch("app.websocket.broadcast_success") as success,
+            patch("app.websocket.broadcast_error") as error,
+        ):
             await wd.check()
 
         assert wd.state.incident_open is False
-        success.assert_called_once()
+        # Lulls and recoveries are log-only; only a confirmed stall toasts.
+        success.assert_not_called()
+        error.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_probe_on_a_quiet_mesh_does_not_toast(self):
+        clock = FakeClock()
+        rm = _fake_manager(clock, [500, 500])
+        wd = RxSilenceWatchdog(rm, clock=clock)
+
+        with patch("app.websocket.broadcast_error") as error:
+            clock.advance(300)
+            await wd.check()
+            clock.advance(300)
+            await wd.check()
+
+        error.assert_not_called()
+        assert wd.state.warned is True
 
     @pytest.mark.asyncio
     async def test_firmware_without_packet_stats_only_probes(self):

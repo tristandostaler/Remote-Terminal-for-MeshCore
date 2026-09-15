@@ -45,6 +45,31 @@ export interface RadioConfigUpdate {
   repeat_enabled?: boolean;
 }
 
+export interface RadioChannelSlot {
+  slot: number;
+  empty: boolean;
+  name: string | null;
+  key: string | null;
+  /** Name of this key in RemoteTerm's own channel list, if joined. */
+  known_name: string | null;
+  /** Pinned in this slot by RemoteTerm for the session (resident channels). */
+  resident: boolean;
+  /** Loaded by a recent send into a scratch slot. */
+  send_cache: boolean;
+}
+
+export interface RadioChannelSlotsResponse {
+  max_channels: number;
+  resident_enabled: boolean;
+  slots: RadioChannelSlot[];
+}
+
+export interface RadioCliResponse {
+  command: string;
+  reply: string;
+  elapsed_ms: number;
+}
+
 export type RadioDiscoveryTarget = 'repeaters' | 'sensors' | 'all';
 
 export interface RadioDiscoveryResult {

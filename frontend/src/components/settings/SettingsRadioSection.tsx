@@ -15,6 +15,8 @@ import {
   DialogTitle,
 } from '../ui/dialog';
 import { api } from '../../api';
+import { RadioChannelSlotsPanel } from './RadioChannelSlotsPanel';
+import { RadioCliConsole } from './RadioCliConsole';
 import { RADIO_PRESETS } from '../../utils/radioPresets';
 import { stripRegionScopePrefix } from '../../utils/regionScope';
 import { DEFAULT_MESSAGE_RETRIES, MAX_MESSAGE_RETRIES, MIN_MESSAGE_RETRIES } from '../../types';
@@ -859,6 +861,9 @@ export function SettingsRadioSection({
         <p className="text-[0.8125rem] text-muted-foreground">
           Disconnect pauses automatic reconnect attempts so another device can use the radio.
         </p>
+
+        <RadioChannelSlotsPanel connected={radioState === 'connected'} />
+        <RadioCliConsole connected={radioState === 'connected'} />
       </div>
 
       <Separator />
