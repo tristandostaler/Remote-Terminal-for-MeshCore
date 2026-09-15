@@ -99,8 +99,6 @@ class RxSilenceWatchdog:
 
     async def check(self) -> None:
         """One watchdog tick. Safe to call as often as you like."""
-        from app.websocket import broadcast_error
-
         timeout = self.timeout
         if timeout <= 0:
             return
@@ -128,9 +126,6 @@ class RxSilenceWatchdog:
                 # A fresh connection restarted the silence clock; no frame has
                 # actually arrived yet, so the incident is still open.
                 return
-            # Log only: a quiet mesh comes and goes, and a toast for every
-            # lull (and every recovery) is noise. Confirmed stalls still toast
-            # below, because those change the radio's state.
             logger.info(
                 "Radio RX-log frames resumed after %s",
                 " -> ".join(self.state.log) or "a silent period",
@@ -185,9 +180,15 @@ class RxSilenceWatchdog:
             return
 
         # The radio heard packets and pushed none of them to us: the push path is wedged.
-        await self._escalate(heard, broadcast_error)
+        await self._escalate(heard)
 
-    async def _escalate(self, heard: int, broadcast_error) -> None:
+    async def _escalate(self, heard: int) -> None:
+        """Reconnect, then reboot. Log-only: the watchdog never toasts.
+
+        Everything it does is visible in the log and in the connection status
+        the UI already shows (the health indicator flips while it reconnects),
+        so a toast would only duplicate that.
+        """
         now = self._clock()
         if self.state.escalation == 0:
             self.state.escalation = 1
@@ -196,11 +197,6 @@ class RxSilenceWatchdog:
                 "Radio heard %d packet(s) but pushed no RX-log frame to RemoteTerm; "
                 "the push path is stalled. Reconnecting the transport.",
                 heard,
-            )
-            broadcast_error(
-                "Radio stopped forwarding packets",
-                f"The radio heard {heard} packet(s) that never reached RemoteTerm. "
-                "Reconnecting to the radio.",
             )
             self.state.last_probe = None
             await self._reconnect()
@@ -226,11 +222,6 @@ class RxSilenceWatchdog:
             "Radio still heard %d packet(s) without forwarding any after a reconnect; "
             "sending the reboot command.",
             heard,
-        )
-        broadcast_error(
-            "Rebooting the radio",
-            "Reconnecting did not restore the packet stream. RemoteTerm is rebooting the "
-            "radio and will reconnect when it comes back.",
         )
         self.state.last_probe = None
         await self._reboot()

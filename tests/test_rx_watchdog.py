@@ -192,7 +192,6 @@ class TestWatchdog:
             await wd.check()
 
         assert wd.state.incident_open is False
-        # Lulls and recoveries are log-only; only a confirmed stall toasts.
         success.assert_not_called()
         error.assert_not_called()
 
@@ -210,6 +209,30 @@ class TestWatchdog:
 
         error.assert_not_called()
         assert wd.state.warned is True
+
+    @pytest.mark.asyncio
+    async def test_never_toasts_even_when_it_reconnects_and_reboots(self):
+        """The watchdog is log-only end to end: reconnect and reboot included."""
+        clock = FakeClock()
+        rm = _fake_manager(clock, [500, 512, 600, 640])
+        wd = RxSilenceWatchdog(rm, clock=clock)
+
+        with (
+            patch("app.websocket.broadcast_error") as error,
+            patch("app.websocket.broadcast_success") as success,
+        ):
+            for _ in range(2):
+                clock.advance(300)
+                await wd.check()
+            rm._tracker.mark_rx_baseline(clock())
+            for _ in range(2):
+                clock.advance(300)
+                await wd.check()
+
+        rm.reconnect_and_prepare.assert_awaited_once()
+        rm._mc.commands.reboot.assert_awaited_once()
+        error.assert_not_called()
+        success.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_firmware_without_packet_stats_only_probes(self):
