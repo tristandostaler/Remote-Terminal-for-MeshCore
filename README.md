@@ -15,6 +15,7 @@ Connect your radio over Serial, TCP, or BLE, and then you can:
 * Forward packets, messages, and automatic repeater telemetry to MQTT, Home Assistant, LetsMesh, MeshRank, SQS, Apprise, etc.
 * Use the more recent 1.14+ firmwares which support multibyte pathing
 * Visualize the mesh as a map or node set, view repeater stats, and more!
+* Inspect the radio's channel slots and run firmware CLI commands on the companion from the radio settings (CLI needs companion protocol 14+)
 
 For advanced setup and troubleshooting see [README_ADVANCED.md](README_ADVANCED.md). If you plan to contribute, read [CONTRIBUTING.md](CONTRIBUTING.md).
 
