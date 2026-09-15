@@ -273,6 +273,64 @@ async def _conversation_is_room(msg_type: str, conversation_key: str) -> bool:
     return contact is not None and contact.type == CONTACT_TYPE_ROOM
 
 
+# How many of the newest eligible messages the unmatched-reaction log describes.
+# Enough to see whether the timestamp or the body is what diverged, without
+# dumping a conversation into the log.
+UNMATCHED_REACTION_LOG_CANDIDATES = 5
+
+
+def _log_unmatched_reaction(
+    *,
+    reaction: ReactionInfo,
+    conversation_key: str,
+    scanned: int,
+    eligible: list[tuple[Message, str | None]],
+    is_room: bool,
+) -> None:
+    """Explain a reaction that addressed nothing we hold.
+
+    The hash is a one-way function of ``(sender timestamp, sender name, first 5
+    code units)``, so "no match" on its own says nothing about *why* the two
+    clients disagree. Logging what we hashed for the newest eligible messages
+    makes the divergence readable: a right body under a different timestamp is a
+    clock/echo problem, a matching timestamp under a different body is a
+    text-normalisation one, and an empty candidate list means the direction rule
+    (or the conversation key) excluded the target before hashing.
+    """
+    logger.warning(
+        "Reaction %s (hash %s) matched none of %d recent message(s) in %s "
+        "(%d eligible after direction rules, is_room=%s)",
+        reaction.emoji,
+        reaction.target_hash,
+        scanned,
+        conversation_key[:12],
+        len(eligible),
+        is_room,
+    )
+    if not logger.isEnabledFor(logging.INFO):
+        return
+    our_name = _our_radio_name()
+    for candidate, candidate_hash in eligible[:UNMATCHED_REACTION_LOG_CANDIDATES]:
+        inputs = hash_inputs_for_message(candidate, is_room=is_room, our_name=our_name)
+        if inputs is None:
+            logger.info(
+                "  msg %d: not hashable (no sender timestamp)",
+                candidate.id,
+            )
+            continue
+        timestamp_secs, sender_name, text = inputs
+        units = _utf16_code_units(text)[:5]
+        first5 = struct.pack(f"<{len(units)}H", *units).decode("utf-16-le", "surrogatepass")
+        logger.info(
+            "  msg %d: hash %s over ts=%d sender=%r first5=%r",
+            candidate.id,
+            candidate_hash,
+            timestamp_secs,
+            sender_name,
+            first5,
+        )
+
+
 async def apply_reaction(
     *,
     msg_type: str,
@@ -291,8 +349,8 @@ async def apply_reaction(
     same (newest) message every client picks. ``fallback_target`` -- the row the
     user actually long-pressed -- catches the one case the scan cannot: a
     target older than the scan window. Returns the updated target, or None when
-    nothing matched (the reaction is then lost, exactly as MCO Advanced loses
-    it).
+    nothing matched -- the caller then keeps the reaction row visible rather
+    than losing it.
     """
     from app.repository import MessageRepository
 
@@ -305,6 +363,7 @@ async def apply_reaction(
         limit=REACTION_MATCH_SCAN_LIMIT,
     )
     target: Message | None = None
+    eligible: list[tuple[Message, str | None]] = []
     for candidate in candidates:
         if msg_type == "PRIV" and not is_room:
             # 1:1: you react to what you received, never to your own bubble.
@@ -312,20 +371,21 @@ async def apply_reaction(
                 continue
             if not reactor_is_self and not candidate.outgoing:
                 continue
-        if reaction_hash_for_message(candidate, is_room=is_room, our_name=our_name) == (
-            reaction.target_hash
-        ):
+        candidate_hash = reaction_hash_for_message(candidate, is_room=is_room, our_name=our_name)
+        eligible.append((candidate, candidate_hash))
+        if candidate_hash == reaction.target_hash:
             target = candidate
             break
 
     if target is None:
         target = fallback_target
     if target is None:
-        logger.info(
-            "Reaction %s (hash %s) matched no recent message in %s",
-            reaction.emoji,
-            reaction.target_hash,
-            conversation_key[:12],
+        _log_unmatched_reaction(
+            reaction=reaction,
+            conversation_key=conversation_key,
+            scanned=len(candidates),
+            eligible=eligible,
+            is_room=is_room,
         )
         return None
 

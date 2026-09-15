@@ -845,6 +845,22 @@ class MessageRepository:
                 pass
 
     @staticmethod
+    async def set_is_reaction(message_id: int, is_reaction: bool) -> None:
+        """Hide or unhide a stored reaction payload row.
+
+        Ingest stores a reaction hidden and only knows whether it addressed
+        anything we hold once the scan has run; a reaction that matched nothing
+        is unhidden here so it stays visible as a generic reaction bubble
+        instead of vanishing.
+        """
+        async with db.tx() as conn:
+            async with conn.execute(
+                "UPDATE messages SET is_reaction = ? WHERE id = ?",
+                (1 if is_reaction else 0, message_id),
+            ):
+                pass
+
+    @staticmethod
     async def set_compression(message_id: int, compression: CompressionInfo | None) -> None:
         """Attach (or clear) the compression facts for an already-stored message.
 

@@ -24,6 +24,7 @@ from app.services.messages import (
     handle_duplicate_message,
     reconcile_duplicate_message,
     truncate_for_log,
+    unhide_unmatched_reaction,
 )
 from app.services.raw_media import note_inbound_text_chunk
 from app.services.raw_media_text import is_tunnel_chunk as is_raw_media_text_chunk
@@ -292,13 +293,23 @@ async def _store_direct_message(
             # react endpoint already applied (or chose not to), so they stay
             # stored-but-inert.
             if not outgoing:
-                await apply_reaction(
+                applied = await apply_reaction(
                     msg_type="PRIV",
                     conversation_key=conversation_key,
                     reaction=reaction,
                     reactor_is_self=False,
                     broadcast_fn=broadcast_fn,
                 )
+                if applied is None:
+                    # Nothing we hold carries this hash, so hiding the row would
+                    # drop the fact that the peer reacted at all. Unhide it and
+                    # let it render as a generic reaction bubble instead.
+                    message = await unhide_unmatched_reaction(
+                        message=message,
+                        broadcast_fn=broadcast_fn,
+                        packet_hash=packet_hash,
+                        message_repository=message_repository,
+                    )
         else:
             broadcast_message(
                 message=message,
