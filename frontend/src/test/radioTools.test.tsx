@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { RadioChannelSlotsPanel } from '../components/settings/RadioChannelSlotsPanel';
 import { RadioCliConsole } from '../components/settings/RadioCliConsole';
-import { api } from '../api';
+import { ApiError, api } from '../api';
 import type { RadioChannelSlotsResponse } from '../types';
 
 vi.mock('../api', async (importOriginal) => {
@@ -122,15 +122,42 @@ describe('RadioCliConsole', () => {
     expect((input as HTMLInputElement).value).toBe('');
   });
 
-  it('shows the server message when the firmware cannot run CLI commands', async () => {
-    mockApi.runRadioCli.mockRejectedValue(new Error('needs 14 or newer'));
+  it('replaces the input with an explanation when the firmware has no CLI', async () => {
+    mockApi.runRadioCli.mockRejectedValue(new ApiError('Companion radios have no CLI', 501));
     render(<RadioCliConsole connected defaultOpen />);
 
     const input = screen.getByLabelText('Radio CLI command');
     fireEvent.change(input, { target: { value: 'ver' } });
     fireEvent.submit(input.closest('form')!);
 
-    await waitFor(() => expect(screen.getByText('needs 14 or newer')).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId('radio-cli-unsupported')).toHaveTextContent(
+        'Companion radios have no CLI'
+      )
+    );
+    // Not offered again: a missing feature is not a retryable error.
+    expect(screen.queryByLabelText('Radio CLI command')).not.toBeInTheDocument();
+  });
+
+  it('says so up front when the radio config already reports no CLI', () => {
+    render(<RadioCliConsole connected unsupported defaultOpen />);
+
+    expect(screen.getByTestId('radio-cli-unsupported')).toHaveTextContent(/repeater/i);
+    expect(screen.queryByLabelText('Radio CLI command')).not.toBeInTheDocument();
+    expect(mockApi.runRadioCli).not.toHaveBeenCalled();
+  });
+
+  it('keeps the input after an ordinary command failure', async () => {
+    mockApi.runRadioCli.mockRejectedValue(new ApiError('Radio rejected the command', 502));
+    render(<RadioCliConsole connected defaultOpen />);
+
+    const input = screen.getByLabelText('Radio CLI command');
+    fireEvent.change(input, { target: { value: 'set nonsense' } });
+    fireEvent.submit(input.closest('form')!);
+
+    await waitFor(() => expect(screen.getByText('Radio rejected the command')).toBeInTheDocument());
+    expect(screen.getByLabelText('Radio CLI command')).toBeInTheDocument();
+    expect(screen.queryByTestId('radio-cli-unsupported')).not.toBeInTheDocument();
   });
 
   it('recalls the previous command with the up arrow', async () => {

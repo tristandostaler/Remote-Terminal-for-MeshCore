@@ -176,6 +176,22 @@ export interface ImageSessionStatus {
   transport: MediaTransport;
 }
 
+/**
+ * An API call that came back with an HTTP error, carrying the status so callers
+ * can branch on it (a 501 means the radio firmware lacks a feature, not that
+ * the request was wrong). Extends Error, so existing `err.message` handling is
+ * unaffected.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const hasBody = options?.body !== undefined;
   const res = await fetch(`${API_BASE}${url}`, {
@@ -197,7 +213,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
     } catch {
       // Not JSON, use raw text
     }
-    throw new Error(errorMessage);
+    throw new ApiError(errorMessage, res.status);
   }
   return res.json();
 }

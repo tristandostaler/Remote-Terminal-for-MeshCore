@@ -105,6 +105,13 @@ class RadioConfigResponse(BaseModel):
     path_hash_mode_supported: bool = Field(
         default=False, description="Whether firmware supports path hash mode setting"
     )
+    cli_unsupported: bool = Field(
+        default=False,
+        description=(
+            "True once this radio has refused a CLI command as an unknown command, "
+            "so the UI can stop offering it. False means untried or working, not proven."
+        ),
+    )
     advert_location_source: AdvertLocationSource = Field(
         default="current",
         description="Whether adverts include the node's current location state",
@@ -407,6 +414,7 @@ async def get_radio_config() -> RadioConfigResponse:
         ),
         path_hash_mode=radio_manager.path_hash_mode,
         path_hash_mode_supported=radio_manager.path_hash_mode_supported,
+        cli_unsupported=bool(getattr(radio_manager, "cli_unsupported", False)),
         advert_location_source=advert_location_source,
         multi_acks_enabled=bool(info.get("multi_acks", 0)),
         telemetry_mode_base=info.get("telemetry_mode_base", 0),
@@ -908,17 +916,28 @@ class RadioCliResponse(BaseModel):
 async def run_radio_cli_command(request: RadioCliRequest) -> RadioCliResponse:
     """Run one firmware CLI command on the companion radio and return its reply.
 
-    Needs companion protocol 14 or newer. The command runs on the radio with
-    the same effect as typing it on the device's own console, so commands that
-    change radio parameters or reboot the node do exactly that.
+    Answers 501 when the firmware has no CLI over the companion link, which is
+    the case for every released companion build: the CLI belongs to repeater and
+    room-server firmware. That verdict is remembered for the connection, so a
+    second attempt is refused without touching the radio and the settings panel
+    can disable its input.
+
+    When the firmware does implement it, the command runs on the radio exactly
+    as if typed on its own console, so commands that change radio parameters or
+    reboot the node do exactly that.
     """
     from app.services.radio_cli import (
+        UNSUPPORTED_MESSAGE,
         CliCommandError,
         CliUnsupportedError,
         run_cli_command,
     )
 
     radio_manager.require_connected()
+    if getattr(radio_manager, "cli_unsupported", False):
+        # Already established on this connection; do not spend a radio round
+        # trip re-learning it.
+        raise HTTPException(status_code=501, detail=UNSUPPORTED_MESSAGE)
     started = _monotonic()
     try:
         async with radio_manager.radio_operation("radio_cli") as mc:
@@ -928,6 +947,8 @@ async def run_radio_cli_command(request: RadioCliRequest) -> RadioCliResponse:
                 firmware_ver_code=radio_manager.firmware_ver_code,
             )
     except CliUnsupportedError as exc:
+        radio_manager.cli_unsupported = True
+        logger.info("Radio CLI unavailable on this firmware: %s", exc)
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

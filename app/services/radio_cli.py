@@ -26,9 +26,26 @@ logger = logging.getLogger(__name__)
 
 CMD_RUN_CLI_COMMAND = 66
 RESP_CODE_CLI_REPLY = 29
+# The firmware answers a command byte it does not know with RESP_CODE_ERR and
+# this code (``writeErrFrame(ERR_CODE_UNSUPPORTED_CMD)`` in its final else),
+# which meshcore-py surfaces as ``{"error_code": 1}`` on an ERROR event. That
+# is the authoritative "this firmware has no CLI" signal -- the protocol
+# version below is only a cheap pre-check.
+ERR_CODE_UNSUPPORTED_CMD = 1
 # Companion protocol version (DEVICE_INFO "fw ver") that introduced the command,
-# the same gate meshcore-cli uses before offering its ``cli`` command.
+# the same gate meshcore-cli uses before offering its ``cli`` command. Passing
+# it does NOT mean the firmware implements the command: released companion
+# firmware reports 14+ while implementing commands only up to 65, so the real
+# answer comes from the radio's error code. Kept as a pre-check that spares a
+# round trip on firmware that certainly cannot have it.
 MIN_FIRMWARE_VER_CODE = 14
+
+UNSUPPORTED_MESSAGE = (
+    "This radio's firmware does not accept CLI commands over the companion link. "
+    "The MeshCore CLI belongs to repeater and room-server firmware; a companion "
+    "(chat client) radio has no CLI to run. Use the repeater CLI to reach those "
+    "nodes over the mesh."
+)
 DEFAULT_TIMEOUT_SECONDS = 8.0
 MAX_COMMAND_BYTES = 160
 
@@ -36,7 +53,7 @@ _pending_reply: asyncio.Future[str] | None = None
 
 
 class CliUnsupportedError(RuntimeError):
-    """The connected firmware is too old for CMD_RUN_CLI_COMMAND."""
+    """The connected firmware does not implement CMD_RUN_CLI_COMMAND."""
 
 
 class CliCommandError(RuntimeError):
@@ -84,16 +101,17 @@ async def run_cli_command(
 ) -> str:
     """Send one CLI command to the companion and return its reply text.
 
-    Raises CliUnsupportedError when the firmware predates the command,
-    CliCommandError when the radio answers with an error frame, and
-    asyncio.TimeoutError when nothing comes back in time.
+    Raises CliUnsupportedError when the firmware does not implement the command
+    (either it predates the protocol version, or it answered with
+    ERR_CODE_UNSUPPORTED_CMD), CliCommandError when the radio refused the
+    command for any other reason, and asyncio.TimeoutError on silence.
     """
     global _pending_reply
 
     if not firmware_supports_cli(firmware_ver_code):
         raise CliUnsupportedError(
-            "This firmware does not accept CLI commands over the companion link "
-            f"(protocol version {firmware_ver_code}, needs {MIN_FIRMWARE_VER_CODE} or newer)."
+            f"{UNSUPPORTED_MESSAGE} (companion protocol version {firmware_ver_code}, "
+            f"the command needs {MIN_FIRMWARE_VER_CODE} or newer.)"
         )
     text = command.strip()
     if not text:
@@ -109,8 +127,17 @@ async def run_cli_command(
     _pending_reply = reply
 
     def _on_error(event) -> None:
-        if not reply.done():
-            reply.set_exception(CliCommandError(str(getattr(event, "payload", {}) or "error")))
+        if reply.done():
+            return
+        payload = getattr(event, "payload", None) or {}
+        code = payload.get("error_code") if isinstance(payload, dict) else None
+        if code == ERR_CODE_UNSUPPORTED_CMD:
+            # The radio does not know command 66 at all: not a failed command,
+            # a missing feature. Callers latch this so the UI can say so once
+            # instead of failing the same way on every attempt.
+            reply.set_exception(CliUnsupportedError(UNSUPPORTED_MESSAGE))
+        else:
+            reply.set_exception(CliCommandError(str(payload or "error")))
 
     error_sub = mc.subscribe(EventType.ERROR, _on_error)
     try:

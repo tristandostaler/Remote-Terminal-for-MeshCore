@@ -1460,6 +1460,7 @@ class TestRadioCliEndpoint:
         mock_rm.is_connected = True
         mock_rm.is_setup_complete = True
         mock_rm.is_setup_in_progress = False
+        mock_rm.cli_unsupported = False
         mock_rm.firmware_ver_code = 14
         mock_rm.require_connected = MagicMock(return_value=mock_mc)
         mock_rm.radio_operation = _noop_radio_operation(mock_mc)
@@ -1485,6 +1486,7 @@ class TestRadioCliEndpoint:
         mock_rm.is_connected = True
         mock_rm.is_setup_complete = True
         mock_rm.is_setup_in_progress = False
+        mock_rm.cli_unsupported = False
         mock_rm.firmware_ver_code = 12
         mock_rm.require_connected = MagicMock(return_value=MagicMock())
         mock_rm.radio_operation = _noop_radio_operation(MagicMock())
@@ -1509,6 +1511,7 @@ class TestRadioCliEndpoint:
         mock_rm.is_connected = True
         mock_rm.is_setup_complete = True
         mock_rm.is_setup_in_progress = False
+        mock_rm.cli_unsupported = False
         mock_rm.firmware_ver_code = 14
         mock_rm.require_connected = MagicMock(return_value=MagicMock())
         mock_rm.radio_operation = _noop_radio_operation(MagicMock())
@@ -1524,3 +1527,71 @@ class TestRadioCliEndpoint:
             await run_radio_cli_command(RadioCliRequest(command="ver"))
 
         assert exc_info.value.status_code == 504
+
+
+class TestRadioCliUnsupportedFirmware:
+    """Firmware with no CLI answers ERR_CODE_UNSUPPORTED_CMD; say so once and remember it."""
+
+    @staticmethod
+    def _manager(**overrides):
+        mock_rm = MagicMock()
+        mock_rm.is_connected = True
+        mock_rm.is_setup_complete = True
+        mock_rm.is_setup_in_progress = False
+        mock_rm.firmware_ver_code = 14
+        mock_rm.cli_unsupported = False
+        mock_rm.require_connected = MagicMock(return_value=MagicMock())
+        mock_rm.radio_operation = _noop_radio_operation(MagicMock())
+        for key, value in overrides.items():
+            setattr(mock_rm, key, value)
+        return mock_rm
+
+    @pytest.mark.asyncio
+    async def test_refusal_returns_501_and_latches_the_flag(self):
+        from app.routers.radio import RadioCliRequest, run_radio_cli_command
+        from app.services.radio_cli import CliUnsupportedError
+
+        mock_rm = self._manager()
+
+        with (
+            patch("app.routers.radio.radio_manager", _runtime(mock_rm)),
+            patch(
+                "app.services.radio_cli.run_cli_command",
+                new=AsyncMock(side_effect=CliUnsupportedError("no CLI here")),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await run_radio_cli_command(RadioCliRequest(command="ver"))
+
+        assert exc_info.value.status_code == 501
+        assert mock_rm.cli_unsupported is True
+
+    @pytest.mark.asyncio
+    async def test_second_attempt_is_refused_without_touching_the_radio(self):
+        from app.routers.radio import RadioCliRequest, run_radio_cli_command
+
+        mock_rm = self._manager(cli_unsupported=True)
+        run = AsyncMock(return_value="never")
+
+        with (
+            patch("app.routers.radio.radio_manager", _runtime(mock_rm)),
+            patch("app.services.radio_cli.run_cli_command", new=run),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await run_radio_cli_command(RadioCliRequest(command="ver"))
+
+        assert exc_info.value.status_code == 501
+        run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_radio_config_reports_the_flag(self):
+        from app.routers.radio import get_radio_config
+
+        mc = _mock_meshcore_with_info()
+        mock_rm = self._manager(cli_unsupported=True, meshcore=mc)
+        mock_rm.require_connected = MagicMock(return_value=mc)
+
+        with patch("app.routers.radio.radio_manager", _runtime(mock_rm)):
+            config = await get_radio_config()
+
+        assert config.cli_unsupported is True

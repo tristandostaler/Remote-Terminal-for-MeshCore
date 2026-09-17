@@ -9,6 +9,7 @@ from meshcore import EventType
 from app.services import radio_cli
 from app.services.radio_cli import (
     CMD_RUN_CLI_COMMAND,
+    ERR_CODE_UNSUPPORTED_CMD,
     RESP_CODE_CLI_REPLY,
     CliCommandError,
     CliUnsupportedError,
@@ -18,7 +19,7 @@ from app.services.radio_cli import (
 )
 
 
-def _fake_mc(*, reply: bytes | None = None, error: bool = False):
+def _fake_mc(*, reply: bytes | None = None, error_code: int | None = None):
     """A MeshCore stub whose send() makes the reader 'receive' the scripted answer."""
     mc = MagicMock()
     original_rx = AsyncMock()
@@ -38,9 +39,9 @@ def _fake_mc(*, reply: bytes | None = None, error: bool = False):
         mc.sent = frame
         if reply is not None:
             await mc._reader.handle_rx(bytearray([RESP_CODE_CLI_REPLY]) + bytearray(reply))
-        if error:
+        if error_code is not None:
             for handler in error_handlers:
-                handler(MagicMock(payload={"error": "unsupported"}))
+                handler(MagicMock(payload={"error_code": error_code}))
         return MagicMock(type=EventType.OK)
 
     mc.commands.send = AsyncMock(side_effect=_send)
@@ -95,10 +96,23 @@ class TestRunCliCommand:
         mc.commands.send.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_error_frame_raises(self):
-        mc = _fake_mc(error=True)
-        with pytest.raises(CliCommandError):
+    async def test_unknown_command_error_reads_as_unsupported_not_failed(self):
+        """Firmware without the command answers ERR_CODE_UNSUPPORTED_CMD; that is a
+        missing feature, not a rejected command, and callers latch it."""
+        mc = _fake_mc(error_code=ERR_CODE_UNSUPPORTED_CMD)
+
+        with pytest.raises(CliUnsupportedError) as exc_info:
             await run_cli_command(mc, "ver", firmware_ver_code=14)
+
+        assert "repeater" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_other_error_codes_are_a_failed_command(self):
+        """A firmware that does have a CLI can still refuse one command."""
+        mc = _fake_mc(error_code=6)  # ERR_CODE_ILLEGAL_ARG
+
+        with pytest.raises(CliCommandError):
+            await run_cli_command(mc, "set nonsense", firmware_ver_code=14)
 
     @pytest.mark.asyncio
     async def test_silence_times_out(self):

@@ -155,7 +155,7 @@ frontend/src/
 │   │   ├── settingsConstants.ts          # Settings section type, ordering, labels
 │   │   ├── SettingsRadioSection.tsx      # Name, keys, advert interval, max contacts, radio preset, freq/bw/sf/cr, txPower, lat/lon, reboot, mesh discovery
 │   │   ├── RadioChannelSlotsPanel.tsx    # Collapsible under Connection: the radio's channel slots as the radio reports them (refresh on demand)
-│   │   ├── RadioCliConsole.tsx           # Collapsible under Connection: one-line console to the companion firmware CLI, with history
+│   │   ├── RadioCliConsole.tsx           # Collapsible under Connection: one-line console to the radio firmware CLI, with history; a 501 (or `config.cli_unsupported`) replaces the input with "this firmware has no CLI"
 │   │   ├── SettingsLocalSection.tsx      # Browser-local settings: theme, relative font scale, local label, reopen last conversation
 │   │   ├── SettingsFanoutSection.tsx     # Fanout integrations: MQTT, bots, config CRUD
 │   │   ├── SettingsRadioAppSection.tsx    # Radio-App Management: tracked telemetry, contact management, blocked lists
