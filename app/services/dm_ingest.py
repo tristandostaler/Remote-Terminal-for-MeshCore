@@ -163,6 +163,7 @@ async def _store_direct_message(
     packet_hash: str | None = None,
     transport_code: int | None = None,
     region: str | None = None,
+    recovered_at: int | None = None,
     message_repository=MessageRepository,
     contact_repository=ContactRepository,
     raw_packet_repository=RawPacketRepository,
@@ -247,6 +248,7 @@ async def _store_direct_message(
             region=region,
             compression=compression,
             is_reaction=reaction is not None,
+            recovered_at=recovered_at,
         )
         if msg_id is None:
             await handle_duplicate_message(
@@ -286,6 +288,7 @@ async def _store_direct_message(
             region=region,
             compression=compression,
             is_reaction=reaction is not None,
+            recovered_at=recovered_at,
         )
         if reaction is not None:
             # Incoming reactions land on their target now. Outgoing ones only
@@ -361,6 +364,7 @@ async def ingest_decrypted_direct_message(
     packet_hash: str | None = None,
     transport_code: int | None = None,
     region: str | None = None,
+    recovered_at: int | None = None,
     contact_repository=ContactRepository,
 ) -> Message | None:
     conversation_key = their_public_key.lower()
@@ -423,6 +427,7 @@ async def ingest_decrypted_direct_message(
         packet_hash=packet_hash,
         transport_code=transport_code,
         region=region,
+        recovered_at=recovered_at,
     )
     if message is None:
         return None

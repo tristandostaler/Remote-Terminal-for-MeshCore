@@ -5,11 +5,18 @@ undecrypted count endpoint, and the maintenance endpoint.
 """
 
 import time
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.repository import ChannelRepository, MessageRepository, RawPacketRepository
+from app.services.historical_decrypt import (
+    ChannelTarget,
+    SweepSubmission,
+    get_status,
+    submit_channel_sweep,
+    wait_until_idle,
+)
 
 
 async def _insert_raw_packets(count: int, decrypted: bool = False, age_days: int = 0) -> list[int]:
@@ -364,20 +371,25 @@ class TestUndecryptedTextPacketStreaming:
         assert count == 2
 
 
-class TestRunHistoricalChannelDecryption:
-    """Test the _run_historical_channel_decryption background task."""
+class TestChannelSweep:
+    """The channel sweep itself (app.services.historical_decrypt)."""
+
+    KEY_HEX = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
+
+    def _target(self, name: str = "#test") -> ChannelTarget:
+        return ChannelTarget(key_bytes=bytes.fromhex(self.KEY_HEX), key_hex=self.KEY_HEX, name=name)
+
+    async def _sweep(self, *targets: ChannelTarget) -> None:
+        """Queue a sweep and wait it out, as a request plus its worker would."""
+        await submit_channel_sweep(list(targets))
+        await wait_until_idle(timeout=10)
 
     @pytest.mark.asyncio
     async def test_decrypts_matching_packets(self, test_db):
-        """Background task decrypts packets that match the channel key."""
-        from app.routers.packets import _run_historical_channel_decryption
-
-        # Insert undecrypted packets
+        """Packets that match the key become messages and the operator is told."""
         await _insert_raw_packets(3)
-        channel_key_hex = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
-        channel_key_bytes = bytes.fromhex(channel_key_hex)
 
-        # Each packet must have unique content to avoid message deduplication
+        # Each packet needs unique content or message dedup collapses them.
         call_count = 0
 
         def make_unique_result(*_args, **_kwargs):
@@ -395,90 +407,275 @@ class TestRunHistoricalChannelDecryption:
 
         with (
             patch(
-                "app.routers.packets.try_decrypt_packet_with_channel_key",
+                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
                 side_effect=make_unique_result,
             ),
-            patch(
-                "app.routers.packets.parse_packet",
-                return_value=None,
-            ),
-            patch("app.routers.packets.broadcast_success") as mock_success,
+            patch("app.services.historical_decrypt.parse_packet", return_value=None),
+            patch("app.services.historical_decrypt.broadcast_success") as mock_success,
         ):
-            await _run_historical_channel_decryption(channel_key_bytes, channel_key_hex, "#test")
+            await self._sweep(self._target())
 
         mock_success.assert_called_once()
-        assert "3" in mock_success.call_args[0][1]  # "Decrypted 3 messages"
+        assert "3" in mock_success.call_args[0][1]
 
     @pytest.mark.asyncio
-    async def test_skips_non_matching_packets(self, test_db):
-        """Background task skips packets that don't match the channel key."""
-        from app.routers.packets import _run_historical_channel_decryption
-
-        await _insert_raw_packets(2)
-        channel_key_hex = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
-        channel_key_bytes = bytes.fromhex(channel_key_hex)
-
-        with (
-            patch(
-                "app.routers.packets.try_decrypt_packet_with_channel_key",
-                return_value=None,  # No match
-            ),
-            patch("app.routers.packets.broadcast_success") as mock_success,
-        ):
-            await _run_historical_channel_decryption(channel_key_bytes, channel_key_hex, "#test")
-
-        # No success broadcast when nothing was decrypted
-        mock_success.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_no_packets_returns_early(self, test_db):
-        """Background task returns early when no undecrypted packets exist."""
-        from app.routers.packets import _run_historical_channel_decryption
-
-        channel_key_hex = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
-        channel_key_bytes = bytes.fromhex(channel_key_hex)
-
-        with patch("app.routers.packets.broadcast_success") as mock_success:
-            await _run_historical_channel_decryption(channel_key_bytes, channel_key_hex)
-
-        mock_success.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_display_name_fallback(self, test_db):
-        """Uses channel key prefix when no display name is provided."""
-        from app.routers.packets import _run_historical_channel_decryption
-
-        await _insert_raw_packets(1)
-        channel_key_hex = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
-        channel_key_bytes = bytes.fromhex(channel_key_hex)
-
-        mock_result = type(
+    async def test_recovered_messages_are_tagged(self, test_db):
+        """A recovered message keeps the packet's time but is marked recovered."""
+        await _insert_raw_packets(1, age_days=2)
+        result = type(
             "DecryptResult",
             (),
-            {
-                "sender": "User",
-                "message": "msg",
-                "timestamp": 1700000000,
-            },
+            {"sender": "User", "message": "found me", "timestamp": 1700000000},
         )()
 
         with (
             patch(
-                "app.routers.packets.try_decrypt_packet_with_channel_key",
+                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
+                return_value=result,
+            ),
+            patch("app.services.historical_decrypt.parse_packet", return_value=None),
+            patch("app.services.historical_decrypt.broadcast_success"),
+        ):
+            await self._sweep(self._target())
+
+        messages = await MessageRepository.get_all(
+            msg_type="CHAN", conversation_key=self.KEY_HEX, limit=10
+        )
+        assert len(messages) == 1
+        assert messages[0].recovered_at is not None
+        # received_at stays the packet's own timestamp, not the sweep's clock.
+        assert messages[0].received_at < messages[0].recovered_at
+
+    @pytest.mark.asyncio
+    async def test_skips_non_matching_packets(self, test_db):
+        """Nothing decrypted means no toast."""
+        await _insert_raw_packets(2)
+
+        with (
+            patch(
+                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
+                return_value=None,
+            ),
+            patch("app.services.historical_decrypt.broadcast_success") as mock_success,
+        ):
+            await self._sweep(self._target())
+
+        mock_success.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_packets_does_not_start(self, test_db):
+        """An empty backlog is reported, not queued."""
+        submission = await submit_channel_sweep([self._target()])
+
+        assert submission.started is False
+        assert submission.total_packets == 0
+
+    @pytest.mark.asyncio
+    async def test_display_name_fallback(self, test_db):
+        """A sweep for a channel we have no name for is credited to its key prefix."""
+        await _insert_raw_packets(1)
+        mock_result = type(
+            "DecryptResult",
+            (),
+            {"sender": "User", "message": "msg", "timestamp": 1700000000},
+        )()
+
+        with (
+            patch(
+                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
                 return_value=mock_result,
             ),
-            patch("app.routers.packets.parse_packet", return_value=None),
-            patch("app.routers.packets.broadcast_success") as mock_success,
+            patch("app.services.historical_decrypt.parse_packet", return_value=None),
+            patch("app.services.historical_decrypt.broadcast_success") as mock_success,
         ):
-            await _run_historical_channel_decryption(
-                channel_key_bytes,
-                channel_key_hex,
-                None,  # No display name
-            )
+            await self._sweep(self._target(name=self.KEY_HEX[:12]))
 
-        # Should use key prefix as display name
-        call_msg = mock_success.call_args[0][0]
-        assert channel_key_hex[:12] in call_msg
+        assert self.KEY_HEX[:12] in mock_success.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_one_pass_tries_every_key(self, test_db):
+        """Multiple keys are tried per packet, not one full scan per key."""
+        await _insert_raw_packets(2)
+        second = ChannelTarget(key_bytes=b"\x11" * 16, key_hex="11" * 16, name="#other")
+
+        tried: list[bytes] = []
+
+        def only_second_matches(_data, key_bytes, *_args, **_kwargs):
+            tried.append(key_bytes)
+            if key_bytes != second.key_bytes:
+                return None
+            return type(
+                "DecryptResult",
+                (),
+                {"sender": "U", "message": f"m{len(tried)}", "timestamp": 1700000000 + len(tried)},
+            )()
+
+        with (
+            patch(
+                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
+                side_effect=only_second_matches,
+            ),
+            patch("app.services.historical_decrypt.parse_packet", return_value=None),
+            patch("app.services.historical_decrypt.broadcast_success"),
+        ):
+            await self._sweep(self._target(), second)
+
+        # Two packets x two keys, and the finds are credited to the second room.
+        assert len(tried) == 4
+        messages = await MessageRepository.get_all(
+            msg_type="CHAN", conversation_key=second.key_hex, limit=10
+        )
+        assert len(messages) == 2
+
+
+class TestSweepProgress:
+    """Progress reporting and the queue behind it."""
+
+    @pytest.mark.asyncio
+    async def test_status_is_idle_before_any_sweep(self, test_db, client):
+        response = await client.get("/api/packets/decrypt/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["active"] is None
+        assert data["queued"] == 0
+
+    @pytest.mark.asyncio
+    async def test_progress_is_broadcast_and_throttled(self, test_db):
+        """Ticks are rate-limited, but start and finish always go out."""
+        await _insert_raw_packets(40)
+        events: list[tuple[str, dict]] = []
+
+        def capture(event_type, data, **_kwargs):
+            events.append((event_type, data))
+
+        with (
+            patch(
+                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
+                return_value=None,
+            ),
+            patch("app.services.historical_decrypt.broadcast_event", side_effect=capture),
+        ):
+            await submit_channel_sweep(
+                [ChannelTarget(key_bytes=b"\xaa" * 16, key_hex="AA" * 16, name="#p")]
+            )
+            await wait_until_idle(timeout=10)
+
+        progress = [data for kind, data in events if kind == "decrypt_progress"]
+        # 40 packets is well under the 250-packet tick interval, so only the
+        # bookend events fire.
+        assert len(progress) == 2
+        assert progress[0]["status"] == "running"
+        assert progress[0]["processed"] == 0
+        assert progress[-1]["status"] == "complete"
+        assert progress[-1]["processed"] == 40
+        assert progress[-1]["total"] == 40
+
+    @pytest.mark.asyncio
+    async def test_targets_report_per_conversation_counts(self, test_db):
+        """The finished sweep says how many messages each room got back."""
+        await _insert_raw_packets(2)
+
+        counter = 0
+
+        def always_matches(*_args, **_kwargs):
+            nonlocal counter
+            counter += 1
+            return type(
+                "DecryptResult",
+                (),
+                {"sender": "U", "message": f"m{counter}", "timestamp": 1700000000 + counter},
+            )()
+
+        with (
+            patch(
+                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
+                side_effect=always_matches,
+            ),
+            patch("app.services.historical_decrypt.parse_packet", return_value=None),
+            patch("app.services.historical_decrypt.broadcast_success"),
+        ):
+            await submit_channel_sweep(
+                [ChannelTarget(key_bytes=b"\xaa" * 16, key_hex="AA" * 16, name="#ops")]
+            )
+            await wait_until_idle(timeout=10)
+
+        last = get_status().last
+        assert last is not None
+        assert last.status == "complete"
+        assert last.decrypted == 2
+        assert [(t.name, t.decrypted) for t in last.targets] == [("#ops", 2)]
+
+    @pytest.mark.asyncio
+    async def test_second_sweep_queues_behind_the_first(self, test_db):
+        """Two sweeps of the same table run in sequence, not on top of each other."""
+        await _insert_raw_packets(4)
+        target = ChannelTarget(key_bytes=b"\xaa" * 16, key_hex="AA" * 16, name="#ops")
+
+        with patch(
+            "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
+            return_value=None,
+        ):
+            first = await submit_channel_sweep([target])
+            second = await submit_channel_sweep([target])
+            assert first.queued == 0
+            assert second.queued == 1  # waits for the first, rather than rescanning alongside it
+            await wait_until_idle(timeout=10)
+
+        assert get_status().queued == 0
+        assert get_status().active is None
+
+
+class TestDecryptAllChannels:
+    """Test POST /api/packets/decrypt/historical/all-channels."""
+
+    @pytest.mark.asyncio
+    async def test_reports_when_no_channels_exist(self, test_db, client):
+        with patch("app.routers.packets.ChannelRepository.get_all", new=AsyncMock(return_value=[])):
+            response = await client.post("/api/packets/decrypt/historical/all-channels")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["started"] is False
+        assert "no channel keys" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_sweeps_every_known_channel_key(self, test_db, client):
+        await ChannelRepository.upsert(key="AA" * 16, name="#ops", is_hashtag=True)
+        await ChannelRepository.upsert(key="BB" * 16, name="#weather", is_hashtag=True)
+        await _insert_raw_packets(5)
+
+        with patch("app.services.historical_decrypt._runner.submit") as mock_submit:
+            mock_submit.return_value = SweepSubmission(
+                started=True, job_id="j", total_packets=5, queued=0, message="Started"
+            )
+            response = await client.post("/api/packets/decrypt/historical/all-channels")
+
+        assert response.status_code == 202
+        assert response.json()["started"] is True
+        job = mock_submit.call_args[0][0]
+        names = {target.name for target in job.channel_targets}
+        assert {"#ops", "#weather"} <= names
+        assert f"{len(names)} keys" in job.label
+
+    @pytest.mark.asyncio
+    async def test_skips_channels_with_unusable_keys(self, test_db, client):
+        """A malformed stored key is logged past, not fatal to the sweep."""
+        await ChannelRepository.upsert(key="AA" * 16, name="#ops", is_hashtag=True)
+        await ChannelRepository.upsert(key="NOTHEX", name="#broken", is_hashtag=False)
+        await _insert_raw_packets(1)
+
+        with patch("app.services.historical_decrypt._runner.submit") as mock_submit:
+            mock_submit.return_value = SweepSubmission(
+                started=True, job_id="j", total_packets=1, queued=0, message="Started"
+            )
+            response = await client.post("/api/packets/decrypt/historical/all-channels")
+
+        assert response.status_code == 202
+        job = mock_submit.call_args[0][0]
+        names = {target.name for target in job.channel_targets}
+        assert "#ops" in names
+        assert "#broken" not in names
 
 
 class TestMaintenanceEndpoint:

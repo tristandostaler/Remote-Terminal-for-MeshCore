@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { api } from '../api';
 import {
+  advanceLastMessageTime,
   getLastMessageTimes,
   setLastMessageTime,
   renameConversationTimeKey,
@@ -212,7 +213,7 @@ export function useUnreadCounts(
       }
 
       const timestamp = msg.received_at || Math.floor(Date.now() / 1000);
-      const updated = setLastMessageTime(stateKey, timestamp);
+      const updated = advanceLastMessageTime(stateKey, timestamp);
       setLastMessageTimes(updated);
 
       if (!isActiveConversation && !msg.outgoing && isNewMessage) {

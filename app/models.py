@@ -635,6 +635,15 @@ class Message(BaseModel):
             "but hidden from every conversation surface."
         ),
     )
+    recovered_at: int | None = Field(
+        default=None,
+        description=(
+            "When a historical decrypt sweep recovered this message (wall-clock seconds). "
+            "None for messages ingested live. ``received_at`` still holds the moment the "
+            "packet was heard, so the message keeps its chronological place while unread "
+            "state treats it as newly arrived."
+        ),
+    )
 
 
 class MessagesAroundResponse(BaseModel):
@@ -1562,6 +1571,48 @@ class RadioRegionDiscoveryResponse(BaseModel):
         default_factory=list,
         description="Per-repeater region results",
     )
+
+
+class DecryptSweepTarget(BaseModel):
+    """One key a sweep tried, and what it recovered."""
+
+    kind: str = Field(description="'channel' or 'contact'")
+    key: str = Field(description="Channel key or contact public key")
+    name: str = Field(description="Display name to credit the finds to")
+    decrypted: int = Field(description="Messages recovered with this key so far")
+
+
+class DecryptSweepProgress(BaseModel):
+    """Live progress of one historical decrypt sweep."""
+
+    job_id: str
+    kind: str = Field(description="'channels' or 'contact'")
+    label: str = Field(description="What the sweep is for, as shown to the operator")
+    status: str = Field(description="queued, running, complete or failed")
+    total: int = Field(description="Undecrypted packets when the sweep was queued")
+    processed: int = Field(description="Packets examined so far")
+    decrypted: int = Field(description="Messages recovered so far")
+    target_count: int = Field(description="How many keys this sweep tries per packet")
+    targets: list[DecryptSweepTarget] = Field(
+        default_factory=list,
+        description=(
+            "Per-key results, best first. Only keys that recovered something appear -- "
+            "a sweep over every known room would otherwise be mostly zeroes."
+        ),
+    )
+    started_at: int | None = None
+    finished_at: int | None = None
+    queued: int = Field(default=0, description="Sweeps waiting behind this one")
+
+
+class DecryptSweepStatus(BaseModel):
+    """Sweep state for a client that just loaded, or reconnected mid-sweep."""
+
+    active: DecryptSweepProgress | None = None
+    last: DecryptSweepProgress | None = Field(
+        default=None, description="The most recently finished sweep, if any this uptime"
+    )
+    queued: int = 0
 
 
 class UnreadCounts(BaseModel):

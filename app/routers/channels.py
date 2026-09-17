@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from app.channel_constants import (
@@ -11,13 +11,12 @@ from app.channel_constants import (
     is_public_channel_key,
     is_public_channel_name,
 )
-from app.decoder import parse_packet, try_decrypt_packet_with_channel_key
 from app.models import Channel, ChannelDetail, ChannelMessageCounts, ChannelTopSender
-from app.packet_processor import create_message_from_decrypted
 from app.region_scope import UNSCOPED_OVERRIDE_MARKER, is_unscoped, normalize_region_scope
-from app.repository import ChannelRepository, MessageRepository, RawPacketRepository
+from app.repository import ChannelRepository, MessageRepository
+from app.services.historical_decrypt import ChannelTarget, submit_channel_sweep
 from app.services.radio_runtime import radio_runtime as radio_manager
-from app.websocket import broadcast_event, broadcast_success
+from app.websocket import broadcast_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/channels", tags=["channels"])
@@ -138,72 +137,6 @@ def _normalize_bulk_hashtag_name(name: str) -> str | None:
     return f"#{normalized}"
 
 
-async def _run_historical_channel_decryption_for_channels(
-    channels: list[tuple[bytes, str, str]],
-) -> None:
-    total = await RawPacketRepository.get_undecrypted_count()
-    decrypted_count = 0
-    matched_channel_names: set[str] = set()
-
-    if total == 0:
-        logger.info("No undecrypted packets to process for bulk channel decrypt")
-        return
-
-    logger.info(
-        "Starting bulk historical channel decryption of %d packets across %d channels",
-        total,
-        len(channels),
-    )
-
-    async for (
-        packet_id,
-        packet_data,
-        packet_timestamp,
-    ) in RawPacketRepository.stream_all_undecrypted():
-        packet_info = parse_packet(packet_data)
-        path_hex = packet_info.path.hex() if packet_info else None
-        path_len = packet_info.path_length if packet_info else None
-
-        for channel_key_bytes, channel_key_hex, channel_name in channels:
-            result = try_decrypt_packet_with_channel_key(packet_data, channel_key_bytes)
-            if result is None:
-                continue
-
-            msg_id = await create_message_from_decrypted(
-                packet_id=packet_id,
-                channel_key=channel_key_hex,
-                channel_name=channel_name,
-                sender=result.sender,
-                message_text=result.message,
-                timestamp=result.timestamp,
-                received_at=packet_timestamp,
-                path=path_hex,
-                path_len=path_len,
-                realtime=False,
-            )
-            if msg_id is not None:
-                decrypted_count += 1
-                matched_channel_names.add(channel_name)
-            break
-
-    logger.info(
-        "Bulk historical channel decryption complete: %d/%d packets decrypted across %d channels",
-        decrypted_count,
-        total,
-        len(matched_channel_names),
-    )
-
-    if decrypted_count > 0:
-        broadcast_success(
-            "Bulk historical decrypt complete",
-            (
-                f"Decrypted {decrypted_count} message{'s' if decrypted_count != 1 else ''} "
-                f"across {len(matched_channel_names)} room"
-                f"{'s' if len(matched_channel_names) != 1 else ''}"
-            ),
-        )
-
-
 @router.get("", response_model=list[Channel])
 async def list_channels() -> list[Channel]:
     """List all channels from the database."""
@@ -311,7 +244,6 @@ def _schedule_resident_slot_update(
 @router.post("/bulk-hashtag", response_model=BulkCreateHashtagChannelsResponse)
 async def bulk_create_hashtag_channels(
     request: BulkCreateHashtagChannelsRequest,
-    background_tasks: BackgroundTasks,
     response: Response,
 ) -> BulkCreateHashtagChannelsResponse:
     created_channels: list[Channel] = []
@@ -319,7 +251,7 @@ async def bulk_create_hashtag_channels(
     invalid_names: list[str] = []
     decrypt_started = False
     decrypt_total_packets = 0
-    decrypt_targets: list[tuple[bytes, str, str]] = []
+    decrypt_targets: list[ChannelTarget] = []
 
     for raw_name in request.channel_names:
         normalized_name = _normalize_bulk_hashtag_name(raw_name)
@@ -347,16 +279,17 @@ async def bulk_create_hashtag_channels(
             )
 
         created_channels.append(stored)
-        decrypt_targets.append((bytes.fromhex(stored.key), stored.key, stored.name))
+        decrypt_targets.append(
+            ChannelTarget(key_bytes=bytes.fromhex(stored.key), key_hex=stored.key, name=stored.name)
+        )
         _broadcast_channel_update(stored)
 
     if request.try_historical and decrypt_targets:
-        decrypt_total_packets = await RawPacketRepository.get_undecrypted_count()
-        if decrypt_total_packets > 0:
-            background_tasks.add_task(
-                _run_historical_channel_decryption_for_channels, decrypt_targets
-            )
-            decrypt_started = True
+        label = f"{len(decrypt_targets)} new room{'s' if len(decrypt_targets) != 1 else ''}"
+        submission = await submit_channel_sweep(decrypt_targets, label=label)
+        decrypt_total_packets = submission.total_packets
+        decrypt_started = submission.started
+        if decrypt_started:
             response.status_code = status.HTTP_202_ACCEPTED
 
     message = (

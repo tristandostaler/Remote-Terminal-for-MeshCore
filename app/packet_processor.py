@@ -12,7 +12,6 @@ This is the primary path for message processing when channel/contact keys
 are offloaded from the radio to the server.
 """
 
-import asyncio
 import logging
 import time
 from itertools import count
@@ -21,7 +20,6 @@ from app.decoder import (
     DecryptedDirectMessage,
     PacketInfo,
     PayloadType,
-    derive_public_key,
     parse_advertisement,
     parse_packet,
     try_decrypt_dm,
@@ -82,6 +80,7 @@ async def create_message_from_decrypted(
     packet_hash: str | None = None,
     transport_code: int | None = None,
     region: str | None = None,
+    recovered_at: int | None = None,
 ) -> int | None:
     """Store a decrypted channel message via the shared message service."""
     return await _create_message_from_decrypted(
@@ -101,6 +100,7 @@ async def create_message_from_decrypted(
         packet_hash=packet_hash,
         transport_code=transport_code,
         region=region,
+        recovered_at=recovered_at,
     )
 
 
@@ -119,6 +119,7 @@ async def create_dm_message_from_decrypted(
     packet_hash: str | None = None,
     transport_code: int | None = None,
     region: str | None = None,
+    recovered_at: int | None = None,
 ) -> int | None:
     """Store a decrypted direct message via the shared message service."""
     return await _create_dm_message_from_decrypted(
@@ -137,108 +138,23 @@ async def create_dm_message_from_decrypted(
         packet_hash=packet_hash,
         transport_code=transport_code,
         region=region,
+        recovered_at=recovered_at,
     )
-
-
-async def run_historical_dm_decryption(
-    private_key_bytes: bytes,
-    contact_public_key_bytes: bytes,
-    contact_public_key_hex: str,
-    display_name: str | None = None,
-) -> None:
-    """Background task to decrypt historical DM packets with contact's key."""
-    from app.websocket import broadcast_success
-
-    total = 0
-    decrypted_count = 0
-
-    logger.info("Starting historical DM decryption scan for undecrypted TEXT_MESSAGE packets")
-
-    # Derive our public key from the private key
-    our_public_key_bytes = derive_public_key(private_key_bytes)
-
-    async for (
-        packet_id,
-        packet_data,
-        packet_timestamp,
-    ) in RawPacketRepository.stream_undecrypted_text_messages():
-        total += 1
-        # Note: passing our_public_key=None disables the outbound hash check in
-        # try_decrypt_dm (only the inbound check src_hash == their_first_byte runs).
-        # For the 255/256 case where our first byte differs from the contact's,
-        # outgoing packets fail the inbound check and are skipped — which is correct
-        # since outgoing DMs are stored directly by the send endpoint.
-        # For the 1/256 case where bytes match, an outgoing packet may decrypt
-        # successfully, but the dual-hash direction check below correctly identifies
-        # it and the DB dedup constraint prevents a duplicate insert.
-        result = try_decrypt_dm(
-            packet_data,
-            private_key_bytes,
-            contact_public_key_bytes,
-            our_public_key=None,
-        )
-
-        if result is not None:
-            # Determine direction using both hashes (mirrors _process_direct_message
-            # logic at lines 806-818) to handle the 1/256 case where our first
-            # public key byte matches the contact's.
-            src_hash = result.src_hash.lower()
-            dest_hash = result.dest_hash.lower()
-            our_first_byte = format(our_public_key_bytes[0], "02x").lower()
-
-            if src_hash == our_first_byte and dest_hash != our_first_byte:
-                outgoing = True
-            else:
-                # Incoming, ambiguous (both match), or neither matches.
-                # Default to incoming — outgoing DMs are stored by the send
-                # endpoint, so historical decryption only recovers incoming.
-                outgoing = False
-
-            # Extract path from the raw packet for storage
-            packet_info = parse_packet(packet_data)
-            path_hex = packet_info.path.hex() if packet_info else None
-            path_len = packet_info.path_length if packet_info else None
-
-            msg_id = await create_dm_message_from_decrypted(
-                packet_id=packet_id,
-                decrypted=result,
-                their_public_key=contact_public_key_hex,
-                our_public_key=our_public_key_bytes.hex(),
-                received_at=packet_timestamp,
-                path=path_hex,
-                path_len=path_len,
-                outgoing=outgoing,
-                realtime=False,  # Historical decryption should not trigger fanout
-            )
-
-            if msg_id is not None:
-                decrypted_count += 1
-
-    if total == 0:
-        logger.info("No undecrypted TEXT_MESSAGE packets to process")
-        return
-
-    logger.info(
-        "Historical DM decryption complete: %d/%d packets decrypted",
-        decrypted_count,
-        total,
-    )
-
-    # Notify frontend
-    if decrypted_count > 0:
-        name = display_name or contact_public_key_hex[:12]
-        broadcast_success(
-            f"Historical decrypt complete for {name}",
-            f"Decrypted {decrypted_count} message{'s' if decrypted_count != 1 else ''}",
-        )
 
 
 async def start_historical_dm_decryption(
-    background_tasks,
     contact_public_key_hex: str,
     display_name: str | None = None,
 ) -> None:
-    """Start historical DM decryption using the stored private key."""
+    """Queue a DM sweep for one contact using the radio's exported private key.
+
+    Called when a contact is added with "try historical" ticked, and from the
+    advert path when ``auto_decrypt_dm_on_advert`` is on. The sweep itself lives
+    in :mod:`app.services.historical_decrypt`; this is the seam that supplies the
+    key material and explains a missing one to the operator.
+    """
+    from app.services.historical_decrypt import ContactTarget, submit_contact_sweep
+
     if not has_private_key():
         logger.warning(
             "Cannot start historical DM decryption: private key not available. "
@@ -263,24 +179,14 @@ async def start_historical_dm_decryption(
         )
         return
 
-    logger.info("Starting historical DM decryption for contact %s", contact_public_key_hex[:12])
-    if background_tasks is None:
-        asyncio.create_task(
-            run_historical_dm_decryption(
-                private_key_bytes,
-                contact_public_key_bytes,
-                contact_public_key_hex.lower(),
-                display_name,
-            )
+    await submit_contact_sweep(
+        ContactTarget(
+            private_key=private_key_bytes,
+            public_key_bytes=contact_public_key_bytes,
+            public_key_hex=contact_public_key_hex.lower(),
+            name=display_name,
         )
-    else:
-        background_tasks.add_task(
-            run_historical_dm_decryption,
-            private_key_bytes,
-            contact_public_key_bytes,
-            contact_public_key_hex.lower(),
-            display_name,
-        )
+    )
 
 
 async def process_raw_packet(
@@ -759,7 +665,7 @@ async def _process_advertisement(
 
         settings = await AppSettingsRepository.get()
         if settings.auto_decrypt_dm_on_advert:
-            await start_historical_dm_decryption(None, advert.public_key.lower(), advert.name)
+            await start_historical_dm_decryption(advert.public_key.lower(), advert.name)
 
 
 async def _process_direct_message(

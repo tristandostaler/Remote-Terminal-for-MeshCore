@@ -1,18 +1,22 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import { ContactInfoPane } from '../components/ContactInfoPane';
 import type { Contact, ContactAnalytics } from '../types';
 
-const { getContactAnalytics, contactTelemetryHistory } = vi.hoisted(() => ({
-  getContactAnalytics: vi.fn(),
-  contactTelemetryHistory: vi.fn(),
-}));
+const { getContactAnalytics, contactTelemetryHistory, decryptHistoricalPackets } = vi.hoisted(
+  () => ({
+    getContactAnalytics: vi.fn(),
+    contactTelemetryHistory: vi.fn(),
+    decryptHistoricalPackets: vi.fn(),
+  })
+);
 
 vi.mock('../api', () => ({
   api: {
     getContactAnalytics,
     contactTelemetryHistory,
+    decryptHistoricalPackets,
   },
   isAbortError: () => false,
 }));
@@ -112,8 +116,31 @@ describe('ContactInfoPane', () => {
     getContactAnalytics.mockReset();
     contactTelemetryHistory.mockReset();
     contactTelemetryHistory.mockResolvedValue([]);
+    decryptHistoricalPackets.mockReset();
+    decryptHistoricalPackets.mockResolvedValue({
+      started: true,
+      total_packets: 900,
+      message: 'Started decrypt of 900 packets in background',
+    });
     baseProps.onSearchMessagesByKey = vi.fn();
     baseProps.onSearchMessagesByName = vi.fn();
+  });
+
+  it('retries historical DM decrypt without handing the browser the private key', async () => {
+    const contact = createContact();
+    getContactAnalytics.mockResolvedValue(createAnalytics(contact));
+
+    render(<ContactInfoPane {...baseProps} contactKey={contact.public_key} />);
+
+    const button = await screen.findByText('Retry historical DM decrypt');
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(decryptHistoricalPackets).toHaveBeenCalledWith({
+        key_type: 'contact',
+        contact_public_key: contact.public_key,
+      });
+    });
   });
 
   it('shows hop width when contact has a stored path hash mode', async () => {

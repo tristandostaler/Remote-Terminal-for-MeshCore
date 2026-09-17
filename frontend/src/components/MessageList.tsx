@@ -934,6 +934,23 @@ function RegionBadge({ region }: { region: string }) {
 }
 
 /**
+ * Marks a message a historical decrypt sweep recovered: it was heard when the
+ * timestamp beside it says, but only became readable when a key for it turned
+ * up. Without this the bubble is indistinguishable from history you already
+ * read, which is the whole difficulty with recovered traffic.
+ */
+function RecoveredBadge({ recoveredAt }: { recoveredAt: number }) {
+  return (
+    <span
+      className="align-middle text-[0.625rem] uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary"
+      title={`Recovered by a historical decrypt on ${formatTime(recoveredAt)} -- heard earlier, decrypted then`}
+    >
+      Recovered
+    </span>
+  );
+}
+
+/**
  * Where an outgoing message's send got to, for display. `delivered` wins over
  * everything: an ACK that lands after the attempts ran out still means it
  * arrived. `unknown` covers rows stored before send tracking existed.
@@ -1089,6 +1106,7 @@ function MessageMetaLine({
         <HopCountBadge paths={paths} onClick={onShowPaths} outgoing={message.outgoing} />
       )}
       {message.region && <RegionBadge region={message.region} />}
+      {message.recovered_at ? <RecoveredBadge recoveredAt={message.recovered_at} /> : null}
       {status &&
         glyph &&
         statusTitle &&

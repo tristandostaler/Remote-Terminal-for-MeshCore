@@ -88,6 +88,7 @@ from app.routers import (
     virtual_node as virtual_node_router,
 )
 from app.security import add_optional_basic_auth_middleware
+from app.services.historical_decrypt import stop_sweeps as stop_decrypt_sweeps
 from app.services.live_feed import start_live_feed, stop_live_feed
 from app.services.radio_runtime import radio_runtime as radio_manager
 from app.services.radio_stats import start_radio_stats_sampling, stop_radio_stats_sampling
@@ -212,6 +213,9 @@ async def lifespan(app: FastAPI):
     if radio_manager.meshcore:
         await radio_manager.meshcore.stop_auto_message_fetching()
     await radio_manager.disconnect()
+    # A decrypt sweep is a long scan over the database; dropped here so it
+    # cannot keep reading into a connection that is about to close.
+    stop_decrypt_sweeps()
     await db.disconnect()
 
 

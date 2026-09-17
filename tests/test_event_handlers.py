@@ -395,6 +395,7 @@ class TestContactMessageCLIFiltering:
             "send_state",
             "reactions",
             "is_reaction",
+            "recovered_at",
         }
 
         with patch("app.event_handlers.broadcast_event") as mock_broadcast:

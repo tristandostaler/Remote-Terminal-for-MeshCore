@@ -71,6 +71,23 @@ export function setLastMessageTime(key: string, timestamp: number): Conversation
 }
 
 /**
+ * Record a message time without ever moving a conversation backwards.
+ *
+ * Messages do not always arrive in the order they were heard: a historical
+ * decrypt sweep delivers packets from weeks ago over the live socket, and
+ * taking their timestamps literally would drag every swept conversation to the
+ * bottom of the sidebar. The sidebar answers "when did I last hear from this
+ * conversation", which a newly *decrypted* old message does not change.
+ */
+export function advanceLastMessageTime(key: string, timestamp: number): ConversationTimes {
+  const current = lastMessageTimesCache[key];
+  if (current !== undefined && current >= timestamp) {
+    return { ...lastMessageTimesCache };
+  }
+  return setLastMessageTime(key, timestamp);
+}
+
+/**
  * Move conversation timing state to a new key, preserving the most recent timestamp.
  */
 export function renameConversationTimeKey(oldKey: string, newKey: string): ConversationTimes {

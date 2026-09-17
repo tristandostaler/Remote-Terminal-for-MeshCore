@@ -4,7 +4,7 @@ import random
 import time
 from contextlib import suppress
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from meshcore import EventType
 from pydantic import BaseModel, Field
 
@@ -274,9 +274,7 @@ async def get_contact_analytics(
 
 
 @router.post("", response_model=Contact)
-async def create_contact(
-    request: CreateContactRequest, background_tasks: BackgroundTasks
-) -> Contact:
+async def create_contact(request: CreateContactRequest) -> Contact:
     """Create a new contact in the database.
 
     If the contact already exists, updates the name (if provided).
@@ -316,9 +314,7 @@ async def create_contact(
 
         # Trigger historical decryption if requested (even for existing contacts)
         if request.try_historical:
-            await start_historical_dm_decryption(
-                background_tasks, request.public_key, request.name or existing.name
-            )
+            await start_historical_dm_decryption(request.public_key, request.name or existing.name)
 
         await _broadcast_contact_update(existing)
         return existing
@@ -347,7 +343,7 @@ async def create_contact(
 
     # Trigger historical decryption if requested
     if request.try_historical:
-        await start_historical_dm_decryption(background_tasks, lower_key, request.name)
+        await start_historical_dm_decryption(lower_key, request.name)
 
     stored = await ContactRepository.get_by_key(lower_key)
     if stored is None:

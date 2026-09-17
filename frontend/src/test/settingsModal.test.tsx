@@ -808,6 +808,54 @@ describe('SettingsModal', () => {
     });
   });
 
+  it('retries decryption of stored packets with every known key', async () => {
+    const sweepSpy = vi.spyOn(api, 'decryptHistoricalAllChannels').mockResolvedValue({
+      started: true,
+      total_packets: 4213,
+      message: 'Started decrypt of 4213 packets in background',
+    });
+
+    renderModal();
+    openDatabaseSection();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry Decryption With All Keys' }));
+
+    await waitFor(() => {
+      expect(sweepSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('shows a sweep already running instead of offering to start another', async () => {
+    vi.spyOn(api, 'getDecryptStatus').mockResolvedValue({
+      active: {
+        job_id: 'j1',
+        kind: 'channels',
+        label: 'All rooms (4 keys)',
+        status: 'running',
+        total: 4000,
+        processed: 1000,
+        decrypted: 2,
+        target_count: 4,
+        targets: [{ kind: 'channel', key: 'AA', name: '#ops', decrypted: 2 }],
+        started_at: 1700000000,
+        finished_at: null,
+        queued: 0,
+      },
+      last: null,
+      queued: 0,
+    });
+
+    renderModal();
+    openDatabaseSection();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Sweep in progress...' })).toBeDisabled();
+    });
+    expect(screen.getByText('1,000 / 4,000')).toBeInTheDocument();
+    expect(screen.getByText('2 messages recovered so far')).toBeInTheDocument();
+    expect(screen.getByText('#ops')).toBeInTheDocument();
+  });
+
   it('renders routed hourly checkbox and calls save on toggle', async () => {
     const onSaveAppSettings = vi.fn(async () => {});
 
