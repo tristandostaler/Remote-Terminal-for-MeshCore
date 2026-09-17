@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
-import { Star } from 'lucide-react';
+import { KeyRound, Star } from 'lucide-react';
 import { api } from '../api';
 import { formatTime } from '../utils/messageParser';
 import { handleKeyboardActivate } from '../utils/a11y';
 import { useEntranceSettled } from '../hooks/useEntranceSettled';
+import { DecryptProgressPanel } from './DecryptProgressPanel';
+import { selectSweepForKey, useDecryptStatus } from '../stores/decryptProgressStore';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 import { toast } from './ui/sonner';
 import type { Channel, ChannelDetail, PathHashWidthStats } from '../types';
@@ -25,6 +27,9 @@ export function ChannelInfoPane({
   const [detail, setDetail] = useState<ChannelDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const [startingSweep, setStartingSweep] = useState(false);
+  const sweepStatus = useDecryptStatus();
+  const sweep = selectSweepForKey(sweepStatus, channelKey);
 
   // Get live channel data from channels array (real-time via WS)
   const liveChannel = channelKey ? (channels.find((c) => c.key === channelKey) ?? null) : null;
@@ -63,6 +68,31 @@ export function ChannelInfoPane({
 
   // Use live channel data where available, fall back to detail snapshot
   const channel = liveChannel ?? detail?.channel ?? null;
+
+  const handleRetryDecrypt = async () => {
+    if (!channel) return;
+    setStartingSweep(true);
+    try {
+      const result = await api.decryptHistoricalPackets({
+        key_type: 'channel',
+        channel_key: channel.key,
+      });
+      if (result.started) {
+        toast.success(`Decrypting stored packets for ${channel.name}`, {
+          description: result.message,
+        });
+      } else {
+        toast.info('Nothing to decrypt', { description: result.message });
+      }
+    } catch (err) {
+      console.error('Failed to start historical decrypt:', err);
+      toast.error('Failed to start decrypt', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setStartingSweep(false);
+    }
+  };
 
   return (
     <Sheet open={channelKey !== null} onOpenChange={(open) => !open && onClose()}>
@@ -139,6 +169,25 @@ export function ChannelInfoPane({
                   </>
                 )}
               </button>
+            </div>
+
+            {/* Historical decrypt */}
+            <div className="px-5 py-3 border-b border-border space-y-2">
+              <button
+                type="button"
+                className="text-sm flex items-center gap-2 hover:text-primary transition-colors disabled:opacity-50 disabled:hover:text-foreground"
+                onClick={handleRetryDecrypt}
+                disabled={startingSweep || sweepStatus.active !== null}
+                title="Re-try stored packets that never decrypted against this room's key"
+              >
+                <KeyRound className="h-4.5 w-4.5 text-muted-foreground" aria-hidden="true" />
+                <span>
+                  {sweepStatus.active !== null
+                    ? 'Decrypt sweep running...'
+                    : 'Retry historical decrypt'}
+                </span>
+              </button>
+              {sweep && <DecryptProgressPanel progress={sweep} compact forKey={channel.key} />}
             </div>
 
             {/* Message Activity */}

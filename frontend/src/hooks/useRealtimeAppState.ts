@@ -19,6 +19,7 @@ import type {
   Channel,
   Contact,
   Conversation,
+  DecryptSweepProgress,
   HealthStatus,
   Message,
   MessagePath,
@@ -172,6 +173,15 @@ export function useRealtimeAppState({
 
         if (initializationCompleted) {
           fetchConfig();
+        }
+      },
+      onDecryptProgress: (progress: DecryptSweepProgress) => {
+        // The recovered messages already arrived as `message` events, which
+        // bumped the unread counters locally. A finished sweep is the cheap
+        // moment to reconcile those against the server's own count, which also
+        // knows about conversations this client never had open.
+        if (progress.status === 'complete' && progress.decrypted > 0) {
+          refreshUnreads();
         }
       },
       onError: (error: { message: string; details?: string }) => {

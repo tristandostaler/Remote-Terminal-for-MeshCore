@@ -48,6 +48,7 @@ app/
 │   ├── radio_stats.py           # Local radio stats sampling; persists the noise-floor series
 │   ├── live_feed.py             # Mirrors a CoreScope (live.meshcore.ca) channel feed; node-vs-live comparison
 │   ├── live_feed_trace.py       # Live Compare trace: a message's routes per observer and per this node, hops resolved
+│   ├── historical_decrypt.py    # Decrypt sweeps over stored packets: serial queue, progress events, recovered_at
 │   └── radio_runtime.py         # Router/dependency seam over the global RadioManager
 ├── radio.py             # RadioManager transport/session state + lock management
 ├── radio_sync.py        # Polling, sync, periodic advertisement loop
@@ -155,11 +156,25 @@ app/
 - Advertisement paths are stored only in `contact_advert_paths` for analytics/visualization. They are not part of `Contact.to_radio_dict()` or DM route selection.
 - `contact_advert_paths` identity is `(public_key, path_hex, path_len)` because the same hex bytes can represent different routes at different hop widths.
 
+### Historical decryption
+
+`app/services/historical_decrypt.py` owns every re-try of stored packets. Before it, the scan loop existed twice (packets router, channels router) and the DM one a third time in `packet_processor`.
+
+- A sweep walks `raw_packets WHERE message_id IS NULL` and tries its keys per packet. **All keys are tried against each packet in one pass**, so an all-rooms sweep costs one scan, not one per room.
+- **Sweeps are serialized.** Every sweep reads the same table, so concurrent ones only multiply disk reads; `submit_channel_sweep` / `submit_contact_sweep` queue behind the running one. `run_channel_sweep` / `run_contact_sweep` scan inline and return the final snapshot — that is what the worker calls, and what tests await.
+- Recovered messages are stored with the packet's original `received_at` plus `recovered_at = now`. `received_at` is when it was *heard*; `recovered_at` is when it became readable. Everything downstream (the unread queries, the UI badge) keys off the second one. They are stored `realtime=False`, so no fanout, bots or push.
+- Progress is a throttled `decrypt_progress` WS event: at most one per `PROGRESS_MIN_SECONDS`, and then only after `PROGRESS_PACKET_INTERVAL` more packets or a new find. The start and finish always emit. That tick is also the sweep's only yield point across a run of non-matching packets — the scan is synchronous CPU work between database batches.
+- The snapshot lists only keys that found something. A sweep across every room would otherwise ship a row of zeroes per room on every tick.
+- `GET /packets/decrypt/status` replays the same shape, so a client that loads mid-sweep is not blind to it.
+- The DM sweep takes the private key from `keystore`, never from the request (an explicit `private_key` still wins, for keys this node never exported).
+- A sweep must never outlive the database it is reading: `stop_sweeps()` is called from the lifespan shutdown (before `db.disconnect()`) and from `tests/conftest.py` between cases.
+
 ### Read/unread state
 
 - Server is source of truth (`contacts.last_read_at`, `channels.last_read_at`).
 - `GET /api/read-state/unreads` returns counts, mention flags, `last_message_times`, `last_read_ats`, and `first_unread_ids`.
 - `first_unread_ids` maps stateKey -> id of the oldest unread message, so the client can anchor the unread divider (and jump to it) without paging back through history. It is computed with `ROW_NUMBER() OVER (PARTITION BY type, conversation_key ORDER BY received_at, id)` — deliberately not `MIN(received_at)` with a bare id, because sender timestamps are whole seconds and same-second ties are routine, and not `MIN(id)`, because historical decryption inserts old messages with new ids.
+- Unread is measured against `MAX(received_at, COALESCE(recovered_at, 0))`, not `received_at` alone. A message a sweep recovered was heard before the last read mark but only became readable now, so it has to count as unread or it is filed into the past unseen. Ordering stays on `received_at`, so the divider still anchors where the message belongs in the conversation, and `last_message_times` also stays on `received_at` — recovering old traffic must not reorder the sidebar.
 
 ### DM ingest + ACKs
 
@@ -487,8 +502,10 @@ Verified against the meshcore firmware (`examples/simple_room_server/MyMesh.cpp`
 ### Packets
 - `GET /packets/undecrypted/count`
 - `POST /packets/region-backfill` — re-resolve region scope for stored channel messages that still have a retained raw packet (region is otherwise only tagged at ingest); returns `{scanned, scoped, named}`
+- `GET /packets/decrypt/status` — active sweep, last finished sweep, queue depth. **Declared before `GET /{packet_id}`**, which would otherwise claim the path and fail to parse "decrypt" as a row ID
 - `GET /packets/{packet_id}` — fetch one stored raw packet by row ID for on-demand inspection
-- `POST /packets/decrypt/historical`
+- `POST /packets/decrypt/historical` — one key. `key_type: "channel"` with `channel_key` or `channel_name`; `key_type: "contact"` with `contact_public_key`, where `private_key` is optional and the keystore's exported key is used when it is omitted (the browser never holds it)
+- `POST /packets/decrypt/historical/all-channels` — every known channel key, in one pass
 - `POST /packets/maintenance`
 
 ### Read state

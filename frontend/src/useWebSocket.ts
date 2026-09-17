@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import type {
   BotLogEntry,
   Channel,
+  DecryptSweepProgress,
   HealthStatus,
   Contact,
   Message,
@@ -9,6 +10,7 @@ import type {
   RawPacket,
 } from './types';
 import { recordBotLog } from './stores/botLogStore';
+import { recordDecryptProgress } from './stores/decryptProgressStore';
 import { parseWsEvent } from './wsEvents';
 import type {
   MessageDeletedPayload,
@@ -44,6 +46,7 @@ export interface UseWebSocketOptions {
   onMessageStatus?: (payload: MessageStatusPayload) => void;
   onMessageDeleted?: (messageId: number) => void;
   onMessageReaction?: (payload: MessageReactionPayload) => void;
+  onDecryptProgress?: (progress: DecryptSweepProgress) => void;
   onError?: (error: ErrorEvent) => void;
   onSuccess?: (success: SuccessEvent) => void;
   onReconnect?: () => void;
@@ -152,6 +155,15 @@ export function useWebSocket(options: UseWebSocketOptions) {
             // only the Bots view's Logs tab subscribes.
             recordBotLog(msg.data as BotLogEntry);
             break;
+          case 'decrypt_progress': {
+            // Ticks several times a second during a sweep, so the panels read
+            // it from the store rather than App state. The handler is for the
+            // one thing the app itself cares about: a finished sweep.
+            const progress = msg.data as DecryptSweepProgress;
+            recordDecryptProgress(progress);
+            handlers.onDecryptProgress?.(progress);
+            break;
+          }
           case 'message_acked': {
             const ackData = msg.data as {
               message_id: number;

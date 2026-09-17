@@ -476,6 +476,52 @@ export interface Message {
    * frontend sees -- the backend hides reaction rows from every surface.
    */
   is_reaction?: boolean;
+  /**
+   * When a historical decrypt sweep recovered this message, in epoch seconds.
+   * Null for anything heard live. `received_at` still says when the packet was
+   * heard, so a recovered message sits in its chronological place while the
+   * bubble is badged and the conversation counts it as unread.
+   */
+  recovered_at?: number | null;
+}
+
+/** One key a historical decrypt sweep tried, and what it found with it. */
+export interface DecryptSweepTarget {
+  kind: 'channel' | 'contact';
+  key: string;
+  name: string;
+  decrypted: number;
+}
+
+/**
+ * Live progress of one historical decrypt sweep. Arrives over the WebSocket as
+ * `decrypt_progress`, throttled server-side; also fetchable so a client that
+ * loads mid-sweep can catch up.
+ */
+export interface DecryptSweepProgress {
+  job_id: string;
+  kind: 'channels' | 'contact';
+  /** What the sweep is for, as shown to the operator. */
+  label: string;
+  status: 'queued' | 'running' | 'complete' | 'failed';
+  /** Undecrypted packets when the sweep was queued. */
+  total: number;
+  processed: number;
+  decrypted: number;
+  /** How many keys this sweep tries per packet. */
+  target_count: number;
+  /** Per-key results, best first. Only keys that recovered something appear. */
+  targets: DecryptSweepTarget[];
+  started_at: number | null;
+  finished_at: number | null;
+  /** Sweeps waiting behind this one. */
+  queued: number;
+}
+
+export interface DecryptSweepStatus {
+  active: DecryptSweepProgress | null;
+  last: DecryptSweepProgress | null;
+  queued: number;
 }
 
 /** Compression codecs a message body can arrive or leave under. */

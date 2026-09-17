@@ -9,6 +9,7 @@ import type {
   ContactAnalytics,
   ContactAdvertPathSummary,
   ContactTelemetryResponse,
+  DecryptSweepStatus,
   FanoutConfig,
   HealthStatus,
   MaintenanceResult,
@@ -567,15 +568,25 @@ export const api = {
   // Packets
   getPacket: (packetId: number) => fetchJson<RawPacket>(`/packets/${packetId}`),
   getUndecryptedPacketCount: () => fetchJson<{ count: number }>('/packets/undecrypted/count'),
+  /**
+   * Re-try stored packets against one key. For a contact the server uses the
+   * radio's exported private key, so only the contact's public key is sent.
+   */
   decryptHistoricalPackets: (params: {
     key_type: 'channel' | 'contact';
     channel_key?: string;
     channel_name?: string;
+    contact_public_key?: string;
   }) =>
     fetchJson<DecryptResult>('/packets/decrypt/historical', {
       method: 'POST',
       body: JSON.stringify(params),
     }),
+  /** Re-try every stored packet against every known channel key, in one pass. */
+  decryptHistoricalAllChannels: () =>
+    fetchJson<DecryptResult>('/packets/decrypt/historical/all-channels', { method: 'POST' }),
+  /** Sweep state, for a client that loaded mid-sweep or reconnected. */
+  getDecryptStatus: () => fetchJson<DecryptSweepStatus>('/packets/decrypt/status'),
   runMaintenance: (options: { pruneUndecryptedDays?: number; purgeLinkedRawPackets?: boolean }) =>
     fetchJson<MaintenanceResult>('/packets/maintenance', {
       method: 'POST',

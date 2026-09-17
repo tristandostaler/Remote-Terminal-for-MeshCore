@@ -8,6 +8,7 @@ import pytest
 
 from app.channel_constants import PUBLIC_CHANNEL_KEY, PUBLIC_CHANNEL_NAME
 from app.repository import ChannelRepository, MessageRepository
+from app.services.historical_decrypt import SweepSubmission
 
 
 class TestChannelFloodScopeOverride:
@@ -133,16 +134,17 @@ class TestCreateChannel:
 
     @pytest.mark.asyncio
     async def test_bulk_hashtag_create_can_start_one_decrypt_job(self, test_db, client):
+        """Every new room is swept in a single pass, not one sweep per room."""
         with (
             patch(
-                "app.routers.channels.RawPacketRepository.get_undecrypted_count",
+                "app.services.historical_decrypt.RawPacketRepository.get_undecrypted_count",
                 new=AsyncMock(return_value=7),
             ),
-            patch(
-                "app.routers.channels._run_historical_channel_decryption_for_channels",
-                new=AsyncMock(),
-            ) as mock_decrypt,
+            patch("app.services.historical_decrypt._runner.submit") as mock_submit,
         ):
+            mock_submit.return_value = SweepSubmission(
+                started=True, job_id="abc123", total_packets=7, queued=0, message="Started"
+            )
             response = await client.post(
                 "/api/channels/bulk-hashtag",
                 json={
@@ -155,7 +157,9 @@ class TestCreateChannel:
         data = response.json()
         assert data["decrypt_started"] is True
         assert data["decrypt_total_packets"] == 7
-        mock_decrypt.assert_awaited_once()
+        mock_submit.assert_called_once()
+        job = mock_submit.call_args[0][0]
+        assert [target.name for target in job.channel_targets] == ["#ops", "#mesh-room"]
 
 
 class TestPublicChannelProtection:

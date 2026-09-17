@@ -1,5 +1,6 @@
 """Pytest configuration and shared fixtures."""
 
+import asyncio
 import os
 import shutil
 import tempfile
@@ -82,6 +83,14 @@ async def test_db():
     try:
         yield db
     finally:
+        # A historical decrypt sweep is a background task over this database.
+        # Left running, it would keep scanning into the next test -- or into a
+        # closed connection -- so the queue is dropped before the DB goes away.
+        from app.services import historical_decrypt
+
+        historical_decrypt.stop_sweeps()
+        await asyncio.sleep(0)
+
         for mod, original in originals:
             mod.db = original
         packets_module.db = original_packets_db

@@ -278,9 +278,9 @@ class TestHistoricalDMDecryptionPipeline:
 
     @pytest.mark.asyncio
     async def test_historical_decrypt_stores_incoming_dm(self, test_db, captured_broadcasts):
-        """run_historical_dm_decryption decrypts a real packet and stores it
+        """The contact sweep decrypts a real packet and stores it
         with the correct direction (incoming from client1 to client2)."""
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         # Store the undecrypted raw packet (message_id=NULL means undecrypted)
         pkt_id, _ = await RawPacketRepository.create(DM_PACKET, 1700000000)
@@ -296,13 +296,15 @@ class TestHistoricalDMDecryptionPipeline:
 
         broadcasts, mock_broadcast = captured_broadcasts
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
             # Decrypt as client2 (the receiver)
-            await run_historical_dm_decryption(
-                private_key_bytes=CLIENT2_PRIVATE,
-                contact_public_key_bytes=CLIENT1_PUBLIC,
-                contact_public_key_hex=CLIENT1_PUBLIC_HEX,
-                display_name="Client1",
+            await run_contact_sweep(
+                ContactTarget(
+                    private_key=CLIENT2_PRIVATE,
+                    public_key_bytes=CLIENT1_PUBLIC,
+                    public_key_hex=CLIENT1_PUBLIC_HEX,
+                    name="Client1",
+                )
             )
 
         # Verify the message was stored
@@ -326,12 +328,12 @@ class TestHistoricalDMDecryptionPipeline:
     async def test_historical_decrypt_skips_outgoing_by_design(self, test_db, captured_broadcasts):
         """Historical decryption skips outgoing DMs (they're stored by the send endpoint).
 
-        run_historical_dm_decryption passes our_public_key=None, which disables
+        The contact sweep passes our_public_key=None, which disables
         the outbound hash check. When our first byte differs from the contact's
         (255/256 cases), outgoing packets fail the inbound src_hash check and
         are skipped — this is correct behavior.
         """
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         await RawPacketRepository.create(DM_PACKET, 1700000000)
 
@@ -345,14 +347,16 @@ class TestHistoricalDMDecryptionPipeline:
 
         broadcasts, mock_broadcast = captured_broadcasts
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
             # Decrypt as client1 (the sender) — first bytes differ (a1 != fa)
             # so historical decryption correctly skips this outgoing packet
-            await run_historical_dm_decryption(
-                private_key_bytes=CLIENT1_PRIVATE,
-                contact_public_key_bytes=CLIENT2_PUBLIC,
-                contact_public_key_hex=CLIENT2_PUBLIC_HEX,
-                display_name="Client2",
+            await run_contact_sweep(
+                ContactTarget(
+                    private_key=CLIENT1_PRIVATE,
+                    public_key_bytes=CLIENT2_PUBLIC,
+                    public_key_hex=CLIENT2_PUBLIC_HEX,
+                    name="Client2",
+                )
             )
 
         # No messages stored — outgoing DMs are handled by the send endpoint
@@ -364,7 +368,7 @@ class TestHistoricalDMDecryptionPipeline:
     @pytest.mark.asyncio
     async def test_historical_decrypt_broadcasts_success(self, test_db, captured_broadcasts):
         """Successful decryption broadcasts a success notification."""
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         await RawPacketRepository.create(DM_PACKET, 1700000000)
 
@@ -383,14 +387,16 @@ class TestHistoricalDMDecryptionPipeline:
         mock_success = MagicMock()
 
         with (
-            patch("app.packet_processor.broadcast_event", mock_broadcast),
-            patch("app.websocket.broadcast_success", mock_success),
+            patch("app.services.historical_decrypt.broadcast_event", mock_broadcast),
+            patch("app.services.historical_decrypt.broadcast_success", mock_success),
         ):
-            await run_historical_dm_decryption(
-                private_key_bytes=CLIENT2_PRIVATE,
-                contact_public_key_bytes=CLIENT1_PUBLIC,
-                contact_public_key_hex=CLIENT1_PUBLIC_HEX,
-                display_name="Client1",
+            await run_contact_sweep(
+                ContactTarget(
+                    private_key=CLIENT2_PRIVATE,
+                    public_key_bytes=CLIENT1_PUBLIC,
+                    public_key_hex=CLIENT1_PUBLIC_HEX,
+                    name="Client1",
+                )
             )
 
         mock_success.assert_called_once()
@@ -547,7 +553,8 @@ class TestLiveDMDecryptionPipeline:
     async def test_historical_then_live_deduplicates(self, test_db, captured_broadcasts):
         """A DM decrypted historically and then received live doesn't duplicate."""
         from app.keystore import set_private_key
-        from app.packet_processor import process_raw_packet, run_historical_dm_decryption
+        from app.packet_processor import process_raw_packet
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         set_private_key(CLIENT2_PRIVATE)
 
@@ -565,12 +572,14 @@ class TestLiveDMDecryptionPipeline:
             # First: store packet undecrypted, then run historical decryption
             await RawPacketRepository.create(DM_PACKET, 1700000000)
 
-            with patch("app.websocket.broadcast_success"):
-                await run_historical_dm_decryption(
-                    private_key_bytes=CLIENT2_PRIVATE,
-                    contact_public_key_bytes=CLIENT1_PUBLIC,
-                    contact_public_key_hex=CLIENT1_PUBLIC_HEX,
-                    display_name="Client1",
+            with patch("app.services.historical_decrypt.broadcast_success"):
+                await run_contact_sweep(
+                    ContactTarget(
+                        private_key=CLIENT2_PRIVATE,
+                        public_key_bytes=CLIENT1_PUBLIC,
+                        public_key_hex=CLIENT1_PUBLIC_HEX,
+                        name="Client1",
+                    )
                 )
 
             # Then: same packet arrives again via live pipeline
