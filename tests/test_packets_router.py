@@ -5,6 +5,7 @@ undecrypted count endpoint, and the maintenance endpoint.
 """
 
 import time
+from hashlib import sha256
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -371,13 +372,38 @@ class TestUndecryptedTextPacketStreaming:
         assert count == 2
 
 
+def _group_text_bytes(key_bytes: bytes, suffix: bytes) -> bytes:
+    """A GROUP_TEXT-shaped packet addressed to ``key_bytes``'s channel.
+
+    Header 0x15 is FLOOD + GROUP_TEXT; the first payload byte is the channel
+    hash the sweep indexes on. The ciphertext is junk -- tests inject the
+    plaintext by patching ``decrypt_group_text`` -- but unique per call so the
+    payload-hash dedup index does not collapse the rows.
+    """
+    channel_hash = sha256(key_bytes).digest()[0:1]
+    return bytes([0x15, 0x00]) + channel_hash + b"\x00\x00" + suffix.ljust(16, b"\x00")
+
+
+async def _insert_group_text_packets(key_bytes: bytes, count: int, age_days: int = 0) -> None:
+    base_ts = int(time.time()) - (age_days * 86400)
+    for i in range(count):
+        await RawPacketRepository.create(_group_text_bytes(key_bytes, bytes([i + 1])), base_ts + i)
+
+
+def _plaintext(sender: str, message: str, timestamp: int):
+    return type(
+        "DecryptResult", (), {"sender": sender, "message": message, "timestamp": timestamp}
+    )()
+
+
 class TestChannelSweep:
     """The channel sweep itself (app.services.historical_decrypt)."""
 
     KEY_HEX = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
+    KEY = bytes.fromhex(KEY_HEX)
 
     def _target(self, name: str = "#test") -> ChannelTarget:
-        return ChannelTarget(key_bytes=bytes.fromhex(self.KEY_HEX), key_hex=self.KEY_HEX, name=name)
+        return ChannelTarget(key_bytes=self.KEY, key_hex=self.KEY_HEX, name=name)
 
     async def _sweep(self, *targets: ChannelTarget) -> None:
         """Queue a sweep and wait it out, as a request plus its worker would."""
@@ -387,7 +413,7 @@ class TestChannelSweep:
     @pytest.mark.asyncio
     async def test_decrypts_matching_packets(self, test_db):
         """Packets that match the key become messages and the operator is told."""
-        await _insert_raw_packets(3)
+        await _insert_group_text_packets(self.KEY, 3)
 
         # Each packet needs unique content or message dedup collapses them.
         call_count = 0
@@ -395,22 +421,13 @@ class TestChannelSweep:
         def make_unique_result(*_args, **_kwargs):
             nonlocal call_count
             call_count += 1
-            return type(
-                "DecryptResult",
-                (),
-                {
-                    "sender": f"User{call_count}",
-                    "message": f"Hello {call_count}",
-                    "timestamp": 1700000000 + call_count,
-                },
-            )()
+            return _plaintext(f"User{call_count}", f"Hello {call_count}", 1700000000 + call_count)
 
         with (
             patch(
-                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
+                "app.services.historical_decrypt.decrypt_group_text",
                 side_effect=make_unique_result,
             ),
-            patch("app.services.historical_decrypt.parse_packet", return_value=None),
             patch("app.services.historical_decrypt.broadcast_success") as mock_success,
         ):
             await self._sweep(self._target())
@@ -421,19 +438,13 @@ class TestChannelSweep:
     @pytest.mark.asyncio
     async def test_recovered_messages_are_tagged(self, test_db):
         """A recovered message keeps the packet's time but is marked recovered."""
-        await _insert_raw_packets(1, age_days=2)
-        result = type(
-            "DecryptResult",
-            (),
-            {"sender": "User", "message": "found me", "timestamp": 1700000000},
-        )()
+        await _insert_group_text_packets(self.KEY, 1, age_days=2)
 
         with (
             patch(
-                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
-                return_value=result,
+                "app.services.historical_decrypt.decrypt_group_text",
+                return_value=_plaintext("User", "found me", 1700000000),
             ),
-            patch("app.services.historical_decrypt.parse_packet", return_value=None),
             patch("app.services.historical_decrypt.broadcast_success"),
         ):
             await self._sweep(self._target())
@@ -449,18 +460,39 @@ class TestChannelSweep:
     @pytest.mark.asyncio
     async def test_skips_non_matching_packets(self, test_db):
         """Nothing decrypted means no toast."""
-        await _insert_raw_packets(2)
+        await _insert_group_text_packets(self.KEY, 2)
 
         with (
-            patch(
-                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
-                return_value=None,
-            ),
+            patch("app.services.historical_decrypt.decrypt_group_text", return_value=None),
             patch("app.services.historical_decrypt.broadcast_success") as mock_success,
         ):
             await self._sweep(self._target())
 
         mock_success.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_only_tries_keys_whose_channel_hash_matches(self, test_db):
+        """A packet is decrypted only with keys that could possibly own it.
+
+        The on-air channel hash is one byte of sha256(key), so a sweep across
+        every room must not spend an AES attempt per room per packet -- and a
+        packet that is not GroupText at all is never tried.
+        """
+        other = ChannelTarget(key_bytes=b"\x11" * 16, key_hex="11" * 16, name="#other")
+        assert sha256(self.KEY).digest()[0] != sha256(other.key_bytes).digest()[0]
+        await _insert_group_text_packets(self.KEY, 2)
+        await _insert_raw_packets(3)  # not GroupText
+
+        tried: list[bytes] = []
+
+        def record(_payload, key_bytes):
+            tried.append(key_bytes)
+            return None
+
+        with patch("app.services.historical_decrypt.decrypt_group_text", side_effect=record):
+            await self._sweep(self._target(), other)
+
+        assert tried == [self.KEY, self.KEY]
 
     @pytest.mark.asyncio
     async def test_no_packets_does_not_start(self, test_db):
@@ -473,19 +505,13 @@ class TestChannelSweep:
     @pytest.mark.asyncio
     async def test_display_name_fallback(self, test_db):
         """A sweep for a channel we have no name for is credited to its key prefix."""
-        await _insert_raw_packets(1)
-        mock_result = type(
-            "DecryptResult",
-            (),
-            {"sender": "User", "message": "msg", "timestamp": 1700000000},
-        )()
+        await _insert_group_text_packets(self.KEY, 1)
 
         with (
             patch(
-                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
-                return_value=mock_result,
+                "app.services.historical_decrypt.decrypt_group_text",
+                return_value=_plaintext("User", "msg", 1700000000),
             ),
-            patch("app.services.historical_decrypt.parse_packet", return_value=None),
             patch("app.services.historical_decrypt.broadcast_success") as mock_success,
         ):
             await self._sweep(self._target(name=self.KEY_HEX[:12]))
@@ -493,39 +519,28 @@ class TestChannelSweep:
         assert self.KEY_HEX[:12] in mock_success.call_args[0][0]
 
     @pytest.mark.asyncio
-    async def test_one_pass_tries_every_key(self, test_db):
-        """Multiple keys are tried per packet, not one full scan per key."""
-        await _insert_raw_packets(2)
+    async def test_one_pass_credits_each_room_its_own_finds(self, test_db):
+        """Several keys ride one scan, and each find lands in the right room."""
         second = ChannelTarget(key_bytes=b"\x11" * 16, key_hex="11" * 16, name="#other")
+        await _insert_group_text_packets(self.KEY, 1)
+        await _insert_group_text_packets(second.key_bytes, 2)
 
-        tried: list[bytes] = []
+        counter = 0
 
-        def only_second_matches(_data, key_bytes, *_args, **_kwargs):
-            tried.append(key_bytes)
-            if key_bytes != second.key_bytes:
-                return None
-            return type(
-                "DecryptResult",
-                (),
-                {"sender": "U", "message": f"m{len(tried)}", "timestamp": 1700000000 + len(tried)},
-            )()
+        def decrypt(_payload, _key):
+            nonlocal counter
+            counter += 1
+            return _plaintext("U", f"m{counter}", 1700000000 + counter)
 
         with (
-            patch(
-                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
-                side_effect=only_second_matches,
-            ),
-            patch("app.services.historical_decrypt.parse_packet", return_value=None),
+            patch("app.services.historical_decrypt.decrypt_group_text", side_effect=decrypt),
             patch("app.services.historical_decrypt.broadcast_success"),
         ):
             await self._sweep(self._target(), second)
 
-        # Two packets x two keys, and the finds are credited to the second room.
-        assert len(tried) == 4
-        messages = await MessageRepository.get_all(
-            msg_type="CHAN", conversation_key=second.key_hex, limit=10
-        )
-        assert len(messages) == 2
+        mine = await MessageRepository.get_all(msg_type="CHAN", conversation_key=self.KEY_HEX)
+        theirs = await MessageRepository.get_all(msg_type="CHAN", conversation_key=second.key_hex)
+        assert (len(mine), len(theirs)) == (1, 2)
 
 
 class TestSweepProgress:
@@ -549,13 +564,7 @@ class TestSweepProgress:
         def capture(event_type, data, **_kwargs):
             events.append((event_type, data))
 
-        with (
-            patch(
-                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
-                return_value=None,
-            ),
-            patch("app.services.historical_decrypt.broadcast_event", side_effect=capture),
-        ):
+        with patch("app.services.historical_decrypt.broadcast_event", side_effect=capture):
             await submit_channel_sweep(
                 [ChannelTarget(key_bytes=b"\xaa" * 16, key_hex="AA" * 16, name="#p")]
             )
@@ -574,29 +583,22 @@ class TestSweepProgress:
     @pytest.mark.asyncio
     async def test_targets_report_per_conversation_counts(self, test_db):
         """The finished sweep says how many messages each room got back."""
-        await _insert_raw_packets(2)
+        key = b"\xaa" * 16
+        await _insert_group_text_packets(key, 2)
 
         counter = 0
 
         def always_matches(*_args, **_kwargs):
             nonlocal counter
             counter += 1
-            return type(
-                "DecryptResult",
-                (),
-                {"sender": "U", "message": f"m{counter}", "timestamp": 1700000000 + counter},
-            )()
+            return _plaintext("U", f"m{counter}", 1700000000 + counter)
 
         with (
-            patch(
-                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
-                side_effect=always_matches,
-            ),
-            patch("app.services.historical_decrypt.parse_packet", return_value=None),
+            patch("app.services.historical_decrypt.decrypt_group_text", side_effect=always_matches),
             patch("app.services.historical_decrypt.broadcast_success"),
         ):
             await submit_channel_sweep(
-                [ChannelTarget(key_bytes=b"\xaa" * 16, key_hex="AA" * 16, name="#ops")]
+                [ChannelTarget(key_bytes=key, key_hex="AA" * 16, name="#ops")]
             )
             await wait_until_idle(timeout=10)
 
@@ -612,15 +614,11 @@ class TestSweepProgress:
         await _insert_raw_packets(4)
         target = ChannelTarget(key_bytes=b"\xaa" * 16, key_hex="AA" * 16, name="#ops")
 
-        with patch(
-            "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
-            return_value=None,
-        ):
-            first = await submit_channel_sweep([target])
-            second = await submit_channel_sweep([target])
-            assert first.queued == 0
-            assert second.queued == 1  # waits for the first, rather than rescanning alongside it
-            await wait_until_idle(timeout=10)
+        first = await submit_channel_sweep([target])
+        second = await submit_channel_sweep([target])
+        assert first.queued == 0
+        assert second.queued == 1  # waits for the first, rather than rescanning alongside it
+        await wait_until_idle(timeout=10)
 
         assert get_status().queued == 0
         assert get_status().active is None

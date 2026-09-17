@@ -20,31 +20,52 @@ function percentOf(progress: DecryptSweepProgress): number {
   return Math.min(100, (progress.processed / progress.total) * 100);
 }
 
-function summarize(progress: DecryptSweepProgress): string {
-  const found = progress.decrypted;
-  const plural = found === 1 ? '' : 's';
+function messages(count: number): string {
+  return `${count.toLocaleString()} message${count === 1 ? '' : 's'}`;
+}
+
+function summarize(progress: DecryptSweepProgress, forKey?: string): string {
   if (progress.status === 'failed') {
     return `Sweep failed after ${progress.processed.toLocaleString()} packets`;
   }
-  if (progress.status === 'complete') {
-    return found === 0
-      ? 'Nothing decrypted with these keys'
-      : `Recovered ${found.toLocaleString()} message${plural}`;
+  const done = progress.status === 'complete';
+  const found = progress.decrypted;
+
+  // Inside one conversation's pane the question is "what did this get back",
+  // and an all-rooms sweep's total would answer a different one.
+  if (forKey) {
+    const needle = forKey.toLowerCase();
+    const here = progress.targets.find((t) => t.key.toLowerCase() === needle)?.decrypted ?? 0;
+    const elsewhere = found - here;
+    const suffix = elsewhere > 0 ? ` · ${messages(elsewhere)} in other conversations` : '';
+    if (done) {
+      return here === 0
+        ? `Nothing recovered here${suffix}`
+        : `Recovered ${messages(here)} here${suffix}`;
+    }
+    return here === 0
+      ? `Nothing recovered here yet${suffix}`
+      : `${messages(here)} recovered here so far${suffix}`;
   }
-  return found === 0
-    ? 'No messages recovered yet'
-    : `${found.toLocaleString()} message${plural} recovered so far`;
+
+  if (done) {
+    return found === 0 ? 'Nothing decrypted with these keys' : `Recovered ${messages(found)}`;
+  }
+  return found === 0 ? 'No messages recovered yet' : `${messages(found)} recovered so far`;
 }
 
 export function DecryptProgressPanel({
   progress,
   className,
   compact = false,
+  forKey,
 }: {
   progress: DecryptSweepProgress;
   className?: string;
-  /** Drop the per-conversation breakdown, for the narrow info panes. */
+  /** Drop the per-conversation breakdown and the sweep label, for the narrow info panes. */
   compact?: boolean;
+  /** Read the numbers from this conversation's point of view (its channel or contact key). */
+  forKey?: string;
 }) {
   const percent = percentOf(progress);
   const running = progress.status === 'running' || progress.status === 'queued';
@@ -54,7 +75,7 @@ export function DecryptProgressPanel({
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-sm font-medium truncate" title={progress.label}>
           {running ? 'Decrypting' : 'Decrypt finished'}
-          {progress.target_count > 1 ? ` · ${progress.label}` : ''}
+          {!compact && progress.target_count > 1 ? ` · ${progress.label}` : ''}
         </span>
         <span className="text-xs text-muted-foreground tabular-nums whitespace-nowrap">
           {progress.processed.toLocaleString()} / {progress.total.toLocaleString()}
@@ -78,7 +99,7 @@ export function DecryptProgressPanel({
       </div>
 
       <p className="mt-1.5 text-xs text-muted-foreground">
-        {summarize(progress)}
+        {summarize(progress, forKey)}
         {progress.queued > 0 &&
           ` · ${progress.queued} sweep${progress.queued === 1 ? '' : 's'} queued`}
       </p>

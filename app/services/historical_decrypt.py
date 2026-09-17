@@ -23,6 +23,7 @@ event per packet would cost far more than the scan itself.
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import time
 import uuid
@@ -32,11 +33,11 @@ from dataclasses import dataclass, field
 
 from app.decoder import (
     PayloadType,
+    decrypt_group_text,
     derive_public_key,
     get_packet_payload_type,
     parse_packet,
     try_decrypt_dm,
-    try_decrypt_packet_with_channel_key,
 )
 from app.models import DecryptSweepProgress, DecryptSweepStatus, DecryptSweepTarget
 from app.region_resolver import resolve_region
@@ -280,12 +281,15 @@ def _emit(job: _Job, *, queued: int) -> None:
 
 
 async def _tick(job: _Job, *, queued: int) -> None:
-    """Emit progress if enough has happened since the last one.
+    """Yield on a fixed cadence; emit progress only when enough has changed.
 
-    Also the sweep's only yield point in a run of non-matching packets: the scan
-    itself is synchronous CPU work, so without this a large sweep would hold the
-    event loop between database batches.
+    The scan is synchronous CPU work between database batches, so a run of
+    non-matching packets would otherwise hold the event loop for the whole
+    batch. The yield is unconditional every ``PROGRESS_PACKET_INTERVAL``
+    packets; the event on top of it is what the throttle rations.
     """
+    if job.processed % PROGRESS_PACKET_INTERVAL == 0:
+        await asyncio.sleep(0)
     now = time.monotonic()
     if now - job._last_emit_at < PROGRESS_MIN_SECONDS:
         return
@@ -295,7 +299,6 @@ async def _tick(job: _Job, *, queued: int) -> None:
     ):
         return
     _emit(job, queued=queued)
-    await asyncio.sleep(0)
 
 
 async def _run_job(job: _Job, *, queued: int) -> None:
@@ -328,7 +331,7 @@ def _announce(job: _Job) -> None:
         return
     plural = "s" if job.decrypted != 1 else ""
     if job.contact_target is not None or len(job.per_target) == 1:
-        (name,) = job.target_names.values() if job.target_names else (job.label,)
+        name = next(iter(job.target_names.values()), job.label)
         broadcast_success(
             f"Historical decrypt complete for {name}",
             f"Recovered {job.decrypted} message{plural}",
@@ -342,9 +345,25 @@ def _announce(job: _Job) -> None:
     )
 
 
+def _index_by_channel_hash(targets: Sequence[ChannelTarget]) -> dict[int, list[ChannelTarget]]:
+    """Group keys by the byte a GroupText packet carries to name its channel.
+
+    That byte is the first of ``sha256(key)``, so at most one key in 256 can
+    own any given packet. Indexing on it turns "try every key against every
+    packet" into one dict lookup per packet and an AES attempt only on the rare
+    match -- an all-rooms sweep over a large database is otherwise dominated by
+    hashing and parsing that could never succeed.
+    """
+    by_hash: dict[int, list[ChannelTarget]] = {}
+    for target in targets:
+        by_hash.setdefault(hashlib.sha256(target.key_bytes).digest()[0], []).append(target)
+    return by_hash
+
+
 async def _scan_for_channels(job: _Job, *, queued: int) -> None:
     known_regions = (await AppSettingsRepository.get()).known_regions
     recovered_at = int(time.time())
+    by_hash = _index_by_channel_hash(job.channel_targets)
 
     async for (
         packet_id,
@@ -353,15 +372,23 @@ async def _scan_for_channels(job: _Job, *, queued: int) -> None:
     ) in RawPacketRepository.stream_all_undecrypted():
         job.processed += 1
 
-        for target in job.channel_targets:
-            result = try_decrypt_packet_with_channel_key(packet_data, target.key_bytes)
+        packet_info = parse_packet(packet_data)
+        if (
+            packet_info is None
+            or packet_info.payload_type != PayloadType.GROUP_TEXT
+            or not packet_info.payload
+        ):
+            await _tick(job, queued=queued)
+            continue
+
+        for target in by_hash.get(packet_info.payload[0], ()):
+            result = decrypt_group_text(packet_info.payload, target.key_bytes)
             if result is None:
                 continue
 
-            packet_info = parse_packet(packet_data)
             transport_code: int | None = None
             region: str | None = None
-            if packet_info is not None and packet_info.transport_codes is not None:
+            if packet_info.transport_codes is not None:
                 transport_code = packet_info.transport_codes[0]
                 region = resolve_region(
                     int(packet_info.payload_type),
@@ -378,8 +405,8 @@ async def _scan_for_channels(job: _Job, *, queued: int) -> None:
                 message_text=result.message,
                 timestamp=result.timestamp,
                 received_at=packet_timestamp,
-                path=packet_info.path.hex() if packet_info else None,
-                path_len=packet_info.path_length if packet_info else None,
+                path=packet_info.path.hex(),
+                path_len=packet_info.path_length,
                 realtime=False,  # a sweep is not live traffic: no fanout, no bots
                 broadcast_fn=broadcast_event,
                 transport_code=transport_code,

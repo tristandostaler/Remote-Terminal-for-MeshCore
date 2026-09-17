@@ -628,7 +628,9 @@ export function ContactInfoPane({
                       : 'Retry historical DM decrypt'}
                   </span>
                 </button>
-                {sweep && <DecryptProgressPanel progress={sweep} compact />}
+                {sweep && (
+                  <DecryptProgressPanel progress={sweep} compact forKey={contact.public_key} />
+                )}
               </div>
             )}
 

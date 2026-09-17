@@ -212,13 +212,7 @@ class TestSweepStatusEndpoint:
     async def test_reports_the_finished_sweep(self, test_db, client):
         await RawPacketRepository.create(b"\x15\x00packet-bytes", int(time.time()))
 
-        with (
-            patch(
-                "app.services.historical_decrypt.try_decrypt_packet_with_channel_key",
-                return_value=None,
-            ),
-            patch("app.services.historical_decrypt.broadcast_event"),
-        ):
+        with patch("app.services.historical_decrypt.broadcast_event"):
             await submit_channel_sweep(
                 [
                     ChannelTarget(

@@ -187,7 +187,7 @@ export function ChannelInfoPane({
                     : 'Retry historical decrypt'}
                 </span>
               </button>
-              {sweep && <DecryptProgressPanel progress={sweep} compact />}
+              {sweep && <DecryptProgressPanel progress={sweep} compact forKey={channel.key} />}
             </div>
 
             {/* Message Activity */}
