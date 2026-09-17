@@ -1,5 +1,14 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
-import { Activity, Ban, BarChart3, ChevronDown, ChevronRight, Search, Star } from 'lucide-react';
+import {
+  Activity,
+  Ban,
+  BarChart3,
+  ChevronDown,
+  ChevronRight,
+  KeyRound,
+  Search,
+  Star,
+} from 'lucide-react';
 import {
   AreaChart,
   Area,
@@ -49,6 +58,8 @@ import { ContactAvatar } from './ContactAvatar';
 import { LppSensorRow, formatLppLabel } from './repeater/repeaterPaneShared';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 import { toast } from './ui/sonner';
+import { DecryptProgressPanel } from './DecryptProgressPanel';
+import { selectSweepForKey, useDecryptStatus } from '../stores/decryptProgressStore';
 import { useDistanceUnit } from '../contexts/DistanceUnitContext';
 import { useEntranceSettled } from '../hooks/useEntranceSettled';
 import { CONTACT_TYPE_REPEATER } from '../types';
@@ -127,6 +138,9 @@ export function ContactInfoPane({
   const [loading, setLoading] = useState(false);
   const [telemetryLoading, setTelemetryLoading] = useState(false);
   const [telemetryHistory, setTelemetryHistory] = useState<TelemetryHistoryEntry[]>([]);
+  const [startingSweep, setStartingSweep] = useState(false);
+  const sweepStatus = useDecryptStatus();
+  const sweep = selectSweepForKey(sweepStatus, isNameOnly ? null : contactKey, 'contact');
 
   // Get live contact data from contacts array (real-time via WS)
   const liveContact =
@@ -187,6 +201,30 @@ export function ContactInfoPane({
       cancelled = true;
     };
   }, [contactKey, isNameOnly]);
+
+  const handleRetryDecrypt = useCallback(async (publicKey: string) => {
+    setStartingSweep(true);
+    try {
+      // The private key stays on the server: only the contact's public key
+      // goes over the wire, and the radio's exported key does the decrypting.
+      const result = await api.decryptHistoricalPackets({
+        key_type: 'contact',
+        contact_public_key: publicKey,
+      });
+      if (result.started) {
+        toast.success('Decrypting stored DM packets', { description: result.message });
+      } else {
+        toast.info('Nothing to decrypt', { description: result.message });
+      }
+    } catch (err) {
+      console.error('Failed to start historical DM decrypt:', err);
+      toast.error('Failed to start decrypt', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setStartingSweep(false);
+    }
+  }, []);
 
   const handleFetchTelemetry = useCallback(async () => {
     if (!contactKey || isNameOnly) return;
@@ -571,6 +609,28 @@ export function ContactInfoPane({
                   <Search className="h-4.5 w-4.5 text-muted-foreground" aria-hidden="true" />
                   <span>Search user&apos;s messages by key</span>
                 </button>
+              </div>
+            )}
+
+            {!isRepeater && (
+              <div className="px-5 py-3 border-b border-border space-y-2">
+                <button
+                  type="button"
+                  className="text-sm flex items-center gap-2 hover:text-primary transition-colors disabled:opacity-50 disabled:hover:text-foreground"
+                  onClick={() => handleRetryDecrypt(contact.public_key)}
+                  disabled={startingSweep || sweepStatus.active !== null}
+                  title="Re-try stored packets that never decrypted against this contact's DM key"
+                >
+                  <KeyRound className="h-4.5 w-4.5 text-muted-foreground" aria-hidden="true" />
+                  <span>
+                    {sweepStatus.active !== null
+                      ? 'Decrypt sweep running...'
+                      : 'Retry historical DM decrypt'}
+                  </span>
+                </button>
+                {sweep && (
+                  <DecryptProgressPanel progress={sweep} compact forKey={contact.public_key} />
+                )}
               </div>
             )}
 

@@ -302,7 +302,7 @@ class TestAdvertisementPipeline:
             ) as mock_start:
                 await process_raw_packet(packet_bytes, timestamp=1700000000)
 
-        mock_start.assert_awaited_once_with(None, expected["public_key"], expected["name"])
+        mock_start.assert_awaited_once_with(expected["public_key"], expected["name"])
 
     @pytest.mark.asyncio
     async def test_advertisement_skips_historical_decrypt_for_existing_contact(
@@ -2286,7 +2286,7 @@ class TestProcessRawPacketIntegration:
 
 
 class TestRunHistoricalDmDecryption:
-    """T3: Test run_historical_dm_decryption background task.
+    """T3: Test the contact sweep (app.services.historical_decrypt.run_contact_sweep).
 
     Verifies iteration over undecrypted packets, decryption attempts,
     message creation, and notification broadcasting.
@@ -2319,15 +2319,19 @@ class TestRunHistoricalDmDecryption:
     @pytest.mark.asyncio
     async def test_returns_early_when_no_undecrypted_packets(self, test_db, captured_broadcasts):
         """With no undecrypted TEXT_MESSAGE packets, returns immediately without broadcasting."""
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         broadcasts, mock_broadcast = captured_broadcasts
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
             with patch("app.websocket.ws_manager") as mock_ws:
                 mock_ws.broadcast = AsyncMock()
-                await run_historical_dm_decryption(
-                    self.OUR_PRIV, self.CONTACT_PUB, self.CONTACT_PUB_HEX
+                await run_contact_sweep(
+                    ContactTarget(
+                        private_key=self.OUR_PRIV,
+                        public_key_bytes=self.CONTACT_PUB,
+                        public_key_hex=self.CONTACT_PUB_HEX,
+                    )
                 )
 
         # No success broadcast should have been sent
@@ -2337,7 +2341,7 @@ class TestRunHistoricalDmDecryption:
     @pytest.mark.asyncio
     async def test_iterates_and_decrypts_packets(self, test_db, captured_broadcasts):
         """Successfully decrypts packets and creates messages in DB."""
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         # Store some TEXT_MESSAGE packets in DB
         raw1 = self._make_text_message_bytes(b"\x01")
@@ -2374,14 +2378,23 @@ class TestRunHistoricalDmDecryption:
 
         broadcasts, mock_broadcast = captured_broadcasts
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.try_decrypt_dm", side_effect=mock_decrypt):
-                with patch("app.packet_processor.parse_packet", return_value=mock_packet_info):
-                    with patch("app.packet_processor.derive_public_key", return_value=self.OUR_PUB):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
+            with patch("app.services.historical_decrypt.try_decrypt_dm", side_effect=mock_decrypt):
+                with patch(
+                    "app.services.historical_decrypt.parse_packet", return_value=mock_packet_info
+                ):
+                    with patch(
+                        "app.services.historical_decrypt.derive_public_key",
+                        return_value=self.OUR_PUB,
+                    ):
                         with patch("app.websocket.ws_manager") as mock_ws:
                             mock_ws.broadcast = AsyncMock()
-                            await run_historical_dm_decryption(
-                                self.OUR_PRIV, self.CONTACT_PUB, self.CONTACT_PUB_HEX
+                            await run_contact_sweep(
+                                ContactTarget(
+                                    private_key=self.OUR_PRIV,
+                                    public_key_bytes=self.CONTACT_PUB,
+                                    public_key_hex=self.CONTACT_PUB_HEX,
+                                )
                             )
 
         # 2 of 3 packets should have been decrypted
@@ -2393,20 +2406,26 @@ class TestRunHistoricalDmDecryption:
     @pytest.mark.asyncio
     async def test_does_not_create_message_on_decrypt_failure(self, test_db, captured_broadcasts):
         """When try_decrypt_dm returns None for all packets, no messages are created."""
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         raw = self._make_text_message_bytes(b"\x10")
         await RawPacketRepository.create(raw, 2000)
 
         broadcasts, mock_broadcast = captured_broadcasts
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.try_decrypt_dm", return_value=None):
-                with patch("app.packet_processor.derive_public_key", return_value=self.OUR_PUB):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
+            with patch("app.services.historical_decrypt.try_decrypt_dm", return_value=None):
+                with patch(
+                    "app.services.historical_decrypt.derive_public_key", return_value=self.OUR_PUB
+                ):
                     with patch("app.websocket.ws_manager") as mock_ws:
                         mock_ws.broadcast = AsyncMock()
-                        await run_historical_dm_decryption(
-                            self.OUR_PRIV, self.CONTACT_PUB, self.CONTACT_PUB_HEX
+                        await run_contact_sweep(
+                            ContactTarget(
+                                private_key=self.OUR_PRIV,
+                                public_key_bytes=self.CONTACT_PUB,
+                                public_key_hex=self.CONTACT_PUB_HEX,
+                            )
                         )
 
         messages = await MessageRepository.get_all(
@@ -2417,7 +2436,7 @@ class TestRunHistoricalDmDecryption:
     @pytest.mark.asyncio
     async def test_sets_realtime_false(self, test_db, captured_broadcasts):
         """Historical decryption calls create_dm_message_from_decrypted with realtime=False."""
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         raw = self._make_text_message_bytes(b"\x20")
         await RawPacketRepository.create(raw, 3000)
@@ -2437,19 +2456,30 @@ class TestRunHistoricalDmDecryption:
 
         broadcasts, mock_broadcast = captured_broadcasts
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.try_decrypt_dm", return_value=mock_decrypted):
-                with patch("app.packet_processor.parse_packet", return_value=mock_packet_info):
-                    with patch("app.packet_processor.derive_public_key", return_value=self.OUR_PUB):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
+            with patch(
+                "app.services.historical_decrypt.try_decrypt_dm", return_value=mock_decrypted
+            ):
+                with patch(
+                    "app.services.historical_decrypt.parse_packet", return_value=mock_packet_info
+                ):
+                    with patch(
+                        "app.services.historical_decrypt.derive_public_key",
+                        return_value=self.OUR_PUB,
+                    ):
                         with patch(
-                            "app.packet_processor.create_dm_message_from_decrypted",
+                            "app.services.historical_decrypt.create_dm_message_from_decrypted",
                             new_callable=AsyncMock,
                             return_value=42,
                         ) as mock_create:
                             with patch("app.websocket.ws_manager") as mock_ws:
                                 mock_ws.broadcast = AsyncMock()
-                                await run_historical_dm_decryption(
-                                    self.OUR_PRIV, self.CONTACT_PUB, self.CONTACT_PUB_HEX
+                                await run_contact_sweep(
+                                    ContactTarget(
+                                        private_key=self.OUR_PRIV,
+                                        public_key_bytes=self.CONTACT_PUB,
+                                        public_key_hex=self.CONTACT_PUB_HEX,
+                                    )
                                 )
 
         mock_create.assert_awaited_once()
@@ -2459,7 +2489,7 @@ class TestRunHistoricalDmDecryption:
     @pytest.mark.asyncio
     async def test_broadcasts_success_when_decrypted(self, test_db, captured_broadcasts):
         """When at least one packet is decrypted, broadcasts a success notification."""
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         raw = self._make_text_message_bytes(b"\x30")
         await RawPacketRepository.create(raw, 4000)
@@ -2482,16 +2512,27 @@ class TestRunHistoricalDmDecryption:
         def mock_success(message, details=None):
             success_calls.append({"message": message, "details": details})
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.try_decrypt_dm", return_value=mock_decrypted):
-                with patch("app.packet_processor.parse_packet", return_value=mock_packet_info):
-                    with patch("app.packet_processor.derive_public_key", return_value=self.OUR_PUB):
-                        with patch("app.websocket.broadcast_success", mock_success):
-                            await run_historical_dm_decryption(
-                                self.OUR_PRIV,
-                                self.CONTACT_PUB,
-                                self.CONTACT_PUB_HEX,
-                                display_name="Alice",
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
+            with patch(
+                "app.services.historical_decrypt.try_decrypt_dm", return_value=mock_decrypted
+            ):
+                with patch(
+                    "app.services.historical_decrypt.parse_packet", return_value=mock_packet_info
+                ):
+                    with patch(
+                        "app.services.historical_decrypt.derive_public_key",
+                        return_value=self.OUR_PUB,
+                    ):
+                        with patch(
+                            "app.services.historical_decrypt.broadcast_success", mock_success
+                        ):
+                            await run_contact_sweep(
+                                ContactTarget(
+                                    private_key=self.OUR_PRIV,
+                                    public_key_bytes=self.CONTACT_PUB,
+                                    public_key_hex=self.CONTACT_PUB_HEX,
+                                    name="Alice",
+                                )
                             )
 
         assert len(success_calls) == 1
@@ -2501,7 +2542,7 @@ class TestRunHistoricalDmDecryption:
     @pytest.mark.asyncio
     async def test_no_broadcast_when_zero_decrypted(self, test_db, captured_broadcasts):
         """When no packets are decrypted, no success notification is broadcast."""
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         raw = self._make_text_message_bytes(b"\x40")
         await RawPacketRepository.create(raw, 5000)
@@ -2512,12 +2553,18 @@ class TestRunHistoricalDmDecryption:
         def mock_success(message, details=None):
             success_calls.append({"message": message, "details": details})
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.try_decrypt_dm", return_value=None):
-                with patch("app.packet_processor.derive_public_key", return_value=self.OUR_PUB):
-                    with patch("app.websocket.broadcast_success", mock_success):
-                        await run_historical_dm_decryption(
-                            self.OUR_PRIV, self.CONTACT_PUB, self.CONTACT_PUB_HEX
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
+            with patch("app.services.historical_decrypt.try_decrypt_dm", return_value=None):
+                with patch(
+                    "app.services.historical_decrypt.derive_public_key", return_value=self.OUR_PUB
+                ):
+                    with patch("app.services.historical_decrypt.broadcast_success", mock_success):
+                        await run_contact_sweep(
+                            ContactTarget(
+                                private_key=self.OUR_PRIV,
+                                public_key_bytes=self.CONTACT_PUB,
+                                public_key_hex=self.CONTACT_PUB_HEX,
+                            )
                         )
 
         assert len(success_calls) == 0
@@ -2525,7 +2572,7 @@ class TestRunHistoricalDmDecryption:
     @pytest.mark.asyncio
     async def test_plural_message_in_success_broadcast(self, test_db, captured_broadcasts):
         """Success notification uses plural 'messages' when count > 1."""
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         # Create two distinct TEXT_MESSAGE packets
         raw1 = self._make_text_message_bytes(b"\x50")
@@ -2561,16 +2608,25 @@ class TestRunHistoricalDmDecryption:
         def mock_success(message, details=None):
             success_calls.append({"message": message, "details": details})
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.try_decrypt_dm", side_effect=mock_decrypt):
-                with patch("app.packet_processor.parse_packet", return_value=mock_packet_info):
-                    with patch("app.packet_processor.derive_public_key", return_value=self.OUR_PUB):
-                        with patch("app.websocket.broadcast_success", mock_success):
-                            await run_historical_dm_decryption(
-                                self.OUR_PRIV,
-                                self.CONTACT_PUB,
-                                self.CONTACT_PUB_HEX,
-                                display_name="Bob",
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
+            with patch("app.services.historical_decrypt.try_decrypt_dm", side_effect=mock_decrypt):
+                with patch(
+                    "app.services.historical_decrypt.parse_packet", return_value=mock_packet_info
+                ):
+                    with patch(
+                        "app.services.historical_decrypt.derive_public_key",
+                        return_value=self.OUR_PUB,
+                    ):
+                        with patch(
+                            "app.services.historical_decrypt.broadcast_success", mock_success
+                        ):
+                            await run_contact_sweep(
+                                ContactTarget(
+                                    private_key=self.OUR_PRIV,
+                                    public_key_bytes=self.CONTACT_PUB,
+                                    public_key_hex=self.CONTACT_PUB_HEX,
+                                    name="Bob",
+                                )
                             )
 
         assert len(success_calls) == 1
@@ -2578,7 +2634,7 @@ class TestRunHistoricalDmDecryption:
 
 
 class TestHistoricalDMDirectionDetection:
-    """Test direction detection in run_historical_dm_decryption.
+    """Test direction detection in the contact sweep.
 
     Verifies the BUG-2 fix: when first public key bytes of our key and the
     contact's key collide (1/256 chance), the function must default to
@@ -2608,7 +2664,7 @@ class TestHistoricalDMDirectionDetection:
     @pytest.mark.asyncio
     async def test_incoming_dm_marked_as_incoming(self, test_db, captured_broadcasts):
         """Normal case: src_hash differs from our first byte -> outgoing=False (incoming)."""
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         raw = self._make_text_message_bytes(b"\x60")
         await RawPacketRepository.create(raw, 7000)
@@ -2633,20 +2689,29 @@ class TestHistoricalDMDirectionDetection:
 
         broadcasts, mock_broadcast = captured_broadcasts
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.try_decrypt_dm", return_value=mock_decrypted):
-                with patch("app.packet_processor.parse_packet", return_value=mock_packet_info):
-                    with patch("app.packet_processor.derive_public_key", return_value=self.OUR_PUB):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
+            with patch(
+                "app.services.historical_decrypt.try_decrypt_dm", return_value=mock_decrypted
+            ):
+                with patch(
+                    "app.services.historical_decrypt.parse_packet", return_value=mock_packet_info
+                ):
+                    with patch(
+                        "app.services.historical_decrypt.derive_public_key",
+                        return_value=self.OUR_PUB,
+                    ):
                         with patch(
-                            "app.packet_processor.create_dm_message_from_decrypted",
+                            "app.services.historical_decrypt.create_dm_message_from_decrypted",
                             new_callable=AsyncMock,
                             return_value=100,
                         ) as mock_create:
-                            with patch("app.websocket.broadcast_success"):
-                                await run_historical_dm_decryption(
-                                    self.OUR_PRIV,
-                                    self.CONTACT_DIFF_PUB,
-                                    self.CONTACT_DIFF_PUB_HEX,
+                            with patch("app.services.historical_decrypt.broadcast_success"):
+                                await run_contact_sweep(
+                                    ContactTarget(
+                                        private_key=self.OUR_PRIV,
+                                        public_key_bytes=self.CONTACT_DIFF_PUB,
+                                        public_key_hex=self.CONTACT_DIFF_PUB_HEX,
+                                    )
                                 )
 
         mock_create.assert_awaited_once()
@@ -2661,7 +2726,7 @@ class TestHistoricalDMDirectionDetection:
         default to outgoing=False (incoming) because outgoing DMs are stored
         by the send endpoint, so historical decryption only recovers incoming.
         """
-        from app.packet_processor import run_historical_dm_decryption
+        from app.services.historical_decrypt import ContactTarget, run_contact_sweep
 
         raw = self._make_text_message_bytes(b"\x61")
         await RawPacketRepository.create(raw, 7100)
@@ -2686,20 +2751,29 @@ class TestHistoricalDMDirectionDetection:
 
         broadcasts, mock_broadcast = captured_broadcasts
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.try_decrypt_dm", return_value=mock_decrypted):
-                with patch("app.packet_processor.parse_packet", return_value=mock_packet_info):
-                    with patch("app.packet_processor.derive_public_key", return_value=self.OUR_PUB):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
+            with patch(
+                "app.services.historical_decrypt.try_decrypt_dm", return_value=mock_decrypted
+            ):
+                with patch(
+                    "app.services.historical_decrypt.parse_packet", return_value=mock_packet_info
+                ):
+                    with patch(
+                        "app.services.historical_decrypt.derive_public_key",
+                        return_value=self.OUR_PUB,
+                    ):
                         with patch(
-                            "app.packet_processor.create_dm_message_from_decrypted",
+                            "app.services.historical_decrypt.create_dm_message_from_decrypted",
                             new_callable=AsyncMock,
                             return_value=101,
                         ) as mock_create:
-                            with patch("app.websocket.broadcast_success"):
-                                await run_historical_dm_decryption(
-                                    self.OUR_PRIV,
-                                    self.CONTACT_SAME_PUB,
-                                    self.CONTACT_SAME_PUB_HEX,
+                            with patch("app.services.historical_decrypt.broadcast_success"):
+                                await run_contact_sweep(
+                                    ContactTarget(
+                                        private_key=self.OUR_PRIV,
+                                        public_key_bytes=self.CONTACT_SAME_PUB,
+                                        public_key_hex=self.CONTACT_SAME_PUB_HEX,
+                                    )
                                 )
 
         mock_create.assert_awaited_once()
@@ -2711,7 +2785,7 @@ class TestHistoricalChannelDecryptIntegration:
     """Integration test: store undecrypted packet → add hashtag room → historical decrypt.
 
     Exercises the full flow with real AES encryption (no mocked decryption),
-    verifying that _run_historical_channel_decryption can recover messages
+    verifying that a channel sweep can recover messages
     from raw packets stored before the channel key was known.
     """
 
@@ -2766,7 +2840,7 @@ class TestHistoricalChannelDecryptIntegration:
         import hashlib as _hashlib
 
         from app.packet_processor import process_raw_packet
-        from app.routers.packets import _run_historical_channel_decryption
+        from app.services.historical_decrypt import ChannelTarget, run_channel_sweep
 
         channel_name = "#testroom"
         channel_key = _hashlib.sha256(channel_name.encode()).digest()[:16]
@@ -2780,7 +2854,7 @@ class TestHistoricalChannelDecryptIntegration:
         # --- Step 1: packet arrives but channel is unknown → stored undecrypted ---
         broadcasts, mock_broadcast = captured_broadcasts
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
             result = await process_raw_packet(raw_packet, timestamp=timestamp)
 
         assert result is not None
@@ -2802,7 +2876,15 @@ class TestHistoricalChannelDecryptIntegration:
 
         with patch("app.websocket.ws_manager") as mock_ws:
             mock_ws.broadcast = AsyncMock()
-            await _run_historical_channel_decryption(channel_key, channel_key_hex, channel_name)
+            await run_channel_sweep(
+                [
+                    ChannelTarget(
+                        key_bytes=channel_key,
+                        key_hex=channel_key_hex,
+                        name=channel_name,
+                    )
+                ]
+            )
 
         # --- Verify: message was created in DB ---
         messages = await MessageRepository.get_all(
@@ -2825,7 +2907,7 @@ class TestHistoricalChannelDecryptIntegration:
         import hashlib as _hashlib
 
         from app.packet_processor import process_raw_packet
-        from app.routers.packets import _run_historical_channel_decryption
+        from app.services.historical_decrypt import ChannelTarget, run_channel_sweep
 
         real_key = _hashlib.sha256(b"#real-room").digest()[:16]
         wrong_key = _hashlib.sha256(b"#wrong-room").digest()[:16]
@@ -2835,7 +2917,7 @@ class TestHistoricalChannelDecryptIntegration:
 
         broadcasts, mock_broadcast = captured_broadcasts
 
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
             await process_raw_packet(raw_packet, timestamp=1700000000)
 
         # Packet stored undecrypted
@@ -2844,7 +2926,15 @@ class TestHistoricalChannelDecryptIntegration:
         # Run historical decrypt with the wrong key
         with patch("app.websocket.ws_manager") as mock_ws:
             mock_ws.broadcast = AsyncMock()
-            await _run_historical_channel_decryption(wrong_key, wrong_key_hex, "#wrong-room")
+            await run_channel_sweep(
+                [
+                    ChannelTarget(
+                        key_bytes=wrong_key,
+                        key_hex=wrong_key_hex,
+                        name="#wrong-room",
+                    )
+                ]
+            )
 
         # No message created
         messages = await MessageRepository.get_all(
@@ -2861,7 +2951,7 @@ class TestHistoricalChannelDecryptIntegration:
         import hashlib as _hashlib
 
         from app.packet_processor import process_raw_packet
-        from app.routers.packets import _run_historical_channel_decryption
+        from app.services.historical_decrypt import ChannelTarget, run_channel_sweep
 
         channel_name = "#multi"
         channel_key = _hashlib.sha256(channel_name.encode()).digest()[:16]
@@ -2876,7 +2966,7 @@ class TestHistoricalChannelDecryptIntegration:
         broadcasts, mock_broadcast = captured_broadcasts
 
         # Store all packets (channel unknown)
-        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+        with patch("app.services.historical_decrypt.broadcast_event", mock_broadcast):
             for pkt in packets:
                 await process_raw_packet(pkt, timestamp=1700000000)
 
@@ -2887,7 +2977,15 @@ class TestHistoricalChannelDecryptIntegration:
 
         with patch("app.websocket.ws_manager") as mock_ws:
             mock_ws.broadcast = AsyncMock()
-            await _run_historical_channel_decryption(channel_key, channel_key_hex, channel_name)
+            await run_channel_sweep(
+                [
+                    ChannelTarget(
+                        key_bytes=channel_key,
+                        key_hex=channel_key_hex,
+                        name=channel_name,
+                    )
+                ]
+            )
 
         messages = await MessageRepository.get_all(
             msg_type="CHAN", conversation_key=channel_key_hex, limit=10

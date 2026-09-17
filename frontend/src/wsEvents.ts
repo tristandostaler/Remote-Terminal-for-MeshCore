@@ -2,6 +2,7 @@ import type {
   BotLogEntry,
   Channel,
   Contact,
+  DecryptSweepProgress,
   HealthStatus,
   Message,
   MessagePath,
@@ -72,6 +73,7 @@ export type KnownWsEvent =
   | { type: 'message_deleted'; data: MessageDeletedPayload }
   | { type: 'message_reaction'; data: MessageReactionPayload }
   | { type: 'bot_log'; data: BotLogEntry }
+  | { type: 'decrypt_progress'; data: DecryptSweepProgress }
   | { type: 'error'; data: ToastPayload }
   | { type: 'success'; data: ToastPayload }
   | { type: 'pong'; data?: null };
@@ -109,6 +111,7 @@ export function parseWsEvent(raw: string): ParsedWsEvent {
     case 'message_deleted':
     case 'message_reaction':
     case 'bot_log':
+    case 'decrypt_progress':
     case 'error':
     case 'success':
       return {

@@ -79,6 +79,7 @@ class MessageRepository:
         send_max_attempts: int | None = None,
         send_state: str | None = None,
         is_reaction: bool = False,
+        recovered_at: int | None = None,
     ) -> int | None:
         """Create a message, returning the ID or None if duplicate.
 
@@ -115,8 +116,8 @@ class MessageRepository:
                                                 sender_name, sender_key, transport_code, region,
                                                 compression, plain_bytes, wire_bytes,
                                                 payload_bytes, send_attempts, send_max_attempts,
-                                                send_state, is_reaction)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                                send_state, is_reaction, recovered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     msg_type,
@@ -140,6 +141,7 @@ class MessageRepository:
                     send_max_attempts,
                     send_state,
                     int(is_reaction),
+                    recovered_at,
                 ),
             ) as cursor:
                 rowcount = cursor.rowcount
@@ -401,6 +403,7 @@ class MessageRepository:
         "send_state",
         "reactions",
         "is_reaction",
+        "recovered_at",
     )
 
     @staticmethod
@@ -441,6 +444,7 @@ class MessageRepository:
             send_state=optional["send_state"],
             reactions=parse_reactions_json(optional["reactions"]),
             is_reaction=bool(optional["is_reaction"]),
+            recovered_at=optional["recovered_at"],
         )
 
     @staticmethod
@@ -985,6 +989,12 @@ class MessageRepository:
         Returns:
             Dict with 'counts', 'mentions', 'last_message_times', 'last_read_ats',
             and 'first_unread_ids' keys.
+
+        Unread is measured against ``MAX(received_at, recovered_at)``: a message a
+        historical decrypt sweep recovered was heard before the last read mark but
+        only became readable now, so it counts as unread. Ordering stays on
+        ``received_at`` alone, so the divider still anchors where the message
+        actually belongs in the conversation.
         """
         counts: dict[str, int] = {}
         mention_flags: dict[str, bool] = {}
@@ -1028,7 +1038,7 @@ class MessageRepository:
                 FROM messages m
                 JOIN channels c ON m.conversation_key = c.key
                 WHERE m.type = 'CHAN' AND m.outgoing = 0 AND m.is_reaction = 0
-                  AND m.received_at > COALESCE(c.last_read_at, 0)
+                  AND MAX(m.received_at, COALESCE(m.recovered_at, 0)) > COALESCE(c.last_read_at, 0)
                   AND COALESCE(c.muted, 0) = 0
                   {blocked_sql}
                 GROUP BY m.conversation_key
@@ -1054,7 +1064,7 @@ class MessageRepository:
                 FROM messages m
                 LEFT JOIN contacts ct ON m.conversation_key = ct.public_key
                 WHERE m.type = 'PRIV' AND m.outgoing = 0 AND m.is_reaction = 0
-                  AND m.received_at > COALESCE(ct.last_read_at, 0)
+                  AND MAX(m.received_at, COALESCE(m.recovered_at, 0)) > COALESCE(ct.last_read_at, 0)
                   {blocked_sql}
                 GROUP BY m.conversation_key
                 """,
@@ -1105,7 +1115,7 @@ class MessageRepository:
                     LEFT JOIN channels c ON m.type = 'CHAN' AND m.conversation_key = c.key
                     LEFT JOIN contacts ct ON m.type = 'PRIV' AND m.conversation_key = ct.public_key
                     WHERE m.outgoing = 0 AND m.is_reaction = 0
-                      AND m.received_at > COALESCE(
+                      AND MAX(m.received_at, COALESCE(m.recovered_at, 0)) > COALESCE(
                               CASE WHEN m.type = 'CHAN' THEN c.last_read_at ELSE ct.last_read_at END,
                               0
                           )

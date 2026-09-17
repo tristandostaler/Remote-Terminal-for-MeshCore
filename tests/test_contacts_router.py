@@ -497,10 +497,10 @@ class TestCreateContactWithHistorical:
         assert response.json()["public_key"] == KEY_A
 
         mock_start.assert_awaited_once()
-        # Verify correct args: (background_tasks, public_key, name)
+        # Verify correct args: (public_key, name)
         call_args = mock_start.call_args
-        assert call_args[0][1] == KEY_A  # public_key
-        assert call_args[0][2] == "Alice"  # display_name
+        assert call_args[0][0] == KEY_A  # public_key
+        assert call_args[0][1] == "Alice"  # display_name
 
     @pytest.mark.asyncio
     async def test_new_contact_without_historical(self, test_db, client):

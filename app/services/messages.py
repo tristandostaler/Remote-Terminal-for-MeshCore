@@ -79,6 +79,7 @@ def build_message_model(
     send_max_attempts: int | None = None,
     send_state: str | None = None,
     is_reaction: bool = False,
+    recovered_at: int | None = None,
 ) -> Message:
     """Build a Message model with the canonical backend payload shape."""
     return Message(
@@ -107,6 +108,7 @@ def build_message_model(
         send_max_attempts=send_max_attempts,
         send_state=send_state,
         is_reaction=is_reaction,
+        recovered_at=recovered_at,
     )
 
 
@@ -363,8 +365,14 @@ async def create_message_from_decrypted(
     packet_hash: str | None = None,
     transport_code: int | None = None,
     region: str | None = None,
+    recovered_at: int | None = None,
 ) -> int | None:
-    """Store and broadcast a decrypted channel message."""
+    """Store and broadcast a decrypted channel message.
+
+    ``recovered_at`` marks the row as recovered by a historical decrypt sweep
+    rather than heard live, which is what makes it count as unread despite its
+    old ``received_at``.
+    """
     received = received_at or int(time.time())
     # MCMP-compressed bodies ride as ordinary text behind an mcmp2:/mcmp3:
     # prefix; decode to plaintext before storage/dedup so the DB, search and bots
@@ -403,6 +411,7 @@ async def create_message_from_decrypted(
         region=region,
         compression=compression,
         is_reaction=reaction is not None,
+        recovered_at=recovered_at,
     )
 
     if msg_id is None:
@@ -438,6 +447,7 @@ async def create_message_from_decrypted(
         region=region,
         compression=compression,
         is_reaction=reaction is not None,
+        recovered_at=recovered_at,
     )
 
     if reaction is not None:
@@ -538,6 +548,7 @@ async def create_dm_message_from_decrypted(
     packet_hash: str | None = None,
     transport_code: int | None = None,
     region: str | None = None,
+    recovered_at: int | None = None,
 ) -> int | None:
     """Store and broadcast a decrypted direct message."""
     from app.services.dm_ingest import ingest_decrypted_direct_message
@@ -557,6 +568,7 @@ async def create_dm_message_from_decrypted(
         packet_hash=packet_hash,
         transport_code=transport_code,
         region=region,
+        recovered_at=recovered_at,
     )
     return message.id if message is not None else None
 

@@ -49,7 +49,8 @@ frontend/src/
 ├── networkGraph/
 │   └── packetNetworkGraph.ts # Packet→network graph construction shared by visualizer surfaces
 ├── stores/
-│   └── rawPacketStore.ts   # Overheard packet stream + session stats, outside React
+│   ├── rawPacketStore.ts   # Overheard packet stream + session stats, outside React
+│   └── decryptProgressStore.ts # Historical decrypt sweep progress, outside React
 ├── hooks/
 │   ├── index.ts            # Central re-export of all hooks
 │   ├── useConversationActions.ts   # Send/resend/trace/block conversation actions
@@ -284,6 +285,13 @@ That gives the store a load-bearing invariant: **no ancestor of `MessageList` ma
 - room-server auth/status gate before room chat
 - normal chat chrome (`ChatHeader` + `MessageList` + `MessageInput`)
 
+### Historical decrypt sweeps
+
+- **Buttons:** Settings → Database sweeps every known channel key (`api.decryptHistoricalAllChannels`); `ChannelInfoPane` and `ContactInfoPane` sweep one conversation (`api.decryptHistoricalPackets`). The contact one sends only the public key — the private key stays on the server.
+- **Progress** lives in `stores/decryptProgressStore.ts` and renders through `DecryptProgressPanel` (full in settings, `compact` in the panes). Each mount of the settings section primes the store from `GET /packets/decrypt/status`, so a reload or a second tab picks up a sweep already running.
+- `selectSweepForKey` decides what a pane shows: a *running* sweep appears everywhere (it may still find that conversation's messages), a *finished* one only where it actually recovered something.
+- **Recovered messages** carry `Message.recovered_at` and are badged `Recovered` in the meta line. They arrive over the socket like any message but with an old `received_at`, which is why `recordMessageEvent` uses `advanceLastMessageTime` — taking those timestamps literally would drag every swept conversation to the bottom of the sidebar.
+
 ### Initial load + realtime
 
 - Initial data: REST fetches (`api.ts`) for config/settings/channels/contacts/unreads.
@@ -373,7 +381,8 @@ The tray collapses after an emoji is inserted, after a photo is chosen, after a 
 - Auto reconnect (3s) with cleanup guard on unmount.
 - Heartbeat ping every 30s.
 - Incoming JSON is parsed through `wsEvents.ts`, which validates the top-level envelope and known event type strings, then casts payloads at the handler boundary. It does not schema-validate per-event payload shapes.
-- Event handlers: `health`, `message`, `contact`, `contact_resolved`, `channel`, `raw_packet`, `message_acked`, `message_status`, `message_deleted`, `message_reaction`, `contact_deleted`, `channel_deleted`, `error`, `success`, `pong` (ignored).
+- Event handlers: `health`, `message`, `contact`, `contact_resolved`, `channel`, `raw_packet`, `message_acked`, `message_status`, `message_deleted`, `message_reaction`, `contact_deleted`, `channel_deleted`, `decrypt_progress`, `error`, `success`, `pong` (ignored).
+- `decrypt_progress` goes straight into `stores/decryptProgressStore.ts` (like `bot_log`), because a sweep ticks several times a second and only the two panels that show it should re-render. The handler on top of that exists for one thing: refreshing unread counts when a sweep finishes.
 - For `raw_packet` events, use `observation_id` as event identity; `id` is a storage reference and may repeat.
 
 ## URL Hash Navigation (`utils/urlHash.ts`)

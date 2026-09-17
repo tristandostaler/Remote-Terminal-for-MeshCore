@@ -5,11 +5,19 @@ undecrypted count endpoint, and the maintenance endpoint.
 """
 
 import time
-from unittest.mock import patch
+from hashlib import sha256
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.repository import ChannelRepository, MessageRepository, RawPacketRepository
+from app.services.historical_decrypt import (
+    ChannelTarget,
+    SweepSubmission,
+    get_status,
+    submit_channel_sweep,
+    wait_until_idle,
+)
 
 
 async def _insert_raw_packets(count: int, decrypted: bool = False, age_days: int = 0) -> list[int]:
@@ -364,121 +372,308 @@ class TestUndecryptedTextPacketStreaming:
         assert count == 2
 
 
-class TestRunHistoricalChannelDecryption:
-    """Test the _run_historical_channel_decryption background task."""
+def _group_text_bytes(key_bytes: bytes, suffix: bytes) -> bytes:
+    """A GROUP_TEXT-shaped packet addressed to ``key_bytes``'s channel.
+
+    Header 0x15 is FLOOD + GROUP_TEXT; the first payload byte is the channel
+    hash the sweep indexes on. The ciphertext is junk -- tests inject the
+    plaintext by patching ``decrypt_group_text`` -- but unique per call so the
+    payload-hash dedup index does not collapse the rows.
+    """
+    channel_hash = sha256(key_bytes).digest()[0:1]
+    return bytes([0x15, 0x00]) + channel_hash + b"\x00\x00" + suffix.ljust(16, b"\x00")
+
+
+async def _insert_group_text_packets(key_bytes: bytes, count: int, age_days: int = 0) -> None:
+    base_ts = int(time.time()) - (age_days * 86400)
+    for i in range(count):
+        await RawPacketRepository.create(_group_text_bytes(key_bytes, bytes([i + 1])), base_ts + i)
+
+
+def _plaintext(sender: str, message: str, timestamp: int):
+    return type(
+        "DecryptResult", (), {"sender": sender, "message": message, "timestamp": timestamp}
+    )()
+
+
+class TestChannelSweep:
+    """The channel sweep itself (app.services.historical_decrypt)."""
+
+    KEY_HEX = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
+    KEY = bytes.fromhex(KEY_HEX)
+
+    def _target(self, name: str = "#test") -> ChannelTarget:
+        return ChannelTarget(key_bytes=self.KEY, key_hex=self.KEY_HEX, name=name)
+
+    async def _sweep(self, *targets: ChannelTarget) -> None:
+        """Queue a sweep and wait it out, as a request plus its worker would."""
+        await submit_channel_sweep(list(targets))
+        await wait_until_idle(timeout=10)
 
     @pytest.mark.asyncio
     async def test_decrypts_matching_packets(self, test_db):
-        """Background task decrypts packets that match the channel key."""
-        from app.routers.packets import _run_historical_channel_decryption
+        """Packets that match the key become messages and the operator is told."""
+        await _insert_group_text_packets(self.KEY, 3)
 
-        # Insert undecrypted packets
-        await _insert_raw_packets(3)
-        channel_key_hex = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
-        channel_key_bytes = bytes.fromhex(channel_key_hex)
-
-        # Each packet must have unique content to avoid message deduplication
+        # Each packet needs unique content or message dedup collapses them.
         call_count = 0
 
         def make_unique_result(*_args, **_kwargs):
             nonlocal call_count
             call_count += 1
-            return type(
-                "DecryptResult",
-                (),
-                {
-                    "sender": f"User{call_count}",
-                    "message": f"Hello {call_count}",
-                    "timestamp": 1700000000 + call_count,
-                },
-            )()
+            return _plaintext(f"User{call_count}", f"Hello {call_count}", 1700000000 + call_count)
 
         with (
             patch(
-                "app.routers.packets.try_decrypt_packet_with_channel_key",
+                "app.services.historical_decrypt.decrypt_group_text",
                 side_effect=make_unique_result,
             ),
-            patch(
-                "app.routers.packets.parse_packet",
-                return_value=None,
-            ),
-            patch("app.routers.packets.broadcast_success") as mock_success,
+            patch("app.services.historical_decrypt.broadcast_success") as mock_success,
         ):
-            await _run_historical_channel_decryption(channel_key_bytes, channel_key_hex, "#test")
+            await self._sweep(self._target())
 
         mock_success.assert_called_once()
-        assert "3" in mock_success.call_args[0][1]  # "Decrypted 3 messages"
+        assert "3" in mock_success.call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_recovered_messages_are_tagged(self, test_db):
+        """A recovered message keeps the packet's time but is marked recovered."""
+        await _insert_group_text_packets(self.KEY, 1, age_days=2)
+
+        with (
+            patch(
+                "app.services.historical_decrypt.decrypt_group_text",
+                return_value=_plaintext("User", "found me", 1700000000),
+            ),
+            patch("app.services.historical_decrypt.broadcast_success"),
+        ):
+            await self._sweep(self._target())
+
+        messages = await MessageRepository.get_all(
+            msg_type="CHAN", conversation_key=self.KEY_HEX, limit=10
+        )
+        assert len(messages) == 1
+        assert messages[0].recovered_at is not None
+        # received_at stays the packet's own timestamp, not the sweep's clock.
+        assert messages[0].received_at < messages[0].recovered_at
 
     @pytest.mark.asyncio
     async def test_skips_non_matching_packets(self, test_db):
-        """Background task skips packets that don't match the channel key."""
-        from app.routers.packets import _run_historical_channel_decryption
-
-        await _insert_raw_packets(2)
-        channel_key_hex = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
-        channel_key_bytes = bytes.fromhex(channel_key_hex)
+        """Nothing decrypted means no toast."""
+        await _insert_group_text_packets(self.KEY, 2)
 
         with (
-            patch(
-                "app.routers.packets.try_decrypt_packet_with_channel_key",
-                return_value=None,  # No match
-            ),
-            patch("app.routers.packets.broadcast_success") as mock_success,
+            patch("app.services.historical_decrypt.decrypt_group_text", return_value=None),
+            patch("app.services.historical_decrypt.broadcast_success") as mock_success,
         ):
-            await _run_historical_channel_decryption(channel_key_bytes, channel_key_hex, "#test")
+            await self._sweep(self._target())
 
-        # No success broadcast when nothing was decrypted
         mock_success.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_packets_returns_early(self, test_db):
-        """Background task returns early when no undecrypted packets exist."""
-        from app.routers.packets import _run_historical_channel_decryption
+    async def test_only_tries_keys_whose_channel_hash_matches(self, test_db):
+        """A packet is decrypted only with keys that could possibly own it.
 
-        channel_key_hex = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
-        channel_key_bytes = bytes.fromhex(channel_key_hex)
+        The on-air channel hash is one byte of sha256(key), so a sweep across
+        every room must not spend an AES attempt per room per packet -- and a
+        packet that is not GroupText at all is never tried.
+        """
+        other = ChannelTarget(key_bytes=b"\x11" * 16, key_hex="11" * 16, name="#other")
+        assert sha256(self.KEY).digest()[0] != sha256(other.key_bytes).digest()[0]
+        await _insert_group_text_packets(self.KEY, 2)
+        await _insert_raw_packets(3)  # not GroupText
 
-        with patch("app.routers.packets.broadcast_success") as mock_success:
-            await _run_historical_channel_decryption(channel_key_bytes, channel_key_hex)
+        tried: list[bytes] = []
 
-        mock_success.assert_not_called()
+        def record(_payload, key_bytes):
+            tried.append(key_bytes)
+            return None
+
+        with patch("app.services.historical_decrypt.decrypt_group_text", side_effect=record):
+            await self._sweep(self._target(), other)
+
+        assert tried == [self.KEY, self.KEY]
+
+    @pytest.mark.asyncio
+    async def test_no_packets_does_not_start(self, test_db):
+        """An empty backlog is reported, not queued."""
+        submission = await submit_channel_sweep([self._target()])
+
+        assert submission.started is False
+        assert submission.total_packets == 0
 
     @pytest.mark.asyncio
     async def test_display_name_fallback(self, test_db):
-        """Uses channel key prefix when no display name is provided."""
-        from app.routers.packets import _run_historical_channel_decryption
-
-        await _insert_raw_packets(1)
-        channel_key_hex = "AABBCCDDAABBCCDDAABBCCDDAABBCCDD"
-        channel_key_bytes = bytes.fromhex(channel_key_hex)
-
-        mock_result = type(
-            "DecryptResult",
-            (),
-            {
-                "sender": "User",
-                "message": "msg",
-                "timestamp": 1700000000,
-            },
-        )()
+        """A sweep for a channel we have no name for is credited to its key prefix."""
+        await _insert_group_text_packets(self.KEY, 1)
 
         with (
             patch(
-                "app.routers.packets.try_decrypt_packet_with_channel_key",
-                return_value=mock_result,
+                "app.services.historical_decrypt.decrypt_group_text",
+                return_value=_plaintext("User", "msg", 1700000000),
             ),
-            patch("app.routers.packets.parse_packet", return_value=None),
-            patch("app.routers.packets.broadcast_success") as mock_success,
+            patch("app.services.historical_decrypt.broadcast_success") as mock_success,
         ):
-            await _run_historical_channel_decryption(
-                channel_key_bytes,
-                channel_key_hex,
-                None,  # No display name
-            )
+            await self._sweep(self._target(name=self.KEY_HEX[:12]))
 
-        # Should use key prefix as display name
-        call_msg = mock_success.call_args[0][0]
-        assert channel_key_hex[:12] in call_msg
+        assert self.KEY_HEX[:12] in mock_success.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_one_pass_credits_each_room_its_own_finds(self, test_db):
+        """Several keys ride one scan, and each find lands in the right room."""
+        second = ChannelTarget(key_bytes=b"\x11" * 16, key_hex="11" * 16, name="#other")
+        await _insert_group_text_packets(self.KEY, 1)
+        await _insert_group_text_packets(second.key_bytes, 2)
+
+        counter = 0
+
+        def decrypt(_payload, _key):
+            nonlocal counter
+            counter += 1
+            return _plaintext("U", f"m{counter}", 1700000000 + counter)
+
+        with (
+            patch("app.services.historical_decrypt.decrypt_group_text", side_effect=decrypt),
+            patch("app.services.historical_decrypt.broadcast_success"),
+        ):
+            await self._sweep(self._target(), second)
+
+        mine = await MessageRepository.get_all(msg_type="CHAN", conversation_key=self.KEY_HEX)
+        theirs = await MessageRepository.get_all(msg_type="CHAN", conversation_key=second.key_hex)
+        assert (len(mine), len(theirs)) == (1, 2)
+
+
+class TestSweepProgress:
+    """Progress reporting and the queue behind it."""
+
+    @pytest.mark.asyncio
+    async def test_status_is_idle_before_any_sweep(self, test_db, client):
+        response = await client.get("/api/packets/decrypt/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["active"] is None
+        assert data["queued"] == 0
+
+    @pytest.mark.asyncio
+    async def test_progress_is_broadcast_and_throttled(self, test_db):
+        """Ticks are rate-limited, but start and finish always go out."""
+        await _insert_raw_packets(40)
+        events: list[tuple[str, dict]] = []
+
+        def capture(event_type, data, **_kwargs):
+            events.append((event_type, data))
+
+        with patch("app.services.historical_decrypt.broadcast_event", side_effect=capture):
+            await submit_channel_sweep(
+                [ChannelTarget(key_bytes=b"\xaa" * 16, key_hex="AA" * 16, name="#p")]
+            )
+            await wait_until_idle(timeout=10)
+
+        progress = [data for kind, data in events if kind == "decrypt_progress"]
+        # 40 packets is well under the 250-packet tick interval, so only the
+        # bookend events fire.
+        assert len(progress) == 2
+        assert progress[0]["status"] == "running"
+        assert progress[0]["processed"] == 0
+        assert progress[-1]["status"] == "complete"
+        assert progress[-1]["processed"] == 40
+        assert progress[-1]["total"] == 40
+
+    @pytest.mark.asyncio
+    async def test_targets_report_per_conversation_counts(self, test_db):
+        """The finished sweep says how many messages each room got back."""
+        key = b"\xaa" * 16
+        await _insert_group_text_packets(key, 2)
+
+        counter = 0
+
+        def always_matches(*_args, **_kwargs):
+            nonlocal counter
+            counter += 1
+            return _plaintext("U", f"m{counter}", 1700000000 + counter)
+
+        with (
+            patch("app.services.historical_decrypt.decrypt_group_text", side_effect=always_matches),
+            patch("app.services.historical_decrypt.broadcast_success"),
+        ):
+            await submit_channel_sweep(
+                [ChannelTarget(key_bytes=key, key_hex="AA" * 16, name="#ops")]
+            )
+            await wait_until_idle(timeout=10)
+
+        last = get_status().last
+        assert last is not None
+        assert last.status == "complete"
+        assert last.decrypted == 2
+        assert [(t.name, t.decrypted) for t in last.targets] == [("#ops", 2)]
+
+    @pytest.mark.asyncio
+    async def test_second_sweep_queues_behind_the_first(self, test_db):
+        """Two sweeps of the same table run in sequence, not on top of each other."""
+        await _insert_raw_packets(4)
+        target = ChannelTarget(key_bytes=b"\xaa" * 16, key_hex="AA" * 16, name="#ops")
+
+        first = await submit_channel_sweep([target])
+        second = await submit_channel_sweep([target])
+        assert first.queued == 0
+        assert second.queued == 1  # waits for the first, rather than rescanning alongside it
+        await wait_until_idle(timeout=10)
+
+        assert get_status().queued == 0
+        assert get_status().active is None
+
+
+class TestDecryptAllChannels:
+    """Test POST /api/packets/decrypt/historical/all-channels."""
+
+    @pytest.mark.asyncio
+    async def test_reports_when_no_channels_exist(self, test_db, client):
+        with patch("app.routers.packets.ChannelRepository.get_all", new=AsyncMock(return_value=[])):
+            response = await client.post("/api/packets/decrypt/historical/all-channels")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["started"] is False
+        assert "no channel keys" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_sweeps_every_known_channel_key(self, test_db, client):
+        await ChannelRepository.upsert(key="AA" * 16, name="#ops", is_hashtag=True)
+        await ChannelRepository.upsert(key="BB" * 16, name="#weather", is_hashtag=True)
+        await _insert_raw_packets(5)
+
+        with patch("app.services.historical_decrypt._runner.submit") as mock_submit:
+            mock_submit.return_value = SweepSubmission(
+                started=True, job_id="j", total_packets=5, queued=0, message="Started"
+            )
+            response = await client.post("/api/packets/decrypt/historical/all-channels")
+
+        assert response.status_code == 202
+        assert response.json()["started"] is True
+        job = mock_submit.call_args[0][0]
+        names = {target.name for target in job.channel_targets}
+        assert {"#ops", "#weather"} <= names
+        assert f"{len(names)} keys" in job.label
+
+    @pytest.mark.asyncio
+    async def test_skips_channels_with_unusable_keys(self, test_db, client):
+        """A malformed stored key is logged past, not fatal to the sweep."""
+        await ChannelRepository.upsert(key="AA" * 16, name="#ops", is_hashtag=True)
+        await ChannelRepository.upsert(key="NOTHEX", name="#broken", is_hashtag=False)
+        await _insert_raw_packets(1)
+
+        with patch("app.services.historical_decrypt._runner.submit") as mock_submit:
+            mock_submit.return_value = SweepSubmission(
+                started=True, job_id="j", total_packets=1, queued=0, message="Started"
+            )
+            response = await client.post("/api/packets/decrypt/historical/all-channels")
+
+        assert response.status_code == 202
+        job = mock_submit.call_args[0][0]
+        names = {target.name for target in job.channel_targets}
+        assert "#ops" in names
+        assert "#broken" not in names
 
 
 class TestMaintenanceEndpoint:

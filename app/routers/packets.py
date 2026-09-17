@@ -3,22 +3,34 @@ from hashlib import sha256
 from sqlite3 import OperationalError
 
 import aiosqlite
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from app.database import db
-from app.decoder import parse_packet, try_decrypt_packet_with_channel_key
-from app.models import RawPacketDecryptedInfo, RawPacketDetail
-from app.packet_processor import create_message_from_decrypted, run_historical_dm_decryption
+from app.decoder import parse_packet
+from app.keystore import get_private_key, has_private_key
+from app.models import (
+    DecryptSweepStatus,
+    RawPacketDecryptedInfo,
+    RawPacketDetail,
+)
 from app.region_resolver import resolve_region
 from app.repository import (
     AppSettingsRepository,
     ChannelRepository,
+    ContactRepository,
     MessageRepository,
     RawPacketRepository,
 )
+from app.services.historical_decrypt import (
+    ChannelTarget,
+    ContactTarget,
+    SweepSubmission,
+    get_status,
+    submit_channel_sweep,
+    submit_contact_sweep,
+)
 from app.services.messages import backfill_message_regions
-from app.websocket import broadcast_success
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/packets", tags=["packets"])
@@ -50,76 +62,6 @@ class DecryptResult(BaseModel):
 
 def _bad_request(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
-
-
-async def _run_historical_channel_decryption(
-    channel_key_bytes: bytes, channel_key_hex: str, display_name: str | None = None
-) -> None:
-    """Background task to decrypt historical packets with a channel key."""
-    total = await RawPacketRepository.get_undecrypted_count()
-    decrypted_count = 0
-
-    if total == 0:
-        logger.info("No undecrypted packets to process")
-        return
-
-    logger.info("Starting historical channel decryption of %d packets", total)
-
-    known_regions = (await AppSettingsRepository.get()).known_regions
-
-    async for (
-        packet_id,
-        packet_data,
-        packet_timestamp,
-    ) in RawPacketRepository.stream_all_undecrypted():
-        result = try_decrypt_packet_with_channel_key(packet_data, channel_key_bytes)
-
-        if result is not None:
-            # Extract path from the raw packet for storage
-            packet_info = parse_packet(packet_data)
-            path_hex = packet_info.path.hex() if packet_info else None
-
-            # Resolve regional flood-scope if this is a transport-routed packet.
-            transport_code: int | None = None
-            region: str | None = None
-            if packet_info is not None and packet_info.transport_codes is not None:
-                transport_code = packet_info.transport_codes[0]
-                region = resolve_region(
-                    int(packet_info.payload_type),
-                    packet_info.payload,
-                    transport_code,
-                    known_regions,
-                )
-
-            msg_id = await create_message_from_decrypted(
-                packet_id=packet_id,
-                channel_key=channel_key_hex,
-                channel_name=display_name,
-                sender=result.sender,
-                message_text=result.message,
-                timestamp=result.timestamp,
-                received_at=packet_timestamp,
-                path=path_hex,
-                path_len=packet_info.path_length if packet_info else None,
-                realtime=False,  # Historical decryption should not trigger fanout
-                transport_code=transport_code,
-                region=region,
-            )
-
-            if msg_id is not None:
-                decrypted_count += 1
-
-    logger.info(
-        "Historical channel decryption complete: %d/%d packets decrypted", decrypted_count, total
-    )
-
-    # Notify frontend
-    if decrypted_count > 0:
-        name = display_name or channel_key_hex[:12]
-        broadcast_success(
-            f"Historical decrypt complete for {name}",
-            f"Decrypted {decrypted_count} message{'s' if decrypted_count != 1 else ''}",
-        )
 
 
 @router.get("/undecrypted/count")
@@ -202,104 +144,139 @@ async def get_raw_packet(packet_id: int) -> RawPacketDetail:
     )
 
 
-@router.post("/decrypt/historical", response_model=DecryptResult)
-async def decrypt_historical_packets(
-    request: DecryptRequest, background_tasks: BackgroundTasks, response: Response
-) -> DecryptResult:
-    """
-    Attempt to decrypt historical packets with the provided key.
-    Runs in the background. Multiple decrypt jobs can run concurrently.
-    """
-    if request.key_type == "channel":
-        # Channel decryption
-        if request.channel_key:
-            try:
-                channel_key_bytes = bytes.fromhex(request.channel_key)
-                if len(channel_key_bytes) != 16:
-                    raise _bad_request("Channel key must be 16 bytes (32 hex chars)")
-                channel_key_hex = request.channel_key.upper()
-            except ValueError:
-                raise _bad_request("Invalid hex string for channel key") from None
-        elif request.channel_name:
-            channel_key_bytes = sha256(request.channel_name.encode("utf-8")).digest()[:16]
-            channel_key_hex = channel_key_bytes.hex().upper()
-        else:
-            raise _bad_request("Must provide channel_key or channel_name")
-
-        # Get count and lookup channel name for display
-        count = await RawPacketRepository.get_undecrypted_count()
-        if count == 0:
-            return DecryptResult(
-                started=False, total_packets=0, message="No undecrypted packets to process"
-            )
-
-        # Try to find channel name for display
-        channel = await ChannelRepository.get_by_key(channel_key_hex)
-        display_name = channel.name if channel else request.channel_name
-
-        background_tasks.add_task(
-            _run_historical_channel_decryption, channel_key_bytes, channel_key_hex, display_name
-        )
-        response.status_code = status.HTTP_202_ACCEPTED
-
-        return DecryptResult(
-            started=True,
-            total_packets=count,
-            message=f"Started channel decryption of {count} packets in background",
-        )
-
-    elif request.key_type == "contact":
-        # DM decryption
-        if not request.private_key:
-            raise _bad_request("Must provide private_key for contact decryption")
-        if not request.contact_public_key:
-            raise _bad_request("Must provide contact_public_key for contact decryption")
-
+async def _channel_target(channel_key: str | None, channel_name: str | None) -> ChannelTarget:
+    """Resolve a request's key-or-name into the key bytes and a name to show."""
+    if channel_key:
         try:
-            private_key_bytes = bytes.fromhex(request.private_key)
-            if len(private_key_bytes) != 64:
-                raise _bad_request("Private key must be 64 bytes (128 hex chars)")
+            key_bytes = bytes.fromhex(channel_key)
+        except ValueError:
+            raise _bad_request("Invalid hex string for channel key") from None
+        if len(key_bytes) != 16:
+            raise _bad_request("Channel key must be 16 bytes (32 hex chars)")
+        key_hex = channel_key.upper()
+    elif channel_name:
+        key_bytes = sha256(channel_name.encode("utf-8")).digest()[:16]
+        key_hex = key_bytes.hex().upper()
+    else:
+        raise _bad_request("Must provide channel_key or channel_name")
+
+    stored = await ChannelRepository.get_by_key(key_hex)
+    name = stored.name if stored else (channel_name or key_hex[:12])
+    return ChannelTarget(key_bytes=key_bytes, key_hex=key_hex, name=name)
+
+
+async def _contact_target(private_key: str | None, contact_public_key: str | None) -> ContactTarget:
+    """Resolve a DM sweep request, falling back to the radio's exported key.
+
+    The browser has no business holding the node's private key, so the button in
+    the UI sends only the contact's public key and the server reaches for the
+    keystore. An explicit ``private_key`` still wins, for recovering DMs with a
+    key this node never exported.
+    """
+    if private_key:
+        try:
+            private_key_bytes = bytes.fromhex(private_key)
         except ValueError:
             raise _bad_request("Invalid hex string for private key") from None
-
-        try:
-            contact_public_key_bytes = bytes.fromhex(request.contact_public_key)
-            if len(contact_public_key_bytes) != 32:
-                raise _bad_request("Contact public key must be 32 bytes (64 hex chars)")
-            contact_public_key_hex = request.contact_public_key.lower()
-        except ValueError:
-            raise _bad_request("Invalid hex string for contact public key") from None
-
-        count = await RawPacketRepository.count_undecrypted_text_messages()
-        if count == 0:
-            return DecryptResult(
-                started=False,
-                total_packets=0,
-                message="No undecrypted TEXT_MESSAGE packets to process",
-            )
-
-        # Try to find contact name for display
-        from app.repository import ContactRepository
-
-        contact = await ContactRepository.get_by_key(contact_public_key_hex)
-        display_name = contact.name if contact else None
-
-        background_tasks.add_task(
-            run_historical_dm_decryption,
-            private_key_bytes,
-            contact_public_key_bytes,
-            contact_public_key_hex,
-            display_name,
+        if len(private_key_bytes) != 64:
+            raise _bad_request("Private key must be 64 bytes (128 hex chars)")
+    elif has_private_key():
+        stored_key = get_private_key()
+        if stored_key is None:  # pragma: no cover - has_private_key() just said otherwise
+            raise _bad_request("Private key is unavailable")
+        private_key_bytes = stored_key
+    else:
+        raise _bad_request(
+            "No private_key available. Pass one, or connect a radio whose firmware was "
+            "built with ENABLE_PRIVATE_KEY_EXPORT=1."
         )
+
+    if not contact_public_key:
+        raise _bad_request("Must provide contact_public_key for contact decryption")
+    try:
+        public_key_bytes = bytes.fromhex(contact_public_key)
+    except ValueError:
+        raise _bad_request("Invalid hex string for contact public key") from None
+    if len(public_key_bytes) != 32:
+        raise _bad_request("Contact public key must be 32 bytes (64 hex chars)")
+
+    public_key_hex = contact_public_key.lower()
+    contact = await ContactRepository.get_by_key(public_key_hex)
+    return ContactTarget(
+        private_key=private_key_bytes,
+        public_key_bytes=public_key_bytes,
+        public_key_hex=public_key_hex,
+        name=contact.name if contact else None,
+    )
+
+
+def _as_result(submission: SweepSubmission, response: Response) -> DecryptResult:
+    if submission.started:
         response.status_code = status.HTTP_202_ACCEPTED
+    return DecryptResult(
+        started=submission.started,
+        total_packets=submission.total_packets,
+        message=submission.message,
+    )
 
-        return DecryptResult(
-            started=True,
-            total_packets=count,
-            message=f"Started DM decryption of {count} TEXT_MESSAGE packets in background",
-        )
+
+@router.get("/decrypt/status", response_model=DecryptSweepStatus)
+async def get_decrypt_status() -> DecryptSweepStatus:
+    """Progress of the running sweep, the last one to finish, and the queue depth.
+
+    Declared before ``GET /{packet_id}`` on purpose: that route would otherwise
+    claim this path and fail to parse "decrypt" as a row ID.
+    """
+    return get_status()
+
+
+@router.post("/decrypt/historical", response_model=DecryptResult)
+async def decrypt_historical_packets(request: DecryptRequest, response: Response) -> DecryptResult:
+    """Re-try stored packets against one key.
+
+    Queued behind any sweep already running -- they all scan the same table, so
+    serializing them costs nothing and keeps the reported progress meaningful.
+    """
+    if request.key_type == "channel":
+        target = await _channel_target(request.channel_key, request.channel_name)
+        return _as_result(await submit_channel_sweep([target]), response)
+
+    if request.key_type == "contact":
+        target = await _contact_target(request.private_key, request.contact_public_key)
+        return _as_result(await submit_contact_sweep(target), response)
 
     raise _bad_request("key_type must be 'channel' or 'contact'")
+
+
+@router.post("/decrypt/historical/all-channels", response_model=DecryptResult)
+async def decrypt_historical_all_channels(response: Response) -> DecryptResult:
+    """Re-try every stored packet against every channel key we know.
+
+    The keys are tried per packet in a single pass, so this costs one scan
+    however many rooms are joined. It is the recovery path for a database that
+    accumulated packets before their rooms were added -- joining a room only
+    sweeps when the operator asks it to.
+    """
+    channels = await ChannelRepository.get_all()
+    targets: list[ChannelTarget] = []
+    for channel in channels:
+        try:
+            key_bytes = bytes.fromhex(channel.key)
+        except ValueError:
+            logger.warning("Skipping channel %s in sweep: key is not hex", channel.key[:12])
+            continue
+        if len(key_bytes) != 16:
+            logger.warning("Skipping channel %s in sweep: key is not 16 bytes", channel.key[:12])
+            continue
+        targets.append(
+            ChannelTarget(key_bytes=key_bytes, key_hex=channel.key.upper(), name=channel.name)
+        )
+
+    if not targets:
+        return DecryptResult(started=False, total_packets=0, message="No channel keys to try")
+
+    label = f"All rooms ({len(targets)} key{'s' if len(targets) != 1 else ''})"
+    return _as_result(await submit_channel_sweep(targets, label=label), response)
 
 
 class MaintenanceRequest(BaseModel):
