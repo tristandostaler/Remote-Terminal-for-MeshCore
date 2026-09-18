@@ -193,7 +193,7 @@ function SettingField({
           {setting.unit && <span className="ml-1 text-muted-foreground">({setting.unit})</span>}
         </label>
         <p className="text-[0.6875rem] text-muted-foreground">
-          {setting.help} <span className="font-mono opacity-70">set {setting.cli_key}</span>
+          {setting.help} <span className="font-mono opacity-70">{setting.command_hint}</span>
         </p>
         {setting.note && <p className="text-[0.6875rem] text-warning italic">{setting.note}</p>}
         {note && <p className="text-[0.6875rem] text-muted-foreground italic">{note}</p>}

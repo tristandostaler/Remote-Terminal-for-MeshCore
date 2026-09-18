@@ -2407,6 +2407,38 @@ class TestRepeaterSettingsApply:
         assert response.results[0].value == "********"
 
     @pytest.mark.asyncio
+    async def test_the_admin_password_goes_out_as_the_bare_command(self, test_db):
+        """The firmware has no `set password`; it takes `password <new>` and echoes it."""
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.commands.get_msg = AsyncMock(
+            return_value=_radio_result(
+                EventType.CONTACT_MSG_RECV,
+                {"pubkey_prefix": KEY_A[:12], "text": "password now: hunter2", "txt_type": 1},
+            )
+        )
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=_advancing_clock()),
+        ):
+            response = await repeater_settings_apply(
+                KEY_A,
+                RepeaterSettingsApplyRequest(
+                    changes=[RepeaterSettingChange(key="password", value="hunter2")]
+                ),
+            )
+
+        assert mc.commands.send_cmd.call_args_list[0].args[1] == "password hunter2"
+        result = response.results[0]
+        assert result.status == "ok"
+        # The firmware's echo of the new password is redacted like the value:
+        # this reply is mirrored into the console history.
+        assert result.reply == "password now: ********"
+        assert "hunter2" not in result.command
+
+    @pytest.mark.asyncio
     async def test_an_invalid_value_sends_nothing_at_all(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)

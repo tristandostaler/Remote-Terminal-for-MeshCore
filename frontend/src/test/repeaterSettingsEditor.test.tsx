@@ -14,6 +14,7 @@ function definition(overrides: Partial<RepeaterSettingDefinition>): RepeaterSett
     label: 'Max Flood Hops',
     group: 'radio',
     cli_key: 'flood.max',
+    command_hint: 'set flood.max',
     value_type: 'int',
     help: 'Flood packets with more hops than this are not repeated.',
     unit: 'hops',

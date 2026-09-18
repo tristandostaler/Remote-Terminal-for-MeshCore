@@ -43,6 +43,52 @@ class TestCatalog:
         assert get_setting("tx_delay").get_command == "get txdelay"
         assert get_setting("direct_tx_delay").set_command("2.5") == "set direct.txdelay 2.5"
 
+    def test_gain_keys_use_the_firmware_spelling(self):
+        # `radio.rxgain` must be asked for before `radio` would match it; the
+        # firmware orders its branches for that, we only have to spell it right.
+        assert get_setting("rx_boosted_gain").set_command("on") == "set radio.rxgain on"
+        assert get_setting("fem_rx_gain").get_command == "get radio.fem.rxgain"
+        assert get_setting("fem_tx_gain").get_command == "get radio.fem.txgain"
+
+    def test_the_admin_password_is_a_bare_command(self):
+        # There is no `set password` in the firmware: the new password is the
+        # tail of a top-level `password` command, and `set password` is
+        # answered "unknown config", which is how this field was broken.
+        password = get_setting("password")
+        assert password.set_command("hunter2") == "password hunter2"
+        assert password.command_hint == "password"
+        assert get_setting("flood_max").command_hint == "set flood.max"
+        assert get_setting("role").command_hint == "get role"
+
+    def test_every_catalog_key_is_one_the_firmware_handles(self):
+        # Mirrors handleGetCmd/handleSetCmd in the firmware's CommonCLI.cpp
+        # (plus the repeater-only telemetry modes). A key missing here is a
+        # field that locks itself on every repeater.
+        firmware_keys = {
+            "name", "lat", "lon", "owner.info",
+            "radio", "tx", "af", "dutycycle", "repeat", "cad",
+            "radio.rxgain", "radio.fem.rxgain", "radio.fem.txgain",
+            "flood.max", "flood.max.advert", "flood.max.unscoped",
+            "advert.interval", "flood.advert.interval",
+            "password", "guest.password", "allow.read.only",
+            "telemetry.mode.base", "telemetry.mode.loc", "telemetry.mode.env",
+            "bridge.type", "bridge.enabled", "bridge.source", "bridge.delay",
+            "bridge.baud", "bridge.channel", "bridge.secret",
+            "rxdelay", "txdelay", "direct.txdelay", "int.thresh",
+            "agc.reset.interval", "multi.acks", "path.hash.mode", "loop.detect",
+            "adc.multiplier", "extra.sf",
+            "role", "public.key", "bootloader.ver",
+            "pwrmgt.source", "pwrmgt.bootreason", "pwrmgt.bootmv",
+        }  # fmt: skip
+        assert {setting.cli_key for setting in REPEATER_SETTINGS} == firmware_keys
+
+    def test_read_only_facts_cannot_be_written(self):
+        for key in ("role", "public_key", "bridge_type", "boot_reason"):
+            setting = get_setting(key)
+            assert setting.writable is False
+            with pytest.raises(SettingValueError):
+                format_value(setting, "anything")
+
     def test_unknown_key_is_rejected(self):
         with pytest.raises(SettingValueError):
             get_setting("not_a_setting")
@@ -58,6 +104,9 @@ class TestCatalog:
         # know that before it offers a field that would always look empty.
         assert password.readable is False
         assert password.sensitive is True
+        # The UI shows the command beside the field; for this one it is not
+        # `set password`, so the hint has to come from the catalog.
+        assert password.command_hint == "password"
 
 
 class TestFormatValue:
@@ -83,21 +132,78 @@ class TestFormatValue:
         with pytest.raises(SettingValueError):
             format_value(repeat, "maybe")
 
+    def test_multi_acks_is_written_as_a_digit(self):
+        # The firmware parses `multi.acks` with atoi(), so "on" would read as
+        # zero and switch the feature off whichever way the operator set it.
+        multi = get_setting("multi_acks")
+        assert format_value(multi, True) == "1"
+        assert format_value(multi, "on") == "1"
+        assert format_value(multi, "off") == "0"
+        assert multi.set_command(format_value(multi, True)) == "set multi.acks 1"
+
     def test_enum_is_limited_to_its_options(self):
         mode = get_setting("telemetry_mode_base")
         assert format_value(mode, "Always") == "always"
         with pytest.raises(SettingValueError):
             format_value(mode, "sometimes")
+        assert format_value(get_setting("loop_detect"), "Strict") == "strict"
+        assert format_value(get_setting("path_hash_mode"), 2) == "2"
+        with pytest.raises(SettingValueError):
+            format_value(get_setting("path_hash_mode"), 3)
 
     def test_radio_tuple_is_normalised_and_bounded(self):
         radio = get_setting("radio")
         assert format_value(radio, "869.525, 250, 11, 5") == "869.525,250,11,5"
+        # LR2021 boards run in the 2.4 GHz band, which the firmware accepts.
+        assert format_value(radio, "2450,500,7,5") == "2450,500,7,5"
         with pytest.raises(SettingValueError):
             format_value(radio, "869.525,250,11")  # too few parts
         with pytest.raises(SettingValueError):
             format_value(radio, "869.525,250,99,5")  # spreading factor out of range
         with pytest.raises(SettingValueError):
-            format_value(radio, "2400,250,11,5")  # not a LoRa frequency this firmware runs
+            format_value(radio, "5800,250,11,5")  # not a LoRa frequency this firmware runs
+        with pytest.raises(SettingValueError):
+            format_value(radio, "869.525,1000,11,5")  # bandwidth the firmware refuses
+
+    def test_firmware_ranges_are_mirrored(self):
+        # These are the bounds the firmware itself enforces; anything wider here
+        # would be accepted by the form and then refused over the air.
+        assert format_value(get_setting("tx_delay"), 2) == "2"
+        with pytest.raises(SettingValueError):
+            format_value(get_setting("tx_delay"), 2.5)
+        assert format_value(get_setting("rx_delay"), 20) == "20"
+        with pytest.raises(SettingValueError):
+            format_value(get_setting("rx_delay"), 21)
+        assert format_value(get_setting("flood_advert_interval"), 168) == "168"
+        with pytest.raises(SettingValueError):
+            format_value(get_setting("flood_advert_interval"), 169)
+        with pytest.raises(SettingValueError):
+            format_value(get_setting("duty_cycle"), 0.5)
+        assert format_value(get_setting("bridge_channel"), 14) == "14"
+        with pytest.raises(SettingValueError):
+            format_value(get_setting("bridge_channel"), 15)
+
+    def test_extra_spreading_factors_are_a_bounded_list(self):
+        extra = get_setting("extra_sf")
+        assert format_value(extra, "7, 9,11") == "7,9,11"
+        assert format_value(extra, [8]) == "8"
+        with pytest.raises(SettingValueError):
+            format_value(extra, "7,8,9,10")  # firmware takes at most three
+        with pytest.raises(SettingValueError):
+            format_value(extra, "7,13")  # not a spreading factor
+        with pytest.raises(SettingValueError):
+            format_value(extra, "7,x")
+        with pytest.raises(SettingValueError):
+            format_value(extra, " , ")
+
+    def test_name_rejects_the_characters_the_firmware_refuses(self):
+        # isValidName() in the firmware answers "Error, bad chars" for these;
+        # refusing them here keeps the batch from half-applying.
+        name = get_setting("name")
+        assert format_value(name, "Hilltop-2 (north)") == "Hilltop-2 (north)"
+        for bad in ("Hill[top]", "a:b", "a,b", "why?", "star*", "back\\slash"):
+            with pytest.raises(SettingValueError):
+                format_value(name, bad)
 
     def test_a_value_can_never_carry_a_second_command(self):
         # Everything is sent as the tail of one CLI line, so a newline in a
@@ -127,8 +233,35 @@ class TestParseReplies:
         # than silence, which is how the UI knows to lock the field.
         assert parse_get_reply(get_setting("duty_cycle"), "??: dutycycle") == (None, "unsupported")
 
+    def test_a_board_that_cannot_do_it_reads_as_unsupported(self):
+        # The build knows the key but this hardware has no front-end module /
+        # no nRF52 power management; no value will ever take, so lock the field
+        # rather than show it as a transient error.
+        assert parse_get_reply(get_setting("fem_rx_gain"), "Error: unsupported") == (
+            None,
+            "unsupported",
+        )
+        assert parse_get_reply(
+            get_setting("power_source"), "ERROR: Power management not supported"
+        ) == (None, "unsupported")
+
     def test_firmware_error_reads_as_error(self):
         assert parse_get_reply(get_setting("flood_max"), "ERR: nope") == (None, "error")
+
+    def test_reply_aliases_normalise_what_set_wants(self):
+        # `bridge.source` reads back "logRx"/"logTx" but is written "rx"/"tx".
+        assert parse_get_reply(get_setting("bridge_source"), "logRx") == ("rx", "ok")
+        assert parse_get_reply(get_setting("bridge_source"), "logTx") == ("tx", "ok")
+        # An empty extra-SF list is answered with a sentence, not an empty line.
+        assert parse_get_reply(get_setting("extra_sf"), "No extra SF configured") == ("", "ok")
+        assert parse_get_reply(get_setting("extra_sf"), "7,9") == ("7,9", "ok")
+
+    def test_read_only_facts_are_passed_through_verbatim(self):
+        assert parse_get_reply(get_setting("role"), "repeater") == ("repeater", "ok")
+        assert parse_get_reply(get_setting("boot_reason"), "Reset: power-on; Shutdown: none") == (
+            "Reset: power-on; Shutdown: none",
+            "ok",
+        )
 
     def test_silence_reads_as_no_reply(self):
         assert parse_get_reply(get_setting("flood_max"), None) == (None, "no_reply")
@@ -152,9 +285,15 @@ class TestParseReplies:
         ("reply", "expected"),
         [
             ("OK", "ok"),
+            ("OK - repeat is now ON", "ok"),
             ("", "ok"),
             ("??: multi.acks", "unsupported"),
+            # What `set` answers for a key it has never heard of.
+            ("unknown config: password", "unsupported"),
+            # What a known key answers on a board that cannot honour it.
+            ("Error: unsupported", "unsupported"),
             ("ERR: out of range", "error"),
+            ("Error, must be 0-2", "error"),
             (None, "no_reply"),
         ],
     )

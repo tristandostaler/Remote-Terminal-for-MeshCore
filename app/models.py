@@ -1141,7 +1141,13 @@ class RepeaterSettingDefinition(BaseModel):
     label: str = Field(description="Human-readable field label")
     group: str = Field(description="Group key from the schema's group list")
     cli_key: str = Field(description="The firmware's own key, as used in 'get'/'set'")
-    value_type: str = Field(description="string | int | float | bool | enum | radio")
+    command_hint: str = Field(
+        description=(
+            "The write command without its value ('set flood.max'; the admin password is a "
+            "bare 'password'), or the read command for a read-only fact"
+        )
+    )
+    value_type: str = Field(description="string | int | float | bool | enum | radio | int_list")
     help: str = Field(default="", description="One-line description of what the setting does")
     unit: str | None = Field(default=None, description="Display unit (dBm, minutes, ...)")
     minimum: float | None = Field(default=None, description="Lowest accepted value")
