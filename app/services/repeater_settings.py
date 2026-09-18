@@ -19,7 +19,14 @@ reply parsing, so it is cheap to test. ``app/routers/repeaters.py`` owns the
 batched CLI round trips.
 """
 
+import re
 from dataclasses import dataclass
+
+# A numeric `get` reply, optionally followed by a unit the firmware appends for
+# display (`get dutycycle` answers "100.0%"). The form's numeric inputs render
+# blank for anything that is not a bare number, and `set` wants the bare number
+# back, so the unit is stripped off the value shown.
+_NUMBER_WITH_UNIT = re.compile(r"^([-+]?\d+(?:\.\d+)?)\s*(?:%|[A-Za-z°µ/]+)?$")
 
 # Values are sent verbatim as the tail of a one-line CLI command, so anything
 # that is not printable text would either be dropped in transit or split the
@@ -871,7 +878,10 @@ def parse_get_reply(setting: RepeaterSetting, reply: str | None) -> tuple[str | 
     all for a non-admin client).
 
     Some builds echo the key back (``"flood.max: 3"``); that prefix is stripped
-    so the UI always sees a bare value.
+    so the UI always sees a bare value. A numeric setting answered with a unit
+    attached (``"100.0%"`` for ``dutycycle``) is likewise reduced to the number:
+    the editor shows it in a numeric input, which renders blank for anything
+    else, and ``set`` takes the number alone.
     """
     if reply is None:
         return None, "no_reply"
@@ -907,6 +917,10 @@ def parse_get_reply(setting: RepeaterSetting, reply: str | None) -> tuple[str | 
         lowered = text.lower()
         if lowered in setting.options:
             return lowered, "ok"
+    if setting.value_type in ("int", "float"):
+        match = _NUMBER_WITH_UNIT.match(text)
+        if match:
+            return match.group(1), "ok"
 
     return text, "ok"
 

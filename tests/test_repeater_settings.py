@@ -228,6 +228,20 @@ class TestParseReplies:
     def test_key_prefix_is_stripped(self):
         assert parse_get_reply(get_setting("flood_max"), "flood.max: 3") == ("3", "ok")
 
+    def test_a_unit_the_firmware_appends_is_stripped_from_a_number(self):
+        # `get dutycycle` answers "100.0%". The editor puts a float in a numeric
+        # input, which a browser renders blank for anything but a bare number,
+        # so the field looked empty although the value was there in the HTML.
+        assert parse_get_reply(get_setting("duty_cycle"), "100.0%") == ("100.0", "ok")
+        assert parse_get_reply(get_setting("duty_cycle"), "12.5 %") == ("12.5", "ok")
+        assert parse_get_reply(get_setting("tx_power"), "22 dBm") == ("22", "ok")
+        assert parse_get_reply(get_setting("tx_power"), "-9") == ("-9", "ok")
+        # Anything that is not a number with an optional unit is left alone, so
+        # a reply this parser does not understand is still shown rather than lost.
+        assert parse_get_reply(get_setting("tx_power"), "22 dBm (max)") == ("22 dBm (max)", "ok")
+        # A read-only string keeps its unit: it is displayed, never written back.
+        assert parse_get_reply(get_setting("boot_voltage"), "4123 mV") == ("4123 mV", "ok")
+
     def test_unknown_key_reads_as_unsupported(self):
         # Older firmware answers an unknown config key with this sentinel rather
         # than silence, which is how the UI knows to lock the field.
