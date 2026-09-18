@@ -133,6 +133,18 @@ function mirrorSettingsIntoPanes(data: PaneData, values: RepeaterSettingValue[])
  * The settings catalog is static server-side data, identical for every
  * repeater, so one in-flight promise is shared by every dashboard.
  */
+/**
+ * How many settings one read request asks the repeater for when the whole
+ * catalog is wanted. Every setting is a CLI round trip over the air -- a second
+ * to settle the radio plus up to ten seconds waiting for the reply -- and the
+ * request is answered only when the last one is in, so a whole-catalog read in
+ * one request sits behind a reverse proxy (Home Assistant ingress, nginx)
+ * longer than its 60-second timeout and comes back as a 504. Five settings is
+ * well under a minute even on a slow mesh, and each chunk fills the editor as
+ * it lands rather than everything arriving at the end.
+ */
+export const SETTINGS_READ_CHUNK_SIZE = 5;
+
 let settingsSchemaPromise: Promise<RepeaterSettingsSchemaResponse> | null = null;
 
 function loadSettingsSchema(): Promise<RepeaterSettingsSchemaResponse> {
@@ -144,6 +156,37 @@ function loadSettingsSchema(): Promise<RepeaterSettingsSchemaResponse> {
     });
   }
   return settingsSchemaPromise;
+}
+
+/**
+ * Turn one settings-read filter into the request(s) to send. A key list or a
+ * single group is one request as asked. A whole-catalog read (neither given)
+ * becomes one request per `SETTINGS_READ_CHUNK_SIZE` readable settings, in
+ * catalog order and minus `excludeKeys`, so no single HTTP request outlives a
+ * proxy timeout. Without the catalog to chunk by, it falls back to one request.
+ */
+async function planSettingsReads(
+  filter: RepeaterSettingsFilter
+): Promise<RepeaterSettingsFilter[]> {
+  if (filter.keys || filter.group) return [filter];
+
+  let schema: RepeaterSettingsSchemaResponse;
+  try {
+    schema = await loadSettingsSchema();
+  } catch {
+    return [filter];
+  }
+  const excluded = new Set(filter.excludeKeys ?? []);
+  const keys = schema.settings
+    .filter((setting) => setting.readable && !excluded.has(setting.key))
+    .map((setting) => setting.key);
+  if (keys.length === 0) return [filter];
+
+  const requests: RepeaterSettingsFilter[] = [];
+  for (let start = 0; start < keys.length; start += SETTINGS_READ_CHUNK_SIZE) {
+    requests.push({ keys: keys.slice(start, start + SETTINGS_READ_CHUNK_SIZE) });
+  }
+  return requests;
 }
 
 function getLoginToastTitle(status: string): string {
@@ -553,17 +596,31 @@ export function useRepeaterDashboard(
       setSettingsLoading(true);
       setSettingsError(null);
       try {
-        const result = await api.repeaterSettings(publicKey, filter);
-        if (!mountedRef.current || activeIdRef.current !== conversationId) return;
-        setSettingsValues((prev) => {
-          const next = { ...prev };
-          for (const value of result.values) {
-            next[value.key] = value;
+        const requests = await planSettingsReads(filter);
+        // Whether anything has answered so far. Stays null until a request
+        // actually asked for something, so a read that excluded everything
+        // does not overwrite what the last real read established.
+        let responsive: boolean | null = null;
+        for (const request of requests) {
+          const result = await api.repeaterSettings(publicKey, request);
+          if (!mountedRef.current || activeIdRef.current !== conversationId) return;
+          setSettingsValues((prev) => {
+            const next = { ...prev };
+            for (const value of result.values) {
+              next[value.key] = value;
+            }
+            return next;
+          });
+          setPaneData((prev) => mirrorSettingsIntoPanes(prev, result.values));
+          if (result.values.length > 0) {
+            responsive = (responsive ?? false) || result.cli_responsive;
+            setSettingsCliResponsive(responsive);
           }
-          return next;
-        });
-        setPaneData((prev) => mirrorSettingsIntoPanes(prev, result.values));
-        setSettingsCliResponsive(result.cli_responsive);
+          // Nothing has answered a single command yet: the firmware routes no
+          // CLI text for a guest, and every further chunk would cost the same
+          // silence again. The pane already says "log in as admin".
+          if (requests.length > 1 && responsive === false) break;
+        }
       } catch (err) {
         if (!mountedRef.current || activeIdRef.current !== conversationId) return;
         const msg = err instanceof Error ? err.message : 'Failed to read settings';

@@ -337,7 +337,7 @@ export function SettingsEditorPane({
             className="h-7 px-2 text-[0.6875rem] sm:h-8 sm:px-3 sm:text-xs"
             disabled={busy || !schema}
             onClick={() => void onFetch()}
-            title="Read every setting. One CLI round trip per setting, so this takes a while."
+            title="Read every setting, a few at a time. One CLI round trip per setting, so this takes a while."
           >
             <RefreshIcon className={cn('mr-1 h-3 w-3', loading && 'animate-spin')} />
             Read All
