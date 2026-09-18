@@ -523,10 +523,11 @@ describe('useRepeaterDashboard', () => {
     expect(mockApi.repeaterRegions).toHaveBeenCalledTimes(1);
     // Node info and owner info already asked the repeater for these five, so
     // the settings read that follows must not ask again -- even for the one
-    // that went unanswered, since asking twice would not change that.
+    // that went unanswered, since asking twice would not change that. What is
+    // left is asked for by key, in chunks, so no one request outlives a proxy.
     expect(mockApi.repeaterSettings).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterSettings).toHaveBeenCalledWith(REPEATER_KEY, {
-      excludeKeys: ['name', 'lat', 'lon', 'owner_info', 'guest_password'],
+      keys: ['flood_max'],
     });
     // ...and what the panes read is in the editor as if it had been read there.
     expect(result.current.settingsValues.name.value).toBe('Hilltop');
@@ -567,10 +568,112 @@ describe('useRepeaterDashboard', () => {
       // Three attempts, then three more when Neighbors tried to prefetch it.
       expect(mockApi.repeaterNodeInfo).toHaveBeenCalledTimes(6);
       // Nothing was read for the editor, so nothing is left out of its read.
-      expect(mockApi.repeaterSettings).toHaveBeenCalledWith(REPEATER_KEY, {});
+      expect(mockApi.repeaterSettings).toHaveBeenCalledWith(REPEATER_KEY, {
+        keys: ['flood_max', 'guest_password'],
+      });
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('a whole-catalog read goes out in chunks, so no one request outlives a proxy timeout', async () => {
+    // Every setting is a round trip over the air; a catalog of fifty in one
+    // HTTP request sits behind Home Assistant ingress / nginx past their
+    // 60-second limit and comes back as a 504. Twelve settings here -> three
+    // requests of at most five, in catalog order, each filling the editor as
+    // it lands.
+    const settings = Array.from({ length: 12 }, (_, index) => ({
+      key: `setting_${index}`,
+      label: `Setting ${index}`,
+      group: 'radio',
+      cli_key: `s.${index}`,
+      command_hint: `set s.${index}`,
+      value_type: 'int',
+      help: '',
+      unit: null,
+      minimum: null,
+      maximum: null,
+      step: null,
+      options: [],
+      max_length: null,
+      readable: index !== 3, // a write-only setting is never asked for
+      writable: true,
+      sensitive: false,
+      note: null,
+    }));
+    mockApi.repeaterSettingsSchema.mockResolvedValueOnce({
+      groups: [{ key: 'radio', label: 'Radio', description: '' }],
+      settings,
+    });
+    mockApi.repeaterSettings.mockImplementation(async (_key, filter) => ({
+      values: (filter.keys ?? []).map((key: string) => ({
+        key,
+        value: '1',
+        raw: '1',
+        status: 'ok',
+      })),
+      cli_responsive: true,
+    }));
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+    await act(async () => {
+      await result.current.fetchSettings();
+    });
+
+    const sent = mockApi.repeaterSettings.mock.calls.map((call) => call[1]);
+    expect(sent).toEqual([
+      { keys: ['setting_0', 'setting_1', 'setting_2', 'setting_4', 'setting_5'] },
+      { keys: ['setting_6', 'setting_7', 'setting_8', 'setting_9', 'setting_10'] },
+      { keys: ['setting_11'] },
+    ]);
+    expect(Object.keys(result.current.settingsValues)).toHaveLength(11);
+    expect(result.current.settingsCliResponsive).toBe(true);
+  });
+
+  it('a whole-catalog read stops after the first chunk when nothing answers', async () => {
+    // A guest gets no reply to anything: the backend already gives up three
+    // silent commands into a chunk, and the chunks that follow would only
+    // repeat that silence, so the read stops there and the pane says "log in".
+    const settings = Array.from({ length: 7 }, (_, index) => ({
+      key: `setting_${index}`,
+      label: `Setting ${index}`,
+      group: 'radio',
+      cli_key: `s.${index}`,
+      command_hint: `set s.${index}`,
+      value_type: 'int',
+      help: '',
+      unit: null,
+      minimum: null,
+      maximum: null,
+      step: null,
+      options: [],
+      max_length: null,
+      readable: true,
+      writable: true,
+      sensitive: false,
+      note: null,
+    }));
+    mockApi.repeaterSettingsSchema.mockResolvedValueOnce({
+      groups: [{ key: 'radio', label: 'Radio', description: '' }],
+      settings,
+    });
+    mockApi.repeaterSettings.mockImplementation(async (_key, filter) => ({
+      values: (filter.keys ?? []).map((key: string) => ({
+        key,
+        value: null,
+        raw: null,
+        status: 'no_reply',
+      })),
+      cli_responsive: false,
+    }));
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+    await act(async () => {
+      await result.current.fetchSettings();
+    });
+
+    expect(mockApi.repeaterSettings).toHaveBeenCalledTimes(1);
+    expect(result.current.settingsCliResponsive).toBe(false);
   });
 
   it('a pane refresh fills the editor fields it read, and an editor read updates the pane', async () => {
