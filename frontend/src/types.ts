@@ -919,7 +919,15 @@ export interface RepeaterRegionsResponse {
 /** How the firmware answered one `get`/`set` for a setting. */
 export type RepeaterSettingStatus = 'ok' | 'unsupported' | 'error' | 'no_reply';
 
-export type RepeaterSettingValueType = 'string' | 'int' | 'float' | 'bool' | 'enum' | 'radio';
+export type RepeaterSettingValueType =
+  | 'string'
+  | 'int'
+  | 'float'
+  | 'bool'
+  | 'enum'
+  | 'radio'
+  /** Comma-separated whole numbers (`extra.sf`); edited as text. */
+  | 'int_list';
 
 /**
  * One editable repeater setting, described by the server-side catalog
@@ -932,6 +940,12 @@ export interface RepeaterSettingDefinition {
   group: string;
   /** The firmware's own key, as used in `get`/`set`. */
   cli_key: string;
+  /**
+   * The command shown beside the field, without its value: usually
+   * `set <cli_key>`, but the admin password is a bare `password` command and
+   * a read-only fact is `get <cli_key>`.
+   */
+  command_hint: string;
   value_type: RepeaterSettingValueType;
   help: string;
   unit: string | null;

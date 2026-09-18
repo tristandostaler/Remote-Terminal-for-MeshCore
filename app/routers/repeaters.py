@@ -695,6 +695,7 @@ async def repeater_settings_schema() -> RepeaterSettingsSchemaResponse:
                 label=setting.label,
                 group=setting.group,
                 cli_key=setting.cli_key,
+                command_hint=setting.command_hint,
                 value_type=setting.value_type,
                 help=setting.help,
                 unit=setting.unit,
@@ -805,13 +806,19 @@ async def repeater_settings_apply(
     for setting, value in prepared:
         reply = replies.get(setting.key)
         shown_value = _REDACTED if setting.sensitive else value
+        # The firmware echoes a new admin password back ("password now: ...")
+        # so the operator can be sure of it; that echo must not reach the
+        # response or the console history any more than the value itself.
+        shown_reply = reply
+        if setting.sensitive and reply is not None and value in reply:
+            shown_reply = reply.replace(value, _REDACTED)
         results.append(
             RepeaterSettingApplyResult(
                 key=setting.key,
                 command=setting.set_command(shown_value),
                 value=shown_value,
                 status=classify_set_reply(reply),
-                reply=reply,
+                reply=shown_reply,
             )
         )
 
