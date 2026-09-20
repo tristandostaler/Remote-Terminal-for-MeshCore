@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ConversationPane } from '../components/ConversationPane';
@@ -8,6 +8,7 @@ import type { RawPacketStatsSessionState } from '../utils/rawPacketStats';
 
 const mocks = vi.hoisted(() => ({
   messageList: vi.fn(() => <div data-testid="message-list" />),
+  messageInput: vi.fn((_props: Record<string, unknown>) => {}),
 }));
 
 vi.mock('../components/ChatHeader', () => ({
@@ -19,7 +20,8 @@ vi.mock('../components/MessageList', () => ({
 }));
 
 vi.mock('../components/MessageInput', () => ({
-  MessageInput: React.forwardRef((_props, ref) => {
+  MessageInput: React.forwardRef((props, ref) => {
+    mocks.messageInput(props);
     React.useImperativeHandle(ref, () => ({ appendText: vi.fn() }));
     return <div data-testid="message-input" />;
   }),
@@ -411,6 +413,69 @@ describe('ConversationPane', () => {
     const contactCall = contactCallArgs?.[0] as Record<string, unknown> | undefined;
     expect(contactCall?.unreadMarkerLastReadAt).toBeUndefined();
     expect(contactCall?.onDismissUnreadMarker).toBeUndefined();
+  });
+
+  it('derives mention candidates from contacts and wires reply state from MessageList to MessageInput', async () => {
+    const contact = (publicKey: string, name: string): Contact => ({
+      public_key: publicKey,
+      name,
+      type: 1,
+      flags: 0,
+      direct_path: null,
+      direct_path_len: 0,
+      direct_path_hash_mode: 0,
+      last_advert: null,
+      lat: null,
+      lon: null,
+      last_seen: null,
+      on_radio: false,
+      favorite: false,
+      last_contacted: null,
+      last_read_at: null,
+      first_seen: null,
+    });
+
+    render(
+      <ConversationPane
+        {...createProps({
+          activeConversation: { type: 'channel', id: channel.key, name: channel.name },
+          contacts: [contact('aa'.repeat(32), 'Bob'), contact('bb'.repeat(32), 'Alice')],
+        })}
+      />
+    );
+
+    await waitFor(() => expect(mocks.messageInput).toHaveBeenCalled());
+    const lastInputProps = () =>
+      mocks.messageInput.mock.calls[mocks.messageInput.mock.calls.length - 1][0] as Record<
+        string,
+        unknown
+      >;
+
+    // Sorted, deduplicated names -- not raw contact order.
+    expect(lastInputProps().mentionCandidates).toEqual(['Alice', 'Bob']);
+    expect(lastInputProps().replyContext).toBeNull();
+
+    const lastListProps = () => {
+      const calls = mocks.messageList.mock.calls as unknown[][];
+      return calls[calls.length - 1][0] as Record<string, unknown>;
+    };
+    const onReplyMessage = lastListProps().onReplyMessage as (context: {
+      senderName: string;
+      preview: string;
+    }) => void;
+    expect(onReplyMessage).toBeTypeOf('function');
+
+    act(() => onReplyMessage({ senderName: 'Alice', preview: 'hey there' }));
+
+    await waitFor(() =>
+      expect(lastInputProps().replyContext).toEqual({ senderName: 'Alice', preview: 'hey there' })
+    );
+
+    // Cancelling from the composer clears it back out.
+    const onCancelReply = lastInputProps().onCancelReply as () => void;
+    act(() => onCancelReply());
+
+    await waitFor(() => expect(lastInputProps().replyContext).toBeNull());
   });
 
   it('shows a warning but keeps input for full-key contacts without an advert', async () => {

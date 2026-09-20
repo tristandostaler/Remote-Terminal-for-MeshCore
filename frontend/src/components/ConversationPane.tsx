@@ -16,6 +16,7 @@ import type {
   RadioConfig,
   RadioTraceHopRequest,
   RadioTraceResponse,
+  ReplyContext,
 } from '../types';
 import { CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM } from '../types';
 import type { ImageCodecId } from '../api';
@@ -220,6 +221,17 @@ export function ConversationPane({
   blockedNames,
 }: ConversationPaneProps) {
   const [roomAuthenticated, setRoomAuthenticated] = useState(false);
+  const [replyContext, setReplyContext] = useState<ReplyContext | null>(null);
+  // Names offered by the composer's "@" autocomplete -- every known contact
+  // with a name, not just this conversation's participants, so mentioning
+  // someone from another part of the mesh still autocompletes.
+  const mentionCandidates = useMemo(
+    () =>
+      Array.from(new Set(contacts.map((c) => c.name).filter((n): n is string => !!n))).sort(
+        (a, b) => a.localeCompare(b)
+      ),
+    [contacts]
+  );
   const activeContactIsRepeater = useMemo(() => {
     if (!activeConversation || activeConversation.type !== 'contact') return false;
     const contact = contacts.find((candidate) => candidate.public_key === activeConversation.id);
@@ -260,6 +272,7 @@ export function ConversationPane({
   if (prevConversationIdRef.current !== activeConversation?.id) {
     prevConversationIdRef.current = activeConversation?.id;
     if (roomAuthenticated) setRoomAuthenticated(false);
+    if (replyContext) setReplyContext(null);
   }
   const isPrefixOnlyActiveContact = activeContact
     ? isPrefixOnlyContact(activeContact.public_key)
@@ -491,6 +504,7 @@ export function ConversationPane({
           onCancelMessage={onCancelMessage}
           onDeleteMessage={onDeleteMessage}
           onReactToMessage={onReactToMessage}
+          onReplyMessage={setReplyContext}
           radioName={config?.name}
           config={config}
           onOpenContactInfo={onOpenContactInfo}
@@ -520,6 +534,9 @@ export function ConversationPane({
           mcmpEnabled={activeMcmpEnabled}
           mcmpVersion={activeMcmpVersion}
           imageCodec={activeImageCodec}
+          replyContext={replyContext}
+          onCancelReply={() => setReplyContext(null)}
+          mentionCandidates={mentionCandidates}
           placeholder={
             !health?.radio_connected
               ? 'Radio not connected'

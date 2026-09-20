@@ -12,6 +12,7 @@ import { MessageInput } from '../components/MessageInput';
 import { api } from '../api';
 import { toast } from '../components/ui/sonner';
 import { encodeMeshImage, prepareAeicImage } from '../services/imageCodec';
+import type { ReplyContext } from '../types';
 
 const voiceCapture = vi.hoisted(() => ({
   start: vi.fn().mockResolvedValue(undefined),
@@ -105,6 +106,9 @@ describe('MessageInput', () => {
     voice?: boolean;
     mcmpEnabled?: boolean;
     imageCodec?: 'ie4' | 'aeic';
+    replyContext?: ReplyContext | null;
+    onCancelReply?: () => void;
+    mentionCandidates?: string[];
   }) {
     return render(
       <MessageInput
@@ -114,6 +118,9 @@ describe('MessageInput', () => {
         senderName={props.senderName}
         mcmpEnabled={props.mcmpEnabled}
         imageCodec={props.imageCodec}
+        replyContext={props.replyContext}
+        onCancelReply={props.onCancelReply}
+        mentionCandidates={props.mentionCandidates}
         placeholder="Type a message..."
         voiceConversation={props.voice ? { type: 'PRIV', key: 'aa'.repeat(32) } : undefined}
       />
@@ -805,6 +812,159 @@ describe('MessageInput', () => {
       expect(screen.queryByRole('dialog', { name: 'Emoji picker' })).not.toBeInTheDocument();
       // Inserting collapses the tray, same as before.
       expect(screen.getByRole('button', { name: 'Show message options' })).toBeVisible();
+    });
+  });
+
+  describe('reply', () => {
+    it('shows the reply banner with the sender name and quote', () => {
+      renderInput({
+        conversationType: 'contact',
+        replyContext: { senderName: 'Alice', preview: 'are we still on for tomorrow' },
+      });
+
+      expect(screen.getByText('Replying to Alice')).toBeInTheDocument();
+      expect(screen.getByText('are we still on for tomorrow')).toBeInTheDocument();
+    });
+
+    it('cancels the reply from the banner', () => {
+      const onCancelReply = vi.fn();
+      renderInput({
+        conversationType: 'contact',
+        replyContext: { senderName: 'Alice', preview: 'hey' },
+        onCancelReply,
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel reply' }));
+      expect(onCancelReply).toHaveBeenCalled();
+    });
+
+    it('prefixes the sent text with the wire mention and quote', async () => {
+      renderInput({
+        conversationType: 'contact',
+        replyContext: { senderName: 'Alice', preview: 'are we still on for tomorrow' },
+      });
+
+      fireEvent.change(getInput(), { target: { value: 'yes, see you then' } });
+      fireEvent.click(getSendButton());
+
+      await waitFor(() => expect(onSend).toHaveBeenCalled());
+      expect(onSend).toHaveBeenCalledWith(
+        '@[Alice] >are we still on for tomorrow\nyes, see you then'
+      );
+    });
+
+    it('clears the reply after a successful send', async () => {
+      const onCancelReply = vi.fn();
+      renderInput({
+        conversationType: 'contact',
+        replyContext: { senderName: 'Alice', preview: 'hey' },
+        onCancelReply,
+      });
+
+      fireEvent.change(getInput(), { target: { value: 'yo' } });
+      fireEvent.click(getSendButton());
+
+      await waitFor(() => expect(onCancelReply).toHaveBeenCalled());
+    });
+
+    it('does not clear the reply when the send fails', async () => {
+      onSend.mockRejectedValueOnce(new Error('no radio'));
+      const onCancelReply = vi.fn();
+      renderInput({
+        conversationType: 'contact',
+        replyContext: { senderName: 'Alice', preview: 'hey' },
+        onCancelReply,
+      });
+
+      fireEvent.change(getInput(), { target: { value: 'yo' } });
+      fireEvent.click(getSendButton());
+
+      await waitFor(() => expect(onSend).toHaveBeenCalled());
+      expect(onCancelReply).not.toHaveBeenCalled();
+      expect(screen.getByText('Replying to Alice')).toBeInTheDocument();
+    });
+
+    it('counts the mention+quote overhead in the byte counter', () => {
+      // "@[Alice] >hey\n" is the wire prefix; "hi" is 2 more bytes.
+      renderInput({
+        conversationType: 'contact',
+        replyContext: { senderName: 'Alice', preview: 'hey' },
+      });
+      fireEvent.change(getInput(), { target: { value: 'hi' } });
+
+      const prefixBytes = byteLen('@[Alice] >hey\n');
+      expect(screen.getByText(new RegExp(`${prefixBytes + 2}/156`))).toBeTruthy();
+    });
+  });
+
+  describe('mention autocomplete', () => {
+    it('shows no popup without candidates', () => {
+      renderInput({ conversationType: 'channel' });
+      fireEvent.change(getInput(), { target: { value: '@' } });
+      expect(screen.queryByRole('listbox', { name: 'Mention suggestions' })).toBeNull();
+    });
+
+    it('suggests matching names after "@"', () => {
+      renderInput({ conversationType: 'channel', mentionCandidates: ['Alice', 'Alicia', 'Bob'] });
+      const input = getInput();
+      fireEvent.change(input, { target: { value: '@ali' } });
+
+      const popup = screen.getByRole('listbox', { name: 'Mention suggestions' });
+      expect(within(popup).getByText('@Alice')).toBeInTheDocument();
+      expect(within(popup).getByText('@Alicia')).toBeInTheDocument();
+      expect(within(popup).queryByText('@Bob')).toBeNull();
+    });
+
+    it('inserts the bracketed wire mention on click', () => {
+      renderInput({ conversationType: 'channel', mentionCandidates: ['Alice', 'Bob'] });
+      const input = getInput();
+      fireEvent.change(input, { target: { value: 'hey @al' } });
+
+      fireEvent.mouseDown(screen.getByRole('option', { name: '@Alice' }));
+
+      expect(input).toHaveValue('hey @[Alice] ');
+    });
+
+    it('inserts the highlighted candidate on Enter and closes the popup', () => {
+      renderInput({ conversationType: 'channel', mentionCandidates: ['Alice', 'Bob'] });
+      const input = getInput();
+      fireEvent.change(input, { target: { value: '@a' } });
+
+      fireEvent.keyDown(input, { key: 'Enter' });
+
+      expect(input).toHaveValue('@[Alice] ');
+      expect(onSend).not.toHaveBeenCalled();
+      expect(screen.queryByRole('listbox', { name: 'Mention suggestions' })).toBeNull();
+    });
+
+    it('cycles the highlighted candidate with the arrow keys', () => {
+      renderInput({ conversationType: 'channel', mentionCandidates: ['Alice', 'Bob', 'Charlie'] });
+      const input = getInput();
+      fireEvent.change(input, { target: { value: '@' } });
+
+      fireEvent.keyDown(input, { key: 'ArrowDown' });
+      fireEvent.keyDown(input, { key: 'Enter' });
+
+      expect(input).toHaveValue('@[Bob] ');
+    });
+
+    it('dismisses the popup on Escape without changing the text', () => {
+      renderInput({ conversationType: 'channel', mentionCandidates: ['Alice'] });
+      const input = getInput();
+      fireEvent.change(input, { target: { value: '@al' } });
+
+      fireEvent.keyDown(input, { key: 'Escape' });
+
+      expect(screen.queryByRole('listbox', { name: 'Mention suggestions' })).toBeNull();
+      expect(input).toHaveValue('@al');
+    });
+
+    it('closes when there is no longer a match', () => {
+      renderInput({ conversationType: 'channel', mentionCandidates: ['Alice'] });
+      const input = getInput();
+      fireEvent.change(input, { target: { value: '@zz' } });
+
+      expect(screen.queryByRole('listbox', { name: 'Mention suggestions' })).toBeNull();
     });
   });
 });

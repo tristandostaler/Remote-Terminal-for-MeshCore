@@ -151,3 +151,30 @@ export function splitReplyMention(text: string): SplitReplyMention | null {
   if (!match) return null;
   return { mention: match[1], body: match[2] };
 }
+
+// --- Composing a reply (the inverse of the parsing above) ---
+
+/**
+ * How much of the quoted message survives into a reply's quote line. LoRa's
+ * per-message byte budget is tiny (see MessageInput's DM_HARD_LIMIT), so the
+ * quote is a locator hint, not a full copy.
+ */
+export const REPLY_QUOTE_MAX_CHARS = 40;
+
+/** Collapse to one line and cap length for use as a reply's quoted fragment. */
+export function buildReplyQuote(text: string): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  if (collapsed.length <= REPLY_QUOTE_MAX_CHARS) return collapsed;
+  return `${collapsed.slice(0, REPLY_QUOTE_MAX_CHARS - 1)}…`;
+}
+
+/**
+ * Compose the meshcore-open reply wire form: `"@[Name] >quote\nbody"`, or
+ * `"@[Name] body"` when there is nothing to quote (`quote` empty) -- an empty
+ * `>` line would not round-trip through `clean_channel_body_for_hash` on the
+ * backend (see `app/reactions.py`), so it is never emitted.
+ */
+export function formatReplyText(senderName: string, quote: string, body: string): string {
+  const mention = `@[${senderName}]`;
+  return quote ? `${mention} >${quote}\n${body}` : `${mention} ${body}`;
+}
