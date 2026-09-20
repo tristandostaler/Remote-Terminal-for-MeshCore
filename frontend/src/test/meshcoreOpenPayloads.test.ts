@@ -7,6 +7,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   REACTION_EMOJIS,
+  buildReplyQuote,
+  formatReplyText,
   giphyUrlForId,
   parseGif,
   parseReaction,
@@ -116,5 +118,46 @@ describe('splitReplyMention', () => {
     expect(splitReplyMention('hello world')).toBeNull();
     expect(splitReplyMention('@[Alice]')).toBeNull(); // mention only, no body
     expect(splitReplyMention('text @[Alice] g:abc')).toBeNull(); // not a leading mention
+  });
+});
+
+describe('buildReplyQuote', () => {
+  it('returns short text unchanged', () => {
+    expect(buildReplyQuote('hello there')).toBe('hello there');
+  });
+
+  it('collapses internal whitespace/newlines to single spaces', () => {
+    expect(buildReplyQuote('hello\n  there   friend')).toBe('hello there friend');
+  });
+
+  it('truncates long text with an ellipsis, capped at 40 characters', () => {
+    const long = 'a'.repeat(60);
+    const quote = buildReplyQuote(long);
+    expect(quote.length).toBe(40);
+    expect(quote.endsWith('…')).toBe(true);
+    expect(quote.startsWith('a'.repeat(39))).toBe(true);
+  });
+
+  it('trims leading/trailing whitespace', () => {
+    expect(buildReplyQuote('   padded   ')).toBe('padded');
+  });
+});
+
+describe('formatReplyText', () => {
+  it('embeds a quote line between the mention and the body', () => {
+    expect(formatReplyText('Alice', 'earlier message', 'sounds good')).toBe(
+      '@[Alice] >earlier message\nsounds good'
+    );
+  });
+
+  it('omits the quote line entirely when there is nothing to quote', () => {
+    expect(formatReplyText('Alice', '', 'sounds good')).toBe('@[Alice] sounds good');
+  });
+
+  it('round-trips through splitReplyMention', () => {
+    const composed = formatReplyText('Node One', 'hey are you around', 'yes, on my way');
+    const split = splitReplyMention(composed);
+    expect(split?.mention).toBe('@[Node One]');
+    expect(split?.body).toBe('>hey are you around\nyes, on my way');
   });
 });

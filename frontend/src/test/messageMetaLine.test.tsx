@@ -3,9 +3,31 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageList } from '../components/MessageList';
-import type { Message } from '../types';
+import type { Contact, Message } from '../types';
 
 const scrollIntoViewMock = vi.fn();
+
+function createContact(overrides: Partial<Contact> = {}): Contact {
+  return {
+    public_key: 'ab'.repeat(32),
+    name: 'Alice',
+    type: 1,
+    flags: 0,
+    direct_path: null,
+    direct_path_len: -1,
+    direct_path_hash_mode: -1,
+    last_advert: null,
+    lat: null,
+    lon: null,
+    last_seen: null,
+    on_radio: false,
+    favorite: false,
+    last_contacted: null,
+    last_read_at: null,
+    first_seen: null,
+    ...overrides,
+  };
+}
 
 function createMessage(overrides: Partial<Message> = {}): Message {
   return {
@@ -530,5 +552,149 @@ describe('message actions', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Delete from history' }));
 
     expect(onDeleteMessage).toHaveBeenCalledWith(message);
+  });
+});
+
+describe('reply', () => {
+  it('opens the menu on its own, even with no other actions wired', () => {
+    render(
+      <MessageList
+        messages={[createMessage()]}
+        contacts={[]}
+        loading={false}
+        onReplyMessage={vi.fn()}
+      />
+    );
+
+    expect(screen.getByLabelText('Message actions')).toBeInTheDocument();
+  });
+
+  it('replies to an incoming DM using the contact name and a quote of its text', async () => {
+    const onReplyMessage = vi.fn();
+    render(
+      <MessageList
+        messages={[createMessage({ outgoing: false, text: 'are we still on for tomorrow' })]}
+        contacts={[createContact({ name: 'Alice' })]}
+        loading={false}
+        onReplyMessage={onReplyMessage}
+      />
+    );
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    await userEvent.click(screen.getByRole('button', { name: 'Reply' }));
+
+    expect(onReplyMessage).toHaveBeenCalledWith({
+      senderName: 'Alice',
+      preview: 'are we still on for tomorrow',
+    });
+  });
+
+  it("replies to our own outgoing message using our radio name, not 'You'", async () => {
+    const onReplyMessage = vi.fn();
+    render(
+      <MessageList
+        messages={[createMessage({ outgoing: true, text: 'on my way' })]}
+        contacts={[]}
+        loading={false}
+        onReplyMessage={onReplyMessage}
+        radioName="Base Station"
+      />
+    );
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    await userEvent.click(screen.getByRole('button', { name: 'Reply' }));
+
+    expect(onReplyMessage).toHaveBeenCalledWith({
+      senderName: 'Base Station',
+      preview: 'on my way',
+    });
+  });
+
+  it('truncates a long quote and closes the menu', async () => {
+    const onReplyMessage = vi.fn();
+    const long = 'a'.repeat(80);
+    render(
+      <MessageList
+        messages={[createMessage({ outgoing: false, text: long, sender_name: 'Alice' })]}
+        contacts={[]}
+        loading={false}
+        onReplyMessage={onReplyMessage}
+      />
+    );
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    await userEvent.click(screen.getByRole('button', { name: 'Reply' }));
+
+    const preview = onReplyMessage.mock.calls[0][0].preview;
+    expect(preview.length).toBe(40);
+    expect(preview.endsWith('…')).toBe(true);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('quotes a media label instead of the raw marker text for a picture bubble', async () => {
+    const onReplyMessage = vi.fn();
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            type: 'CHAN',
+            text: 'aeib:grp:1c1e08f41fd4dd96',
+            sender_name: 'Alice',
+            send_state: 'sent',
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+        onReplyMessage={onReplyMessage}
+      />
+    );
+
+    await userEvent.click(screen.getByLabelText('Message actions'));
+    await userEvent.click(screen.getByRole('button', { name: 'Reply' }));
+
+    expect(onReplyMessage).toHaveBeenCalledWith(expect.objectContaining({ preview: 'Picture' }));
+  });
+
+  it('renders a received reply as a quote banner above its own text', () => {
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            outgoing: false,
+            sender_name: 'Bob',
+            text: '@[Alice] >are we still on for tomorrow\nyes, see you then',
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    // The quote banner names who is being replied to and the quoted fragment...
+    expect(screen.getByText('Alice')).toBeInTheDocument();
+    expect(screen.getByText('are we still on for tomorrow')).toBeInTheDocument();
+    // ...separately from the reply's own body text.
+    expect(screen.getByText('yes, see you then')).toBeInTheDocument();
+  });
+
+  it('does not treat a plain leading mention (no quote line) as a reply banner', () => {
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            outgoing: false,
+            sender_name: 'Bob',
+            text: '@[Alice] can you check the sensor',
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    // Rendered as ordinary highlighted-mention text (the bracketed wire form),
+    // not split into a banner + separate body.
+    expect(screen.getByText('@[Alice]')).toBeInTheDocument();
+    expect(screen.queryByText('Alice')).toBeNull();
   });
 });

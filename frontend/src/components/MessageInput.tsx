@@ -14,6 +14,9 @@ import {
 import { ImagePlus, Loader2, Mic, Plus, Smile, X } from 'lucide-react';
 import { EmojiPickerPanel } from './EmojiPickerPanel';
 import { api } from '../api';
+import type { ReplyContext } from '../types';
+import { formatReplyText } from '../utils/meshcoreOpenPayloads';
+import { findActiveMentionQuery, filterMentionCandidates } from '../utils/mentionAutocomplete';
 import {
   encodeMeshImage,
   prepareAeicImage,
@@ -68,6 +71,12 @@ interface MessageInputProps {
   /** Which codec an attached photo uses. 'aeic' replaces the AVIF/JPEG fragment
    *  transport with the neural codec: ~150 bytes as one or two text messages. */
   imageCodec?: ImageCodecId;
+  /** The message currently being replied to, or null/undefined outside a reply. */
+  replyContext?: ReplyContext | null;
+  /** Ends the reply -- called after a successful send and from the banner's X. */
+  onCancelReply?: () => void;
+  /** Names offered by the "@" autocomplete popup (typically the conversation's contacts). */
+  mentionCandidates?: string[];
 }
 
 type LimitState = 'normal' | 'warning' | 'danger' | 'error';
@@ -88,11 +97,16 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
     mcmpEnabled,
     mcmpVersion,
     imageCodec = 'ie4',
+    replyContext,
+    onCancelReply,
+    mentionCandidates,
   },
   ref
 ) {
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState<{ start: number; query: string } | null>(null);
+  const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
   // Compressed wire size fetched from the backend (the MCMP codec is
   // server-side), tagged with the exact draft it was computed for so a stale
   // result is never shown for different text. null until the first estimate
@@ -131,6 +145,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
   useEffect(() => {
     setActionsOpen(false);
     setEmojiPickerOpen(false);
+    setMentionQuery(null);
   }, [voiceConversation?.key]);
 
   useEffect(() => {
@@ -364,8 +379,18 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
     return null; // Raw/other - no limits
   }, [conversationType, senderName]);
 
-  // UTF-8 byte length of the current text (LoRa packets are byte-constrained)
-  const textByteLen = useMemo(() => byteLen(text), [text]);
+  // What actually goes out on the wire: the draft, prefixed with the reply's
+  // mention (and quote line, when there is one) when a reply is in progress.
+  // Every byte/compression calculation below sizes this, not the raw draft,
+  // so the counter does not understate a reply's real airtime cost.
+  const composedText = useMemo(
+    () =>
+      replyContext ? formatReplyText(replyContext.senderName, replyContext.preview, text) : text,
+    [text, replyContext]
+  );
+
+  // UTF-8 byte length of the composed text (LoRa packets are byte-constrained)
+  const textByteLen = useMemo(() => byteLen(composedText), [composedText]);
 
   // When MCMP is on, poll the backend (which owns the codec) for the compressed
   // wire size, debounced. That size is what actually rides the packet, so the
@@ -378,9 +403,9 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
     let cancelled = false;
     const handle = setTimeout(() => {
       api
-        .estimateMcmp(text, mcmpVersion ?? 2)
+        .estimateMcmp(composedText, mcmpVersion ?? 2)
         .then((res) => {
-          if (!cancelled) setCompressed({ bytes: res.wire_bytes, forText: text });
+          if (!cancelled) setCompressed({ bytes: res.wire_bytes, forText: composedText });
         })
         .catch(() => {
           if (!cancelled) setCompressed(null);
@@ -390,7 +415,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [text, mcmpEnabled, mcmpVersion, limits]);
+  }, [composedText, text, mcmpEnabled, mcmpVersion, limits]);
 
   // The byte count the counter shows: the compressed size when we have one (the
   // exact one for this draft, or the last one while a fresh estimate is in
@@ -406,7 +431,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
     mcmpEnabled &&
     !!limits &&
     text.trim().length > 0 &&
-    !(compressed !== null && compressed.forText === text);
+    !(compressed !== null && compressed.forText === composedText);
 
   // Determine current limit state
   const { limitState, warningMessage } = useMemo((): {
@@ -437,12 +462,16 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
       e.preventDefault();
       const trimmed = text.trim();
       if (!trimmed || sending || disabled) return;
+      const finalText = replyContext
+        ? formatReplyText(replyContext.senderName, replyContext.preview, trimmed)
+        : trimmed;
 
       setSending(true);
       try {
-        await onSend(trimmed);
+        await onSend(finalText);
         setText('');
         setActionsOpen(false);
+        onCancelReply?.();
       } catch (err) {
         console.error('Failed to send message:', err);
         const description = err instanceof Error ? err.message : 'Check radio connection';
@@ -458,43 +487,115 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
       // Refocus after React re-enables the textarea
       setTimeout(() => textareaRef.current?.focus(), 0);
     },
-    [text, sending, disabled, onSend]
+    [text, sending, disabled, onSend, replyContext, onCancelReply]
   );
 
-  const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
-    const input = e.target;
-    const raw = input.value;
-    // Skip replacement during IME / dead-key composition to avoid garbling interim input
-    if (!e.nativeEvent || (e.nativeEvent as InputEvent).isComposing) {
-      setText(raw);
-      return;
-    }
-    if (getTextReplaceEnabled()) {
-      const result = applyTextReplacements(
-        raw,
-        input.selectionStart ?? raw.length,
-        getTextReplaceMapJson()
-      );
-      if (result) {
-        setText(result.text);
-        // Schedule cursor restore after React flushes the new value
-        const pos = result.cursor;
-        requestAnimationFrame(() => input.setSelectionRange(pos, pos));
+  // Re-derives the active "@query" (if any) from the text/cursor a change or
+  // selection just produced. Skipped when there is nothing to suggest from, so
+  // a conversation with no known names never pays for the regex scan.
+  const updateMentionQuery = useCallback(
+    (value: string, cursor: number) => {
+      if (!mentionCandidates || mentionCandidates.length === 0) {
+        setMentionQuery(null);
         return;
       }
-    }
-    setText(raw);
-  }, []);
+      setMentionQuery(findActiveMentionQuery(value, cursor));
+      setMentionActiveIndex(0);
+    },
+    [mentionCandidates]
+  );
+
+  const handleChange = useCallback(
+    (e: ChangeEvent<HTMLTextAreaElement>) => {
+      const input = e.target;
+      const raw = input.value;
+      // Skip replacement during IME / dead-key composition to avoid garbling interim input
+      if (!e.nativeEvent || (e.nativeEvent as InputEvent).isComposing) {
+        setText(raw);
+        return;
+      }
+      if (getTextReplaceEnabled()) {
+        const result = applyTextReplacements(
+          raw,
+          input.selectionStart ?? raw.length,
+          getTextReplaceMapJson()
+        );
+        if (result) {
+          setText(result.text);
+          updateMentionQuery(result.text, result.cursor);
+          // Schedule cursor restore after React flushes the new value
+          const pos = result.cursor;
+          requestAnimationFrame(() => input.setSelectionRange(pos, pos));
+          return;
+        }
+      }
+      setText(raw);
+      updateMentionQuery(raw, input.selectionStart ?? raw.length);
+    },
+    [updateMentionQuery]
+  );
+
+  // Names currently offered by the "@" popup -- recomputed from the query
+  // rather than stored, so it always agrees with the text on screen.
+  const mentionSuggestions = useMemo(
+    () =>
+      mentionQuery && mentionCandidates
+        ? filterMentionCandidates(mentionCandidates, mentionQuery.query)
+        : [],
+    [mentionQuery, mentionCandidates]
+  );
+  const mentionPopupOpen = mentionQuery !== null && mentionSuggestions.length > 0;
+
+  const selectMention = useCallback(
+    (name: string) => {
+      if (!mentionQuery) return;
+      const before = text.slice(0, mentionQuery.start);
+      const after = text.slice(mentionQuery.start + 1 + mentionQuery.query.length);
+      const insertion = `@[${name}] `;
+      setText(`${before}${insertion}${after}`);
+      setMentionQuery(null);
+      requestAnimationFrame(() => {
+        const cursor = before.length + insertion.length;
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(cursor, cursor);
+      });
+    },
+    [text, mentionQuery]
+  );
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (mentionPopupOpen) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setMentionActiveIndex((i) => (i + 1) % mentionSuggestions.length);
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setMentionActiveIndex(
+            (i) => (i - 1 + mentionSuggestions.length) % mentionSuggestions.length
+          );
+          return;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          selectMention(mentionSuggestions[mentionActiveIndex]);
+          return;
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setMentionQuery(null);
+          return;
+        }
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         handleSubmit(e as unknown as FormEvent);
       }
       // Shift+Enter falls through naturally and inserts a newline
     },
-    [handleSubmit]
+    [handleSubmit, mentionPopupOpen, mentionSuggestions, mentionActiveIndex, selectMention]
   );
 
   const canSubmit = text.trim().length > 0;
@@ -532,6 +633,27 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
       onSubmit={handleSubmit}
       autoComplete="off"
     >
+      {replyContext && (
+        <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 py-1.5 pl-3 pr-1.5">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-medium text-primary">
+              Replying to {replyContext.senderName}
+            </div>
+            <div className="truncate text-xs text-muted-foreground">{replyContext.preview}</div>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 flex-shrink-0"
+            aria-label="Cancel reply"
+            title="Cancel reply"
+            onClick={onCancelReply}
+          >
+            <X size={14} />
+          </Button>
+        </div>
+      )}
       {(imageFile || imagePreparing) && (
         <div className="rounded-lg border border-border bg-muted/30 p-3">
           <div className="flex gap-3">
@@ -831,7 +953,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
             )}
           </div>
         ) : (
-          <>
+          <div className="relative min-w-0 flex-1">
             <textarea
               ref={textareaRef}
               name="chat-message-input"
@@ -846,14 +968,45 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
               placeholder={placeholder || 'Type a message...'}
               disabled={disabled || sending}
               className={cn(
-                'flex-1 min-w-0 resize-none overflow-y-auto',
+                'w-full resize-none overflow-y-auto',
                 'rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background',
                 'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
                 'disabled:cursor-not-allowed disabled:opacity-50 md:text-sm'
               )}
               style={{ minHeight: '40px', maxHeight: '160px' }}
             />
-          </>
+            {mentionPopupOpen && (
+              <div
+                role="listbox"
+                aria-label="Mention suggestions"
+                className="absolute bottom-full left-0 z-20 mb-1 max-h-48 w-56 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-lg border border-border bg-popover p-1 text-sm text-popover-foreground shadow-lg"
+              >
+                {mentionSuggestions.map((name, index) => (
+                  <button
+                    key={name}
+                    type="button"
+                    role="option"
+                    aria-selected={index === mentionActiveIndex}
+                    className={cn(
+                      'flex w-full items-center rounded-md px-2 py-1.5 text-left transition-colors',
+                      index === mentionActiveIndex
+                        ? 'bg-accent text-accent-foreground'
+                        : 'hover:bg-accent/60'
+                    )}
+                    // mousedown (not click) fires before the textarea blurs, so the
+                    // selection/cursor this handler restores is not lost first.
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      selectMention(name);
+                    }}
+                    onMouseEnter={() => setMentionActiveIndex(index)}
+                  >
+                    @{name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
         <Button
           type="submit"

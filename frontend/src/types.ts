@@ -485,6 +485,20 @@ export interface Message {
   recovered_at?: number | null;
 }
 
+/**
+ * What the composer shows and encodes while a reply is in progress. Produced
+ * by `MessageList` (which resolves the target message's sender name and a
+ * media-aware quote), held by `ConversationPane`, and consumed by
+ * `MessageInput` to render the "Replying to" banner and to build the wire
+ * mention (`utils/meshcoreOpenPayloads.ts` `formatReplyText`).
+ */
+export interface ReplyContext {
+  /** Display name embedded as the wire mention (`@[Name]`). */
+  senderName: string;
+  /** Already-truncated, single-line quote of the message being replied to. */
+  preview: string;
+}
+
 /** One key a historical decrypt sweep tried, and what it found with it. */
 export interface DecryptSweepTarget {
   kind: 'channel' | 'contact';

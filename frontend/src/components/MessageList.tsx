@@ -7,7 +7,15 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { Channel, Contact, Message, MessagePath, RadioConfig, RawPacket } from '../types';
+import type {
+  Channel,
+  Contact,
+  Message,
+  MessagePath,
+  RadioConfig,
+  RawPacket,
+  ReplyContext,
+} from '../types';
 import { CONTACT_TYPE_ROOM } from '../types';
 import { api, type UnsupportedMediaStatus } from '../api';
 import type { AeicSessionStatus } from '../api';
@@ -17,6 +25,7 @@ import {
   parseSenderFromText,
 } from '../utils/messageParser';
 import {
+  buildReplyQuote,
   giphyUrlForId,
   parseGif,
   parseReaction,
@@ -590,6 +599,8 @@ interface MessageListProps {
   onDeleteMessage?: (message: Message) => void;
   /** Send a MeshCore Open Advanced compatible emoji reaction to a message. */
   onReactToMessage?: (message: Message, emoji: string) => void | Promise<void>;
+  /** Starts composing a reply to a message (mention + quote, see `ReplyContext`). */
+  onReplyMessage?: (context: ReplyContext) => void;
   onChannelReferenceClick?: (channelName: string) => void;
   radioName?: string;
   config?: RadioConfig | null;
@@ -681,6 +692,56 @@ function renderMeshcoreOpenPayload(
     }
   }
   return null;
+}
+
+interface ParsedReplyEnvelope {
+  mentionName: string;
+  quote: string;
+  body: string;
+}
+
+/**
+ * Recognize our/meshcore-open's full reply wire form: `"@[Name] >quote\nbody"`.
+ * A leading mention with no quote line (a plain `@[Name] ...` mention, e.g. from
+ * clicking a sender's name) is deliberately NOT matched here -- that keeps
+ * rendering as ordinary highlighted-mention text via `renderTextWithMentions`.
+ * The `newline > 1` check mirrors `clean_channel_body_for_hash` in
+ * `app/reactions.py`, which requires a non-empty quote fragment.
+ */
+function parseReplyEnvelope(content: string): ParsedReplyEnvelope | null {
+  const split = splitReplyMention(content);
+  if (!split || !split.body.startsWith('>')) return null;
+  const newline = split.body.indexOf('\n');
+  if (newline <= 1) return null;
+  const nameMatch = /^@\[([^\]]+)\]$/.exec(split.mention);
+  if (!nameMatch) return null;
+  return {
+    mentionName: nameMatch[1],
+    quote: split.body.slice(1, newline),
+    body: split.body.slice(newline + 1),
+  };
+}
+
+/** A friendly, byte-cheap label to quote when replying to non-text content. */
+function replyQuoteSource(content: string): string {
+  if (isLocalMarkerText(content)) {
+    return parseUnsupportedMediaRef(content) !== null ? 'Media' : 'Picture';
+  }
+  if (parseImageEnvelope(content) || parseAeicBinaryRef(content) || parseAeicChunk(content)) {
+    return 'Photo';
+  }
+  if (parseVoiceEnvelope(content)) return 'Voice message';
+  return content;
+}
+
+/** The small quoted-context block shown above a reply's own text. */
+function ReplyQuoteBanner({ senderName, quote }: { senderName: string; quote: string }) {
+  return (
+    <div className="mb-1 flex items-baseline gap-1.5 rounded border-l-2 border-primary/50 bg-background/40 px-2 py-1 text-xs text-muted-foreground">
+      <span className="flex-shrink-0 font-medium text-foreground/80">{senderName}</span>
+      <span className="truncate">{quote}</span>
+    </div>
+  );
 }
 
 /**
@@ -1175,6 +1236,7 @@ function MessageActionsDialog({
   onCancel,
   onDelete,
   onReact,
+  onReply,
 }: {
   message: Message;
   onClose: () => void;
@@ -1184,6 +1246,8 @@ function MessageActionsDialog({
   onDelete?: (message: Message) => void;
   /** Present only when this message can carry a reaction. */
   onReact?: (message: Message, emoji: string) => void | Promise<void>;
+  /** Starts composing a reply to this message. Present whenever reply is wired up. */
+  onReply?: () => void;
 }) {
   const status = message.outgoing ? displaySendStatus(message) : null;
   const canCancel = !!onCancel && status === 'sending';
@@ -1219,6 +1283,11 @@ function MessageActionsDialog({
           />
         )}
         <div className="flex flex-col gap-2">
+          {onReply && (
+            <Button variant="outline" onClick={run(onReply)}>
+              Reply
+            </Button>
+          )}
           {mediaLabel === null && (
             <Button variant="outline" onClick={run(() => onCopy(message))}>
               Copy text
@@ -1295,6 +1364,7 @@ export function MessageList({
   onCancelMessage,
   onDeleteMessage,
   onReactToMessage,
+  onReplyMessage,
   onChannelReferenceClick,
   radioName,
   config,
@@ -1335,7 +1405,13 @@ export function MessageList({
     isOutgoingChan?: boolean;
   } | null>(null);
   const [resendableIds, setResendableIds] = useState<Set<number>>(new Set());
-  const [actionsTarget, setActionsTarget] = useState<Message | null>(null);
+  const [actionsTarget, setActionsTarget] = useState<{
+    message: Message;
+    /** Name to embed as the reply mention -- 'You' resolved to radioName for our own messages. */
+    senderName: string;
+    /** Already-friendly source for the reply quote (raw text, or a media label). */
+    quoteSource: string;
+  } | null>(null);
   const resendTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
   const packetCacheRef = useRef<Map<number, RawPacket>>(new Map());
   const packetSignalOverrideRef = useRef<{ rssi: number | null; snr: number | null } | undefined>(
@@ -1815,14 +1891,15 @@ export function MessageList({
     [config?.name, config?.public_key, config?.lat, config?.lon, config?.path_hash_mode]
   );
 
-  // Copy / retry / cancel / delete / react: the menu only appears when the host
-  // wired at least one of them, so a read-only embedding of the list stays
-  // read-only.
+  // Copy / retry / cancel / delete / react / reply: the menu only appears when
+  // the host wired at least one of them, so a read-only embedding of the list
+  // stays read-only.
   const hasMessageActions = !!(
     onRetryMessage ||
     onCancelMessage ||
     onDeleteMessage ||
-    onReactToMessage
+    onReactToMessage ||
+    onReplyMessage
   );
 
   // Whether a MeshCore Open Advanced reaction can address this message. The
@@ -2044,14 +2121,20 @@ export function MessageList({
               msg.type === 'PRIV'
                 ? { sender: null, content: msg.text }
                 : parseSenderFromText(msg.text);
+            // A genuine reply (mention + quote line, see parseReplyEnvelope) wraps
+            // the real body -- unwrap it before any media/payload sniffing below so
+            // a reply to a photo or GIF still renders as that photo or GIF, with
+            // the quote shown separately as a banner.
+            const replyEnvelope = parseReplyEnvelope(content);
+            const effectiveContent = replyEnvelope ? replyEnvelope.body : content;
             // AEIC images ride as `aei1:` text; parsed once here so the bubble
             // dispatch below does not re-parse it per branch.
-            const aeicChunk = parseAeicChunk(content);
+            const aeicChunk = parseAeicChunk(effectiveContent);
             // An image received as binary GRP_DATA: no text crossed the air,
             // so the server left a marker for this bubble to hang off.
-            const aeicBinaryRef = parseAeicBinaryRef(content);
+            const aeicBinaryRef = parseAeicBinaryRef(effectiveContent);
             // Media the server kept but cannot decode: a box rather than silence.
-            const unsupportedMediaRef = parseUnsupportedMediaRef(content);
+            const unsupportedMediaRef = parseUnsupportedMediaRef(effectiveContent);
             const directSenderName =
               msg.type === 'PRIV' && isRoomServer ? msg.sender_name || null : null;
             const channelSenderName = msg.type === 'CHAN' ? msg.sender_name || sender : null;
@@ -2067,6 +2150,10 @@ export function MessageList({
                 (isCorruptChannelMessage
                   ? CORRUPT_SENDER_LABEL
                   : msg.conversation_key?.slice(0, 8) || 'Unknown');
+            // The name a reply TO this message would embed as its mention -- our
+            // own radio name for our own messages, since "You" means nothing on
+            // the wire to anyone else.
+            const replySenderName = msg.outgoing ? radioName || 'You' : displaySender;
 
             const canClickSender =
               !msg.outgoing &&
@@ -2228,7 +2315,11 @@ export function MessageList({
                       hasMessageActions
                         ? (e) => {
                             e.preventDefault();
-                            setActionsTarget(msg);
+                            setActionsTarget({
+                              message: msg,
+                              senderName: replySenderName,
+                              quoteSource: replyQuoteSource(effectiveContent),
+                            });
                           }
                         : undefined
                     }
@@ -2252,8 +2343,14 @@ export function MessageList({
                       </div>
                     )}
                     <div className="break-words whitespace-pre-wrap">
-                      {parseImageEnvelope(content) ? (
-                        <ImageMessage message={msg} content={content} />
+                      {replyEnvelope && (
+                        <ReplyQuoteBanner
+                          senderName={replyEnvelope.mentionName}
+                          quote={replyEnvelope.quote}
+                        />
+                      )}
+                      {parseImageEnvelope(effectiveContent) ? (
+                        <ImageMessage message={msg} content={effectiveContent} />
                       ) : unsupportedMediaRef ? (
                         <UnsupportedMediaMessage mediaId={unsupportedMediaRef} />
                       ) : aeicBinaryRef ? (
@@ -2264,12 +2361,16 @@ export function MessageList({
                         ) : (
                           <AeicImagePart chunk={aeicChunk} />
                         )
-                      ) : parseVoiceEnvelope(content) ? (
-                        <VoiceMessage message={msg} content={content} />
+                      ) : parseVoiceEnvelope(effectiveContent) ? (
+                        <VoiceMessage message={msg} content={effectiveContent} />
                       ) : (
                         (renderRichPayloads &&
-                          renderMeshcoreOpenPayload(content, radioName, onChannelReferenceClick)) ||
-                        content.split('\n').map((line, i, arr) => (
+                          renderMeshcoreOpenPayload(
+                            effectiveContent,
+                            radioName,
+                            onChannelReferenceClick
+                          )) ||
+                        effectiveContent.split('\n').map((line, i, arr) => (
                           <span key={i}>
                             {renderTextWithMentions(line, radioName, onChannelReferenceClick)}
                             {i < arr.length - 1 && <br />}
@@ -2328,7 +2429,16 @@ export function MessageList({
                               })
                           : undefined
                       }
-                      onOpenActions={hasMessageActions ? () => setActionsTarget(msg) : undefined}
+                      onOpenActions={
+                        hasMessageActions
+                          ? () =>
+                              setActionsTarget({
+                                message: msg,
+                                senderName: replySenderName,
+                                quoteSource: replyQuoteSource(effectiveContent),
+                              })
+                          : undefined
+                      }
                     />
                   </div>
                 </div>
@@ -2457,13 +2567,22 @@ export function MessageList({
       )}
       {actionsTarget && (
         <MessageActionsDialog
-          message={actionsTarget}
+          message={actionsTarget.message}
           onClose={() => setActionsTarget(null)}
           onCopy={copyMessageText}
           onRetry={onRetryMessage}
           onCancel={onCancelMessage}
           onDelete={onDeleteMessage}
-          onReact={canReactToMessage(actionsTarget) ? onReactToMessage : undefined}
+          onReact={canReactToMessage(actionsTarget.message) ? onReactToMessage : undefined}
+          onReply={
+            onReplyMessage
+              ? () =>
+                  onReplyMessage({
+                    senderName: actionsTarget.senderName,
+                    preview: buildReplyQuote(actionsTarget.quoteSource),
+                  })
+              : undefined
+          }
         />
       )}
     </div>
