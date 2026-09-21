@@ -73,7 +73,9 @@ function SettingField({
   dirty,
   result,
   disabled,
+  reading,
   onChange,
+  onRead,
 }: {
   setting: RepeaterSettingDefinition;
   value: RepeaterSettingValue | undefined;
@@ -81,7 +83,9 @@ function SettingField({
   dirty: boolean;
   result: RepeaterSettingApplyResult | undefined;
   disabled: boolean;
+  reading: boolean;
   onChange: (next: string) => void;
+  onRead: () => void;
 }) {
   const unsupported = isUnsupported(value);
   const locked = disabled || unsupported || !setting.writable;
@@ -221,6 +225,18 @@ function SettingField({
             aria-label="Changed"
           />
         )}
+        {setting.readable && (
+          <button
+            type="button"
+            className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-success disabled:pointer-events-none disabled:opacity-50"
+            disabled={disabled || reading}
+            onClick={onRead}
+            title={`Read just "${setting.label}" from the repeater`}
+            aria-label={`Read ${setting.label}`}
+          >
+            <RefreshIcon className={cn('h-3 w-3', reading && 'animate-spin')} />
+          </button>
+        )}
         {control}
       </div>
     </div>
@@ -247,9 +263,11 @@ export function SettingsEditorPane({
   onApply: (changes: RepeaterSettingChange[]) => Promise<RepeaterSettingApplyResult[]>;
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  // Which group's "Read" is in flight, and whether an apply is -- `loading`
-  // alone covers both, and the footer must not say "Applying" during a read.
+  // Which group's "Read" (or single setting's) is in flight, and whether an
+  // apply is -- `loading` alone covers both, and the footer must not say
+  // "Applying" during a read.
   const [readingGroup, setReadingGroup] = useState<string | null>(null);
+  const [readingKeys, setReadingKeys] = useState<Record<string, boolean>>({});
   const [applying, setApplying] = useState(false);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [results, setResults] = useState<Record<string, RepeaterSettingApplyResult>>({});
@@ -312,6 +330,21 @@ export function SettingsEditorPane({
   }, [dirtyChanges, onApply]);
 
   const [confirmApply, handleApply] = useArmedAction(applyChanges);
+
+  const readSetting = useCallback(
+    (key: string) => {
+      setReadingKeys((prev) => ({ ...prev, [key]: true }));
+      void onFetch({ keys: [key] }).finally(() => {
+        setReadingKeys((prev) => {
+          if (!prev[key]) return prev;
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      });
+    },
+    [onFetch]
+  );
 
   const revert = useCallback(() => {
     setDrafts({});
@@ -425,7 +458,9 @@ export function SettingsEditorPane({
                         dirty={isDirty(setting, drafts, values)}
                         result={results[setting.key]}
                         disabled={busy}
+                        reading={!!readingKeys[setting.key]}
                         onChange={(next) => handleChange(setting.key, next)}
+                        onRead={() => readSetting(setting.key)}
                       />
                     ))}
                   </div>
