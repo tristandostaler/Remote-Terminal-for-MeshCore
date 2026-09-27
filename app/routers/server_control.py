@@ -598,8 +598,14 @@ async def send_contact_cli_command(
         # cannot be pulled and mis-attributed to this one.
         await _flush_pending_messages(mc)
 
-        logger.info("Sending command to %s %s: %s", label, contact.public_key[:12], command)
-        send_result = await mc.commands.send_cmd(contact.public_key, command)
+        # The companion firmware refuses a text frame with no text bytes at all
+        # (ERR_CODE_UNSUPPORTED_CMD). A lone NUL passes that length check, and
+        # the firmware then takes strlen() of it, so a truly empty command goes
+        # over the air -- what interactive commands such as `region load` wait
+        # for to end their input loop.
+        wire_command = command if command else "\x00"
+        logger.info("Sending command to %s %s: %r", label, contact.public_key[:12], command)
+        send_result = await mc.commands.send_cmd(contact.public_key, wire_command)
 
         if send_result.type == EventType.ERROR:
             raise HTTPException(
