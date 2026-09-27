@@ -513,7 +513,9 @@ class TestRepeaterCommandRoute:
         ):
             response = await send_repeater_command(KEY_A, CommandRequest(command=""))
 
-        mc.commands.send_cmd.assert_awaited_once_with(KEY_A, "")
+        # The companion firmware rejects a text frame with no text bytes, so an
+        # empty command goes out as a lone NUL, which it forwards as empty text.
+        mc.commands.send_cmd.assert_awaited_once_with(KEY_A, "\x00")
         assert response.command == ""
         assert response.response == "OK"
 
