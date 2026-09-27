@@ -490,6 +490,34 @@ class TestRepeaterCommandRoute:
         assert response.sender_timestamp == 1700000000
 
     @pytest.mark.asyncio
+    async def test_empty_command_is_sent_to_close_interactive_prompts(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.commands.get_msg = AsyncMock(
+            return_value=_radio_result(
+                EventType.CONTACT_MSG_RECV,
+                {
+                    "pubkey_prefix": KEY_A[:12],
+                    "text": "OK",
+                    "sender_timestamp": 1700000000,
+                    "txt_type": 1,
+                },
+            )
+        )
+
+        with (
+            patch("app.routers.repeaters.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=_advancing_clock()),
+        ):
+            response = await send_repeater_command(KEY_A, CommandRequest(command=""))
+
+        mc.commands.send_cmd.assert_awaited_once_with(KEY_A, "")
+        assert response.command == ""
+        assert response.response == "OK"
+
+    @pytest.mark.asyncio
     async def test_response_strips_firmware_prompt_prefix(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)

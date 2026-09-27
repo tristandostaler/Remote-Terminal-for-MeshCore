@@ -613,6 +613,28 @@ describe('RepeaterDashboard', () => {
     expect(screen.getByText('Type a CLI command below...')).toBeInTheDocument();
   });
 
+  it('console sends an empty command to close interactive prompts', () => {
+    mockHook.loggedIn = true;
+    mockHook.sendConsoleCommand = vi.fn().mockResolvedValue(undefined);
+
+    render(<RepeaterDashboard {...defaultProps} />);
+
+    const sendButton = screen.getByRole('button', { name: 'Send' });
+    expect(sendButton).not.toBeDisabled();
+    fireEvent.click(sendButton);
+
+    expect(mockHook.sendConsoleCommand).toHaveBeenCalledWith('');
+  });
+
+  it('console shows empty commands as (empty) in history', () => {
+    mockHook.loggedIn = true;
+    mockHook.consoleHistory = [{ command: '', response: '', timestamp: 0, outgoing: true }];
+
+    render(<RepeaterDashboard {...defaultProps} />);
+
+    expect(screen.getByText('(empty)')).toBeInTheDocument();
+  });
+
   describe('path type display and reset', () => {
     it('shows flood when direct_path_len is -1', () => {
       render(<RepeaterDashboard {...defaultProps} />);
