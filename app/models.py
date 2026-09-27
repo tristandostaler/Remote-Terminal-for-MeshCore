@@ -1382,7 +1382,12 @@ class PathDiscoveryResponse(BaseModel):
 class CommandRequest(BaseModel):
     """Request to send a CLI command to a repeater."""
 
-    command: str = Field(min_length=1, description="CLI command to send")
+    command: str = Field(
+        description=(
+            "CLI command to send. May be empty: some interactive firmware commands "
+            "(e.g. region setup) wait for an empty line to finish their input loop."
+        ),
+    )
 
 
 class CommandResponse(BaseModel):

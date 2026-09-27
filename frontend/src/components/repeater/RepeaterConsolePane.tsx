@@ -34,8 +34,10 @@ export function ConsolePane({
   const handleSubmit = useCallback(
     async (e: FormEvent) => {
       e.preventDefault();
+      // An empty command is allowed on purpose: interactive firmware commands
+      // (e.g. region setup) wait for an empty line to close their input loop.
       const trimmed = input.trimStart();
-      if (!trimmed || loading) return;
+      if (loading) return;
       setInput('');
       await onSend(trimmed);
     },
@@ -57,7 +59,7 @@ export function ConsolePane({
         {history.map((entry, i) =>
           entry.outgoing ? (
             <div key={i} className="text-console-command">
-              &gt; {entry.command}
+              &gt; {entry.command || <span className="italic opacity-70">(empty)</span>}
             </div>
           ) : (
             <div key={i} className="text-console/80 whitespace-pre-wrap">
@@ -75,12 +77,12 @@ export function ConsolePane({
           name="console-input"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="CLI command..."
+          placeholder="CLI command... (Enter on empty line sends an empty command)"
           aria-label="Console command"
           disabled={loading}
           className="flex-1 font-mono text-sm"
         />
-        <Button type="submit" size="sm" disabled={loading || !input.trimStart()}>
+        <Button type="submit" size="sm" disabled={loading}>
           Send
         </Button>
       </form>
