@@ -34,12 +34,14 @@ export function ConsolePane({
   const handleSubmit = useCallback(
     async (e: FormEvent) => {
       e.preventDefault();
-      // An empty command is allowed on purpose: interactive firmware commands
-      // (e.g. region setup) wait for an empty line to close their input loop.
-      const trimmed = input.trimStart();
+      // Send exactly what was typed. An empty line is allowed on purpose:
+      // interactive firmware commands (e.g. `region load`) wait for one to
+      // close their input loop, and leading spaces are the indentation that
+      // `region load` reads as nesting, so they must not be trimmed either.
       if (loading) return;
+      const command = input;
       setInput('');
-      await onSend(trimmed);
+      await onSend(command);
     },
     [input, loading, onSend]
   );
@@ -58,7 +60,7 @@ export function ConsolePane({
         )}
         {history.map((entry, i) =>
           entry.outgoing ? (
-            <div key={i} className="text-console-command">
+            <div key={i} className="text-console-command whitespace-pre-wrap">
               &gt; {entry.command || <span className="italic opacity-70">(empty)</span>}
             </div>
           ) : (

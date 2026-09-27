@@ -626,6 +626,22 @@ describe('RepeaterDashboard', () => {
     expect(mockHook.sendConsoleCommand).toHaveBeenCalledWith('');
   });
 
+  it('console sends spaces verbatim instead of trimming them to an empty command', () => {
+    mockHook.loggedIn = true;
+    mockHook.sendConsoleCommand = vi.fn().mockResolvedValue(undefined);
+
+    render(<RepeaterDashboard {...defaultProps} />);
+
+    const input = screen.getByLabelText('Console command');
+    fireEvent.change(input, { target: { value: '     ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(mockHook.sendConsoleCommand).toHaveBeenLastCalledWith('     ');
+
+    fireEvent.change(input, { target: { value: '  child F' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(mockHook.sendConsoleCommand).toHaveBeenLastCalledWith('  child F');
+  });
+
   it('console shows empty commands as (empty) in history', () => {
     mockHook.loggedIn = true;
     mockHook.consoleHistory = [{ command: '', response: '', timestamp: 0, outgoing: true }];
