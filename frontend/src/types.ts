@@ -1441,6 +1441,8 @@ export interface LiveTraceRoute {
   snr: number | null;
   rssi: number | null;
   hops: LiveTraceHop[];
+  /** This observation's page on the live feed instance; null for this node's receptions. */
+  live_url: string | null;
 }
 
 export interface LiveCompareTrace {

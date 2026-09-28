@@ -233,6 +233,9 @@ class TestLiveOnlyTrace:
         # Ordered by when each observer heard it.
         assert [r["receiver"]["name"] for r in routes] == ["Obs Two", "Obs One"]
         two, one = routes
+        # Each observer route deep-links to its own observation on the instance.
+        assert one["live_url"] == f"https://live.example.test/#/packets/{HASH}?obs=1"
+        assert two["live_url"] == f"https://live.example.test/#/packets/{HASH}?obs=2"
 
         assert one["region"] == "YUL"
         assert one["heard_at"] == NOW + 2
@@ -298,6 +301,8 @@ class TestLiveOnlyTrace:
         assert trace is not None
         assert "HTTP 404" in (trace["live_error"] or "")
         assert [r["kind"] for r in trace["routes"]] == ["node"]
+        # This node's own reception is not on the instance.
+        assert trace["routes"][0]["live_url"] is None
         assert trace["heard_by_node"] is True
         assert instance.calls("/api/resolve-hops") == []
 

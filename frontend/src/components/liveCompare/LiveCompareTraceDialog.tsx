@@ -7,9 +7,12 @@
  * by hop with the relays named, plus a map of all of it. A one-line reading
  * at the top says the thing the operator opened it for: did the message get
  * anywhere near this antenna, or was it only ever relayed elsewhere?
+ *
+ * Each observer's route links to that very observation on the instance.
+ * Clicking a node on the map picks out the routes through it in the list.
  */
 
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { ExternalLink, Radio, RadioTower } from 'lucide-react';
 
 import { api, isAbortError } from '../../api';
@@ -26,6 +29,7 @@ import type {
 } from '../../types';
 import { SourceBadge, liveHostLabel } from './liveCompareShared';
 import { hopTitle, nodeName, readTrace, receiverName, routeColour } from './liveTraceShared';
+import type { MapPoint } from './LiveTraceMap';
 
 const LiveTraceMap = lazy(() =>
   import('./LiveTraceMap').then((m) => ({ default: m.LiveTraceMap }))
@@ -41,11 +45,14 @@ export function LiveCompareTraceDialog({ message, open, onClose }: LiveCompareTr
   const { distanceUnit } = useDistanceUnit();
   const [trace, setTrace] = useState<LiveCompareTrace | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectedPoint, setSelectedPoint] = useState<MapPoint | null>(null);
+  const routesRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     setTrace(null);
     setError(null);
+    setSelectedPoint(null);
     api
       .getLiveCompareTrace(
         {
@@ -66,6 +73,17 @@ export function LiveCompareTraceDialog({ message, open, onClose }: LiveCompareTr
 
   const reading = trace ? readTrace(trace, distanceUnit) : null;
   let observerIndex = 0;
+
+  const selectPoint = (point: MapPoint | null) => {
+    setSelectedPoint(point);
+    if (!point || point.routes.length === 0) return;
+    // Bring the first route through the node into view; the rest sit near it.
+    requestAnimationFrame(() => {
+      routesRef.current
+        ?.querySelector<HTMLElement>(`[data-route-index="${point.routes[0]}"]`)
+        ?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+    });
+  };
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
@@ -128,21 +146,56 @@ export function LiveCompareTraceDialog({ message, open, onClose }: LiveCompareTr
                     />
                   }
                 >
-                  <LiveTraceMap trace={trace} />
+                  <LiveTraceMap
+                    trace={trace}
+                    selectedKey={selectedPoint?.key ?? null}
+                    onSelectPoint={selectPoint}
+                  />
                 </Suspense>
               )}
 
-              <ul className="space-y-2" data-testid="live-trace-routes">
+              {selectedPoint && (
+                <div
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/40 bg-primary/5 px-3 py-1.5 text-xs"
+                  data-testid="live-trace-selection"
+                >
+                  <span>
+                    <span className="font-medium">{selectedPoint.name}</span>
+                    {' · '}
+                    {selectedPoint.routes.length === 0
+                      ? 'no route below goes through it'
+                      : `on ${selectedPoint.routes.length} of ${trace.routes.length} route${
+                          trace.routes.length === 1 ? '' : 's'
+                        }`}
+                  </span>
+                  <button
+                    type="button"
+                    className="text-primary hover:underline"
+                    onClick={() => setSelectedPoint(null)}
+                  >
+                    Show all routes
+                  </button>
+                </div>
+              )}
+
+              <ul ref={routesRef} className="space-y-2" data-testid="live-trace-routes">
                 {trace.routes.map((route, index) => {
                   const colour = routeColour(route, observerIndex);
                   if (route.kind === 'observer') observerIndex += 1;
+                  const highlight = selectedPoint
+                    ? selectedPoint.routes.includes(index)
+                      ? 'on'
+                      : 'off'
+                    : null;
                   return (
                     <RouteCard
                       key={index}
+                      index={index}
                       route={route}
                       colour={colour}
                       trace={trace}
                       distanceUnit={distanceUnit}
+                      highlight={highlight}
                     />
                   );
                 })}
@@ -190,24 +243,35 @@ function signalLine(route: LiveTraceRoute): string {
 }
 
 function RouteCard({
+  index,
   route,
   colour,
   trace,
   distanceUnit,
+  highlight,
 }: {
+  index: number;
   route: LiveTraceRoute;
   colour: string;
   trace: LiveCompareTrace;
   distanceUnit: ReturnType<typeof useDistanceUnit>['distanceUnit'];
+  /** 'on' when it goes through the node picked on the map, 'off' when not. */
+  highlight: 'on' | 'off' | null;
 }) {
   const Icon = route.kind === 'node' ? Radio : RadioTower;
   const who = receiverName(route);
   return (
     <li
-      className="rounded-md border border-border p-2 text-sm"
+      className={cn(
+        'rounded-md border border-border p-2 text-sm transition-opacity',
+        highlight === 'on' && 'ring-2 ring-primary/60',
+        highlight === 'off' && 'opacity-40'
+      )}
       style={{ borderLeft: `3px solid ${colour}` }}
       data-testid="live-trace-route"
       data-kind={route.kind}
+      data-route-index={index}
+      data-highlight={highlight ?? undefined}
     >
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <span className="inline-flex items-center gap-1.5 font-medium">
@@ -235,6 +299,18 @@ function RouteCard({
         )}
         <span className="text-muted-foreground">→ {who}</span>
       </div>
+      {route.live_url && (
+        <a
+          href={route.live_url}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-1.5 inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          data-testid="live-trace-route-link"
+        >
+          Open this observation on {liveHostLabel(route.live_url)}
+          <ExternalLink className="h-3 w-3" aria-hidden="true" />
+        </a>
+      )}
     </li>
   );
 }
