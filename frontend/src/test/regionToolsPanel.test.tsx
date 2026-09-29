@@ -59,4 +59,22 @@ describe('RegionToolsPanel', () => {
       ]);
     });
   });
+
+  it('loads region codes from the live feed and previews them', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      okJson({
+        url: 'https://live.meshcore.ca',
+        regions: [
+          { code: 'YUL', label: 'Montreal' },
+          { code: 'YYZ', label: 'Toronto' },
+        ],
+      })
+    );
+    render(<RegionToolsPanel onAddRegions={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Load from live feed' }));
+
+    await waitFor(() => expect(screen.getByText(/YUL\s+YYZ/)).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Check against packets' })).toBeInTheDocument();
+  });
 });

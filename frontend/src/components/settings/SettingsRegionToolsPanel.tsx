@@ -68,6 +68,22 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
     }
   };
 
+  const loadFromLiveFeed = async () => {
+    setImporting(true);
+    try {
+      const data = await api.getLiveFeedRegions();
+      const names = data.regions.map((r) => r.code).filter(Boolean);
+      setImported({ url: data.url, names, already_known: [] });
+      if (names.length === 0) toast.info('The live feed reported no regions');
+    } catch (err) {
+      toast.error('Failed to load regions from the live feed', {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <div className="space-y-3 rounded-md border border-input bg-muted/20 p-3">
       <div className="space-y-2">
@@ -149,6 +165,21 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
           >
             {importing ? 'Fetching...' : 'Fetch'}
           </Button>
+        </div>
+        <div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void loadFromLiveFeed()}
+            disabled={importing}
+          >
+            Load from live feed
+          </Button>
+          <span className="ml-2 text-xs text-muted-foreground">
+            The regions (IATA codes) known to your configured live feed instance, e.g.
+            live.meshcore.ca.
+          </span>
         </div>
         <p className="text-[0.8125rem] text-muted-foreground">
           Fetches a public page (JSON, HTML, CSV or plain text) and lists the region-like names on
