@@ -237,6 +237,29 @@ class TestMessageSearch:
         assert [message.text for message in results] == ["hello flightless"]
 
     @pytest.mark.asyncio
+    async def test_search_region_operator(self, test_db):
+        for i, (text, region) in enumerate(
+            [("hello nl", "nl-gr"), ("hello fr", "fr"), ("hello unscoped", None)]
+        ):
+            await MessageRepository.create(
+                msg_type="CHAN",
+                text=text,
+                conversation_key=CHAN_KEY,
+                sender_timestamp=100 + i,
+                received_at=100 + i,
+                region=region,
+            )
+
+        results = await MessageRepository.get_all(q="region:NL-GR")
+        assert [m.text for m in results] == ["hello nl"]
+
+        results = await MessageRepository.get_all(q="region:none")
+        assert [m.text for m in results] == ["hello unscoped"]
+
+        results = await MessageRepository.get_all(q="region:fr hello")
+        assert [m.text for m in results] == ["hello fr"]
+
+    @pytest.mark.asyncio
     async def test_search_channel_operator_matches_quoted_name_with_spaces(self, test_db):
         await ChannelRepository.upsert(key=CHAN_KEY, name="#Ops Room", is_hashtag=True)
         await ChannelRepository.upsert(key=OTHER_CHAN_KEY, name="#Other Room", is_hashtag=True)

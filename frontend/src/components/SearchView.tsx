@@ -253,7 +253,8 @@ export function SearchView({
             <p>Type to search across all messages</p>
             <p className="mt-2 text-xs">
               Tip: use <code>user:</code> or <code>channel:</code> for keys or names, and wrap names
-              with spaces in them in quotes.
+              with spaces in them in quotes. Use <code>region:</code> to filter by region scope (
+              <code>region:none</code> for messages with no region).
             </p>
             <p className="mt-2 text-xs">
               Warning: User-key linkage for group messages is best-effort and based on correlation
