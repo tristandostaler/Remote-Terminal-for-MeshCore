@@ -1,4 +1,8 @@
+import { useState } from 'react';
 import { RepeaterPane, NotFetched } from './repeaterPaneShared';
+import { Button } from '../ui/button';
+import { toast } from '../ui/sonner';
+import { api } from '../../api';
 import { cn } from '@/lib/utils';
 import type { RepeaterRegionsResponse, PaneState } from '../../types';
 
@@ -13,6 +17,32 @@ export function RegionsPane({
   onRefresh: () => void;
   disabled?: boolean;
 }) {
+  const [adding, setAdding] = useState(false);
+  const addableNames = (data?.regions ?? []).map((r) => r.name).filter((n) => n && n !== '*');
+
+  const handleAddToKnownRegions = async () => {
+    setAdding(true);
+    try {
+      const current = (await api.getSettings()).known_regions ?? [];
+      const seen = new Set(current.map((n) => n.toLowerCase()));
+      const additions = addableNames.filter((n) => !seen.has(n.toLowerCase()));
+      if (additions.length === 0) {
+        toast.info('All of these regions are already in Known Regions');
+        return;
+      }
+      await api.updateSettings({ known_regions: [...current, ...additions] });
+      toast.success(
+        `Added ${additions.length} region${additions.length === 1 ? '' : 's'} to Known Regions`
+      );
+    } catch (err) {
+      toast.error('Failed to update Known Regions', {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setAdding(false);
+    }
+  };
+
   const headerNote = data?.truncated
     ? 'List truncated by the radio — showing the first regions only'
     : data?.source === 'anon'
@@ -67,6 +97,19 @@ export function RegionsPane({
               </span>
             </div>
           ))}
+          {addableNames.length > 0 && (
+            <div className="pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleAddToKnownRegions}
+                disabled={adding}
+              >
+                {adding ? 'Adding...' : 'Add to Known Regions'}
+              </Button>
+            </div>
+          )}
         </div>
       )}
     </RepeaterPane>
