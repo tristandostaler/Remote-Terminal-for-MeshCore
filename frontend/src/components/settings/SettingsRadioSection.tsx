@@ -141,6 +141,19 @@ function RadioDetailsCollapsible({ stats }: { stats: RadioStatsSnapshot }) {
   );
 }
 
+/** Trim, drop blanks and a leading '#', and dedupe case-insensitively (first spelling wins). */
+function dedupeRegionNames(names: string[], alreadyListed: string[] = []): string[] {
+  const seen = new Set(alreadyListed.map((n) => n.toLowerCase()));
+  const out: string[] = [];
+  for (const raw of names) {
+    const name = raw.trim().replace(/^#\s*/, '');
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    out.push(name);
+  }
+  return out;
+}
+
 export function SettingsRadioSection({
   config,
   health,
@@ -486,10 +499,7 @@ export function SettingsRadioSection({
         update.flood_scope = floodScope;
       }
       // Known regions: one per line (commas also accepted), trimmed, blanks dropped.
-      const parsedRegions = knownRegions
-        .split(/[\n,]/)
-        .map((r) => r.trim())
-        .filter((r) => r.length > 0);
+      const parsedRegions = dedupeRegionNames(knownRegions.split(/[\n,]/));
       if (JSON.stringify(parsedRegions) !== JSON.stringify(appSettings.known_regions ?? [])) {
         update.known_regions = parsedRegions;
       }
@@ -570,12 +580,8 @@ export function SettingsRadioSection({
   };
 
   const addRegionsToDraft = (names: string[]) => {
-    const existing = knownRegions
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const seen = new Set(existing.map((s) => s.toLowerCase()));
-    const additions = names.filter((r) => !seen.has(r.toLowerCase()));
+    const existing = dedupeRegionNames(knownRegions.split(/[\n,]/));
+    const additions = dedupeRegionNames(names, existing);
     if (additions.length === 0) {
       toast.info('All discovered regions are already listed');
       return;
