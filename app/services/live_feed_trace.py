@@ -25,6 +25,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote
 
 from app.models import Contact
 from app.path_utils import split_path_hex
@@ -403,6 +404,7 @@ async def get_trace(
                     "snr": path.snr,
                     "rssi": float(path.rssi) if path.rssi is not None else None,
                     "hops": hops,
+                    "live_url": None,
                 }
             )
         if not message.paths and not message.outgoing:
@@ -416,6 +418,7 @@ async def get_trace(
                     "snr": None,
                     "rssi": None,
                     "hops": (),
+                    "live_url": None,
                 }
             )
 
@@ -425,6 +428,7 @@ async def get_trace(
     remote_hash = packet_hash or (live_row or {}).get("packet_hash")
     url = settings.live_feed_url.rstrip("/")
     is_remote_hash = bool(remote_hash) and not str(remote_hash).startswith("syn:")
+    packet_url = f"{url}/#/packets/{remote_hash}" if is_remote_hash else None
 
     resolutions: dict[tuple[str, ...], dict[str, _RemoteHop]] = {}
     async with LiveFeedClient(url, settings.live_feed_region) as client:
@@ -461,6 +465,13 @@ async def get_trace(
                         receiver["direct_neighbour"] = known.direct_path_len == 0
                         if not _valid_location(receiver["lat"], receiver["lon"]):
                             receiver["lat"], receiver["lon"] = known.lat, known.lon
+                    # CoreScope selects one observation of a packet with ?obs=<row id>.
+                    observation_id = observation.get("id")
+                    route_url = (
+                        f"{packet_url}?obs={quote(str(observation_id), safe='')}"
+                        if packet_url and observation_id not in (None, "")
+                        else packet_url
+                    )
                     observer_routes.append(
                         {
                             "kind": "observer",
@@ -470,6 +481,7 @@ async def get_trace(
                             "snr": _coerce_float(observation.get("snr")),
                             "rssi": _coerce_float(observation.get("rssi")),
                             "hops": hops,
+                            "live_url": route_url,
                             "_server_keys": server_keys,
                         }
                     )
@@ -504,7 +516,7 @@ async def get_trace(
 
     return {
         "packet_hash": remote_hash,
-        "live_url": f"{url}/#/packets/{remote_hash}" if is_remote_hash else None,
+        "live_url": packet_url,
         "message_id": message.id if message else None,
         "heard_by_node": message is not None,
         "outgoing": bool(message.outgoing) if message else False,

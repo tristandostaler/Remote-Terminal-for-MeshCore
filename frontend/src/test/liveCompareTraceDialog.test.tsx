@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { LiveCompareTraceDialog } from '../components/liveCompare/LiveCompareTraceDialog';
@@ -11,8 +11,16 @@ vi.mock('react-leaflet', () => ({
     <div data-testid="map-container">{children}</div>
   ),
   TileLayer: () => null,
-  Marker: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="map-marker">{children}</div>
+  Marker: ({
+    children,
+    eventHandlers,
+  }: {
+    children: React.ReactNode;
+    eventHandlers?: { click?: () => void };
+  }) => (
+    <div data-testid="map-marker" onClick={() => eventHandlers?.click?.()}>
+      {children}
+    </div>
   ),
   Polyline: ({ children }: { children: React.ReactNode }) => (
     <div data-testid="map-line">{children}</div>
@@ -84,6 +92,7 @@ function trace(overrides: Partial<LiveCompareTrace>): LiveCompareTrace {
     routes: [
       {
         kind: 'observer',
+        live_url: `https://live.meshcore.ca/#/packets/${HASH}?obs=41`,
         receiver: observer,
         region: 'YUL',
         heard_at: 1_700_000_002,
@@ -172,6 +181,63 @@ describe('LiveCompareTraceDialog', () => {
     expect(
       screen.getByRole('link', { name: /Open this packet on live.meshcore.ca/ })
     ).toHaveAttribute('href', `https://live.meshcore.ca/#/packets/${HASH}`);
+    // The route itself deep-links to its observation.
+    expect(within(routes[0]).getByTestId('live-trace-route-link')).toHaveAttribute(
+      'href',
+      `https://live.meshcore.ca/#/packets/${HASH}?obs=41`
+    );
+  });
+
+  it('picks out the routes through a node clicked on the map', async () => {
+    const other = node({ public_key: '0c'.repeat(32), name: 'Obs Two', lat: 45.7, lon: -73.9 });
+    mockTrace(
+      trace({
+        routes: [
+          ...trace({}).routes,
+          {
+            kind: 'observer',
+            live_url: `https://live.meshcore.ca/#/packets/${HASH}?obs=42`,
+            receiver: other,
+            region: 'YUL',
+            heard_at: 1_700_000_003,
+            snr: null,
+            rssi: null,
+            hops: [],
+          },
+        ],
+      })
+    );
+    render(<LiveCompareTraceDialog message={liveOnly} open onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId('live-trace-map')).toBeInTheDocument());
+
+    const routes = screen.getAllByTestId('live-trace-route');
+    expect(routes).toHaveLength(2);
+    expect(routes[0]).not.toHaveAttribute('data-highlight');
+
+    // Delta (hop 2) only sits on the first observer's route.
+    const deltaMarker = screen
+      .getAllByTestId('map-marker')
+      .find((m) => m.textContent?.includes('hop 2 of 3'))!;
+    fireEvent.click(deltaMarker);
+
+    const banner = screen.getByTestId('live-trace-selection');
+    expect(banner).toHaveTextContent('Delta · on 1 of 2 routes');
+    expect(routes[0]).toHaveAttribute('data-highlight', 'on');
+    expect(routes[1]).toHaveAttribute('data-highlight', 'off');
+    // The highlighted route still leads on to the instance.
+    expect(within(routes[0]).getByTestId('live-trace-route-link')).toHaveAttribute(
+      'href',
+      `https://live.meshcore.ca/#/packets/${HASH}?obs=41`
+    );
+
+    // Clicking the same node again clears the selection.
+    fireEvent.click(deltaMarker);
+    expect(screen.queryByTestId('live-trace-selection')).not.toBeInTheDocument();
+    expect(routes[1]).not.toHaveAttribute('data-highlight');
+
+    fireEvent.click(deltaMarker);
+    fireEvent.click(screen.getByRole('button', { name: 'Show all routes' }));
+    expect(screen.queryByTestId('live-trace-selection')).not.toBeInTheDocument();
   });
 
   it('sends the message id for a node-only row and reads its own routes', async () => {
@@ -184,6 +250,7 @@ describe('LiveCompareTraceDialog', () => {
         routes: [
           {
             kind: 'node',
+            live_url: null,
             receiver: self,
             region: null,
             heard_at: 1_700_000_004,
@@ -212,6 +279,7 @@ describe('LiveCompareTraceDialog', () => {
     expect(route).toHaveTextContent('My radio (this node)');
     expect(route).toHaveTextContent('direct');
     expect(screen.queryByRole('link', { name: /Open this packet/ })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('live-trace-route-link')).not.toBeInTheDocument();
   });
 
   it('shows a live feed failure without hiding the node side', async () => {
@@ -223,6 +291,7 @@ describe('LiveCompareTraceDialog', () => {
         routes: [
           {
             kind: 'node',
+            live_url: null,
             receiver: self,
             region: null,
             heard_at: 1_700_000_004,
@@ -270,6 +339,7 @@ describe('readTrace', () => {
         routes: [
           {
             kind: 'observer',
+            live_url: null,
             receiver: observer,
             region: 'YUL',
             heard_at: 1,
@@ -297,6 +367,7 @@ describe('readTrace', () => {
         routes: [
           {
             kind: 'observer',
+            live_url: null,
             receiver: observer,
             region: null,
             heard_at: 1,
@@ -306,6 +377,7 @@ describe('readTrace', () => {
           },
           {
             kind: 'observer',
+            live_url: null,
             receiver: observer,
             region: null,
             heard_at: 2,
@@ -338,6 +410,7 @@ describe('buildMapLayers', () => {
         routes: [
           {
             kind: 'node',
+            live_url: null,
             receiver: self,
             region: null,
             heard_at: 1,
@@ -355,6 +428,7 @@ describe('buildMapLayers', () => {
           },
           {
             kind: 'observer',
+            live_url: null,
             receiver: observer,
             region: null,
             heard_at: 2,
@@ -383,5 +457,12 @@ describe('buildMapLayers', () => {
     expect(lines[0].positions).toHaveLength(3);
     expect(lines[1]).toMatchObject({ dashed: true, title: 'Heard by Obs One' });
     expect(lines[1].positions).toHaveLength(3);
+    // Each marker knows the routes it sits on: the sender starts them all.
+    expect(Object.fromEntries(points.map((p) => [p.label, p.routes]))).toEqual({
+      me: [0],
+      S: [0, 1],
+      '1': [0, 1],
+      O: [1],
+    });
   });
 });

@@ -2188,6 +2188,10 @@ class LiveTraceRoute(BaseModel):
     snr: float | None = None
     rssi: float | None = None
     hops: list[LiveTraceHop] = Field(default_factory=list)
+    live_url: str | None = Field(
+        default=None,
+        description="This observation's page on the instance; null for this node's own receptions",
+    )
 
 
 class LiveCompareTrace(BaseModel):
