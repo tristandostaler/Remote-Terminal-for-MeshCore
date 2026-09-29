@@ -23,6 +23,8 @@ import type {
   RadioConfigUpdate,
   RadioDiscoveryResponse,
   RadioRegionDiscoveryResponse,
+  GuessRegionsResponse,
+  ImportRegionsResponse,
   RadioTraceHopRequest,
   RadioTraceResponse,
   RadioDiscoveryTarget,
@@ -366,6 +368,16 @@ export const api = {
     fetchJson<RadioRegionDiscoveryResponse>('/radio/discover-regions', {
       method: 'POST',
       body: JSON.stringify(publicKeys && publicKeys.length > 0 ? { public_keys: publicKeys } : {}),
+    }),
+  guessRegions: (candidates: string[] = [], includeBuiltin = true) =>
+    fetchJson<GuessRegionsResponse>('/settings/regions/guess', {
+      method: 'POST',
+      body: JSON.stringify({ candidates, include_builtin: includeBuiltin }),
+    }),
+  importRegions: (url: string) =>
+    fetchJson<ImportRegionsResponse>('/settings/regions/import', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
     }),
   requestRadioTrace: (hopHashBytes: 1 | 2 | 4, hops: RadioTraceHopRequest[]) =>
     fetchJson<RadioTraceResponse>('/radio/trace', {

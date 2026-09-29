@@ -4,6 +4,7 @@ import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Button } from '../ui/button';
 import { Separator } from '../ui/separator';
+import { RegionToolsPanel } from './SettingsRegionToolsPanel';
 import { toast } from '../ui/sonner';
 import { Checkbox } from '../ui/checkbox';
 import {
@@ -565,12 +566,16 @@ export function SettingsRadioSection({
 
   const handleAddDiscoveredRegions = () => {
     if (!regionDiscovery || regionDiscovery.regions.length === 0) return;
+    addRegionsToDraft(regionDiscovery.regions);
+  };
+
+  const addRegionsToDraft = (names: string[]) => {
     const existing = knownRegions
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
     const seen = new Set(existing.map((s) => s.toLowerCase()));
-    const additions = regionDiscovery.regions.filter((r) => !seen.has(r.toLowerCase()));
+    const additions = names.filter((r) => !seen.has(r.toLowerCase()));
     if (additions.length === 0) {
       toast.info('All discovered regions are already listed');
       return;
@@ -1419,6 +1424,8 @@ export function SettingsRadioSection({
           )}
         </div>
       </div>
+
+      <RegionToolsPanel onAddRegions={addRegionsToDraft} />
 
       <div className="space-y-2">
         <Label htmlFor="auto-discover-regions">Auto-discover regions</Label>

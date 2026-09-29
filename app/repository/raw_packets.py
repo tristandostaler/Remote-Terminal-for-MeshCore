@@ -55,6 +55,16 @@ class RawPacketRepository:
         return (existing["id"], False)
 
     @staticmethod
+    async def recent_data(limit: int) -> list[bytes]:
+        """Return the raw bytes of the ``limit`` most recent packets, newest first."""
+        async with db.readonly() as conn:
+            async with conn.execute(
+                "SELECT data FROM raw_packets ORDER BY timestamp DESC LIMIT ?", (limit,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [bytes(row["data"]) for row in rows]
+
+    @staticmethod
     async def get_undecrypted_count() -> int:
         """Get count of undecrypted packets (those without a linked message)."""
         async with db.readonly() as conn:
