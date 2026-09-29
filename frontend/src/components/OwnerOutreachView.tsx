@@ -15,7 +15,7 @@ import { AlertTriangle, BarChart3, Copy, MessageSquare, RefreshCw, Router } from
 import { api, isAbortError } from '../api';
 import { ContactAvatar } from './ContactAvatar';
 import { toast } from './ui/sonner';
-import { OwnerHints, OwnerNotesEditor } from './nodeStats/OwnerStats';
+import { FetchOwnerInfoButton, OwnerHints, OwnerNotesEditor } from './nodeStats/OwnerStats';
 import { formatDateTime, formatDuration } from './nodeStats/nodeStatsShared';
 import { driftSeverityTextClass, formatDrift, formatDriftSigned } from '../utils/clockDrift';
 import { getContactDisplayName } from '../utils/pubkey';
@@ -139,7 +139,7 @@ function OutreachCard({
           <p className="text-xs text-muted-foreground">
             No owner known yet.{' '}
             {type === CONTACT_TYPE_REPEATER || type === CONTACT_TYPE_ROOM
-              ? 'The background refresh will ask the node; add anything you find below.'
+              ? 'Fetch it now, or let the background refresh ask the node. Add anything you find below.'
               : type === 1
                 ? 'This is a chat node, so a direct message reaches its owner.'
                 : 'Add anything you find below.'}
@@ -153,6 +153,9 @@ function OutreachCard({
           <Copy className="h-3.5 w-3.5" aria-hidden="true" />
           Copy message
         </button>
+        {(type === CONTACT_TYPE_REPEATER || type === CONTACT_TYPE_ROOM) && (
+          <FetchOwnerInfoButton publicKey={item.public_key} onChange={onOwnerChange} />
+        )}
         <button
           type="button"
           className={actionClass}

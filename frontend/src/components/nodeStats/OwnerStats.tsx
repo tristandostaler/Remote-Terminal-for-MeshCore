@@ -7,11 +7,12 @@
  * carries the owner record, and a save hands the updated record back up through
  * `onChange` so the page stays one snapshot.
  *
- * `OwnerHints` and `OwnerNotesEditor` are shared with the owner outreach view.
+ * `OwnerHints`, `OwnerNotesEditor` and `FetchOwnerInfoButton` are shared with
+ * the owner outreach view.
  */
 
 import { useEffect, useState } from 'react';
-import { AtSign, Globe, Mail, Radio } from 'lucide-react';
+import { AtSign, CloudDownload, Globe, Loader2, Mail, Radio } from 'lucide-react';
 
 import { api } from '../../api';
 import { Button } from '../ui/button';
@@ -84,6 +85,69 @@ export function OwnerHints({ hints }: { hints: ContactOwnerHint[] }) {
         );
       })}
     </ul>
+  );
+}
+
+/**
+ * Asks the node for its owner info right now (guest login + request, the same
+ * path as the background refresh) and reports the saved record upward. A node
+ * that does not answer is a normal outcome, so it is a toast, not an error state.
+ */
+export function FetchOwnerInfoButton({
+  publicKey,
+  onChange,
+  className,
+}: {
+  publicKey: string;
+  onChange: (next: ContactOwnerInfo) => void;
+  className?: string;
+}) {
+  const [fetching, setFetching] = useState(false);
+
+  const fetchNow = async () => {
+    setFetching(true);
+    try {
+      const next = await api.refreshContactOwner(publicKey);
+      onChange(next);
+      if (next.attempt_status === 'ok') {
+        toast.success(
+          next.firmware_owner_info ? 'Owner info updated' : 'The node has no owner info set'
+        );
+      } else {
+        toast.error('Could not fetch owner info', {
+          description:
+            next.attempt_status === 'login_failed'
+              ? 'The node refused the login.'
+              : 'The node did not answer. It may be out of range; try again later.',
+        });
+      }
+    } catch (err) {
+      toast.error('Could not fetch owner info', {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={() => void fetchNow()}
+      disabled={fetching}
+      title="Log in to the node and ask for its owner info now"
+      className={
+        className ??
+        'inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60'
+      }
+    >
+      {fetching ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+      ) : (
+        <CloudDownload className="h-3.5 w-3.5" aria-hidden="true" />
+      )}
+      {fetching ? 'Fetching owner info…' : 'Fetch owner info'}
+    </button>
   );
 }
 
@@ -206,7 +270,7 @@ export function OwnerStats({
               <p className="text-sm text-muted-foreground">
                 {owner.fetched_at !== null
                   ? 'The node answered with no owner info set.'
-                  : 'Not fetched yet. Open the repeater and load Owner Info, or wait for the background refresh.'}
+                  : 'Not fetched yet. Fetch it now, or wait for the background refresh.'}
               </p>
             )}
             <div className="mt-2 space-y-0.5">
@@ -222,6 +286,9 @@ export function OwnerStats({
                   value={`${formatDateTime(owner.attempted_at)} — ${attempt}`}
                 />
               )}
+            </div>
+            <div className="mt-3">
+              <FetchOwnerInfoButton publicKey={owner.public_key} onChange={onChange} />
             </div>
           </div>
         )}

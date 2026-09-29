@@ -754,6 +754,41 @@ async def get_contact_owner(public_key: str) -> ContactOwnerInfo:
     return await ContactOwnerRepository.get(contact.public_key, name=contact.name)
 
 
+@router.post("/{public_key}/owner/refresh", response_model=ContactOwnerInfo)
+async def refresh_contact_owner(public_key: str) -> ContactOwnerInfo:
+    """Ask a repeater or room for its owner info now, the same way the sweep does.
+
+    Guest login for a repeater. A room needs its room-poll credential stored:
+    logging in makes a room push its post history, which for a room this
+    radio never joined would fill a new conversation (see owner_info_sweep).
+    The outcome is in the returned ``attempt_status``; a node that does not
+    answer is a normal result, not an error.
+    """
+    from app.repository.room_poll import RoomPollRepository
+    from app.services.owner_info_sweep import refresh_owner_info
+
+    radio_manager.require_connected()
+    contact = await _resolve_contact_or_404(public_key)
+    if contact.type not in (2, 3):
+        raise HTTPException(
+            status_code=400, detail="Only repeaters and room servers report owner info"
+        )
+    credential: str | None = None
+    if contact.type == 3:
+        sub = await RoomPollRepository.get(contact.public_key)
+        if sub is None or sub.credential is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Open the room and turn on 'Keep this room synced' first: logging in "
+                    "makes a room push its post history"
+                ),
+            )
+        credential = sub.credential
+    await refresh_owner_info(contact.public_key, credential, blocking=True)
+    return await ContactOwnerRepository.get(contact.public_key, name=contact.name)
+
+
 @router.patch("/{public_key}/owner", response_model=ContactOwnerInfo)
 async def update_contact_owner(
     public_key: str, request: ContactOwnerUpdateRequest

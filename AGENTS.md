@@ -382,6 +382,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | GET | `/api/contacts/{public_key}/telemetry-history` | Stored LPP telemetry history for a contact (read-only, no radio access) |
 | GET | `/api/contacts/{public_key}/owner` | Saved owner info for a node: firmware `owner.info`, operator notes, contacted mark, derived contact hints (no radio access) |
 | PATCH | `/api/contacts/{public_key}/owner` | Edit the operator's owner notes and/or the contacted mark (`notified`) |
+| POST | `/api/contacts/{public_key}/owner/refresh` | Fetch a repeater's or room's owner info now (guest login, or a room's stored room-poll credential) and save it; outcome in `attempt_status` |
 | GET | `/api/contacts/owner-outreach` | Nodes whose clock has stayed clearly wrong lately, with their owner info (read-only; nothing is sent) |
 | POST | `/api/contacts/{public_key}/room/login` | Log in to a room server (escalates to one flood retry if the first attempt draws no reply); `resync_history` resets the radio-side room sync cursor so the room re-pushes its retained post history |
 | POST | `/api/contacts/{public_key}/room/status` | Fetch room-server status telemetry |

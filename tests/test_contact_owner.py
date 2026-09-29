@@ -350,3 +350,54 @@ class TestApi:
         good = await client.patch("/api/settings", json={"owner_info_refresh_days": 14})
         assert good.status_code == 200
         assert good.json()["owner_info_refresh_days"] == 14
+
+
+class TestRefreshEndpoint:
+    def _patch(self, monkeypatch):
+        calls: list[tuple] = []
+
+        async def fake_refresh(public_key, credential, *, blocking=False):
+            calls.append((public_key, credential, blocking))
+            await ContactOwnerRepository.record_fetch(
+                public_key, status="ok", owner_info="VE2XYZ", firmware_version="v1.10"
+            )
+            return "ok"
+
+        monkeypatch.setattr("app.routers.contacts.radio_manager.require_connected", lambda: None)
+        monkeypatch.setattr("app.services.owner_info_sweep.refresh_owner_info", fake_refresh)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_repeater_is_fetched_now_with_a_guest_login(self, test_db, client, monkeypatch):
+        await _add(KEY_A, type=2)
+        calls = self._patch(monkeypatch)
+
+        response = await client.post(f"/api/contacts/{KEY_A}/owner/refresh")
+
+        assert response.status_code == 200
+        assert response.json()["firmware_owner_info"] == "VE2XYZ"
+        assert response.json()["attempt_status"] == "ok"
+        # Waits for the radio rather than giving up like the sweep does.
+        assert calls == [(KEY_A, None, True)]
+
+    @pytest.mark.asyncio
+    async def test_room_needs_a_stored_credential(self, test_db, client, monkeypatch):
+        await _add(KEY_A, type=3)
+        calls = self._patch(monkeypatch)
+
+        refused = await client.post(f"/api/contacts/{KEY_A}/owner/refresh")
+        assert refused.status_code == 409
+        assert calls == []
+
+        await RoomPollRepository.upsert(KEY_A, credential_action="set", credential="pw")
+        ok = await client.post(f"/api/contacts/{KEY_A}/owner/refresh")
+        assert ok.status_code == 200
+        assert calls == [(KEY_A, "pw", True)]
+
+    @pytest.mark.asyncio
+    async def test_chat_nodes_have_no_owner_info(self, test_db, client, monkeypatch):
+        await _add(KEY_A, type=1)
+        self._patch(monkeypatch)
+
+        response = await client.post(f"/api/contacts/{KEY_A}/owner/refresh")
+        assert response.status_code == 400
