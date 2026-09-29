@@ -45,6 +45,7 @@ async def run_post_connect_setup(radio_manager) -> None:
         sync_and_offload_all,
         sync_radio_time,
     )
+    from app.services.region_discovery import start_region_auto_discovery
 
     if not radio_manager.meshcore:
         return
@@ -273,6 +274,7 @@ async def run_post_connect_setup(radio_manager) -> None:
                 start_message_polling()
                 start_telemetry_collect()
                 start_room_polling()
+                start_region_auto_discovery()
 
             radio_manager._setup_complete = True
             # Start the RX silence clock now: the watchdog measures from here

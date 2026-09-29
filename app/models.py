@@ -1735,6 +1735,13 @@ class AppSettings(BaseModel):
             "tracked repeaters and contacts so daily checks stay under a 24/day ceiling."
         ),
     )
+    auto_discover_regions_hours: int = Field(
+        default=0,
+        description=(
+            "Hours between automatic region discovery sweeps of nearby repeaters; newly "
+            "found regions are merged into known_regions. 0 = disabled."
+        ),
+    )
     telemetry_routed_hourly: bool = Field(
         default=False,
         description=(

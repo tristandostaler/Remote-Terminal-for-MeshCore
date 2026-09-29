@@ -644,6 +644,7 @@ export interface AppSettings {
   auto_resend_channel: boolean;
   max_message_retries: number;
   telemetry_interval_hours: number;
+  auto_discover_regions_hours: number;
   telemetry_routed_hourly: boolean;
   /** Apps on the virtual companion node may change radio settings (default off). */
   virtual_node_allow_admin_commands: boolean;
@@ -686,6 +687,7 @@ export interface AppSettingsUpdate {
   live_feed_region?: string;
   live_feed_channels?: string[];
   live_feed_poll_interval?: number;
+  auto_discover_regions_hours?: number;
 }
 
 /** One app currently connected to the virtual companion node. */

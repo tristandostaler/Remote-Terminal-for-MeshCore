@@ -73,7 +73,8 @@ class AppSettingsRepository:
                    telemetry_interval_hours, telemetry_routed_hourly,
                    virtual_node_allow_admin_commands,
                    live_feed_enabled, live_feed_url, live_feed_region,
-                   live_feed_channels, live_feed_poll_interval
+                   live_feed_channels, live_feed_poll_interval,
+                   auto_discover_regions_hours
             FROM app_settings WHERE id = 1
             """
         ) as cursor:
@@ -187,6 +188,11 @@ class AppSettingsRepository:
         except (KeyError, TypeError, ValueError):
             telemetry_interval_hours = DEFAULT_TELEMETRY_INTERVAL_HOURS
 
+        try:
+            auto_discover_regions_hours = max(0, int(row["auto_discover_regions_hours"] or 0))
+        except (KeyError, TypeError, ValueError):
+            auto_discover_regions_hours = 0
+
         # Parse telemetry_routed_hourly boolean
         try:
             telemetry_routed_hourly = bool(row["telemetry_routed_hourly"])
@@ -246,6 +252,7 @@ class AppSettingsRepository:
             auto_resend_channel=auto_resend_channel,
             max_message_retries=max_message_retries,
             telemetry_interval_hours=telemetry_interval_hours,
+            auto_discover_regions_hours=auto_discover_regions_hours,
             telemetry_routed_hourly=telemetry_routed_hourly,
             virtual_node_allow_admin_commands=virtual_node_allow_admin_commands,
             live_feed_enabled=live_feed_enabled,
@@ -283,6 +290,7 @@ class AppSettingsRepository:
         live_feed_region: str | None = None,
         live_feed_channels: list[str] | None = None,
         live_feed_poll_interval: int | None = None,
+        auto_discover_regions_hours: int | None = None,
     ) -> None:
         """Apply field updates using an already-acquired connection.
 
@@ -356,6 +364,10 @@ class AppSettingsRepository:
             updates.append("max_message_retries = ?")
             params.append(clamp_message_retries(max_message_retries))
 
+        if auto_discover_regions_hours is not None:
+            updates.append("auto_discover_regions_hours = ?")
+            params.append(auto_discover_regions_hours)
+
         if telemetry_interval_hours is not None:
             updates.append("telemetry_interval_hours = ?")
             params.append(telemetry_interval_hours)
@@ -428,6 +440,7 @@ class AppSettingsRepository:
         live_feed_region: str | None = None,
         live_feed_channels: list[str] | None = None,
         live_feed_poll_interval: int | None = None,
+        auto_discover_regions_hours: int | None = None,
     ) -> AppSettings:
         """Update app settings. Only provided fields are updated."""
         async with db.tx() as conn:
@@ -457,6 +470,7 @@ class AppSettingsRepository:
                 live_feed_region=live_feed_region,
                 live_feed_channels=live_feed_channels,
                 live_feed_poll_interval=live_feed_poll_interval,
+                auto_discover_regions_hours=auto_discover_regions_hours,
             )
             return await AppSettingsRepository._get_in_conn(conn)
 
