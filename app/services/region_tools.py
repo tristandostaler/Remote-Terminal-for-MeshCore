@@ -1,4 +1,4 @@
-"""Region name guessing and importing.
+"""Region name brute-forcing and importing.
 
 A packet's transport code is a 16-bit keyed MAC over its payload, so a region
 name can never be read back out of stored traffic. It can only be *tested*: for
@@ -12,87 +12,33 @@ it in a thread) and a guarded fetch/parse for lists of region names published on
 other websites.
 """
 
+import hashlib
 import hmac
 import ipaddress
+import itertools
 import json
 import re
 import socket
 import string
+import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 from app.path_utils import UNDEFINED_PAYLOAD_TYPES, parse_packet_envelope
-from app.region_resolver import _region_key
-
-# Canadian provinces/territories and US states + DC, as commonly used in
-# region names, plus country codes. Joined pairs (e.g. "onqc") cover regions that
-# span several subdivisions.
-CA_SUBDIVISIONS = ("ab", "bc", "mb", "nb", "nl", "ns", "nt", "nu", "on", "pe", "qc", "sk", "yt")
-US_SUBDIVISIONS = [
-    "al",
-    "ak",
-    "az",
-    "ar",
-    "ca",
-    "co",
-    "ct",
-    "de",
-    "dc",
-    "fl",
-    "ga",
-    "hi",
-    "id",
-    "il",
-    "in",
-    "ia",
-    "ks",
-    "ky",
-    "la",
-    "me",
-    "md",
-    "ma",
-    "mi",
-    "mn",
-    "ms",
-    "mo",
-    "mt",
-    "ne",
-    "nv",
-    "nh",
-    "nj",
-    "nm",
-    "ny",
-    "nc",
-    "nd",
-    "oh",
-    "ok",
-    "or",
-    "pa",
-    "ri",
-    "sc",
-    "sd",
-    "tn",
-    "tx",
-    "ut",
-    "vt",
-    "va",
-    "wa",
-    "wv",
-    "wi",
-    "wy",
-]
-COUNTRY_CODES = ("can", "usa", "us", "ca", "uk", "gb", "mex", "aus", "nz", "nzl", "deu", "fra")
+from app.region_scope import normalize_region_scope
 
 # Region names use these characters (mirrors firmware RegionMap::is_name_char).
 _NAME_RE = re.compile(r"^[A-Za-z0-9$-]{1,30}$")
 
 # Work caps so a single request cannot pin the CPU indefinitely.
-MAX_CANDIDATES = 200_000
+DEFAULT_MIN_LETTERS = 2
+DEFAULT_MAX_LETTERS = 3
+MAX_LETTERS = 30  # the firmware's region-name length limit; the only bound on the range
 MAX_PACKETS = 2_000
-MAX_SECONDS = 60.0
+DEFAULT_MAX_SECONDS = 60.0  # default budget for a run; 0 means no limit
 MAX_SCAN_ROWS = 250_000
 
 # Import limits.
@@ -102,21 +48,22 @@ MAX_IMPORTED_NAMES = 2_000
 MAX_REDIRECTS = 3
 
 
-def builtin_candidates() -> list[str]:
-    """Names worth trying without any hints: 2- and 3-letter codes and pairs.
+def brute_force_candidates(
+    min_letters: int = DEFAULT_MIN_LETTERS, max_letters: int = DEFAULT_MAX_LETTERS
+) -> Iterator[str]:
+    """Lazily yield every lowercase a-z name of ``min_letters``..``max_letters`` letters.
 
-    The 3-letter space covers every IATA airport code, the 2-letter space covers
-    provinces/states, and pairs of subdivisions cover multi-region names such as
-    ``onqc``. All lowercase; user-supplied names are tried as typed as well.
+    Lazy because the space explodes (8 letters is ~2e11 names); shortest first.
     """
     letters = string.ascii_lowercase
-    names: list[str] = []
-    names.extend(a + b for a in letters for b in letters)
-    names.extend(a + b + c for a in letters for b in letters for c in letters)
-    subdivisions = sorted({*CA_SUBDIVISIONS, *US_SUBDIVISIONS})
-    names.extend(a + b for a in subdivisions for b in subdivisions if a != b)
-    names.extend(COUNTRY_CODES)
-    return names
+    for length in range(min_letters, max_letters + 1):
+        for combo in itertools.product(letters, repeat=length):
+            yield "".join(combo)
+
+
+def brute_force_total(min_letters: int, max_letters: int) -> int:
+    """How many names ``brute_force_candidates`` would yield if run to completion."""
+    return sum(26**n for n in range(min_letters, max_letters + 1))
 
 
 def clean_candidate(raw: str) -> str | None:
@@ -129,26 +76,27 @@ def clean_candidate(raw: str) -> str | None:
     return name
 
 
-def expand_candidates(user_names: Iterable[str], *, include_builtin: bool) -> list[str]:
-    """Deduplicated candidate list: user names (as typed and lowercased) then built-ins."""
-    out: list[str] = []
+def expand_candidates(
+    user_names: Iterable[str],
+    *,
+    min_letters: int | None = DEFAULT_MIN_LETTERS,
+    max_letters: int | None = DEFAULT_MAX_LETTERS,
+) -> Iterator[str]:
+    """Lazily yield user names (as typed and lowercased, deduplicated), then every
+    a-z name of ``min_letters``..``max_letters`` letters (skipped when either is None)."""
     seen: set[str] = set()
-
-    def add(name: str) -> None:
-        if name not in seen:
-            seen.add(name)
-            out.append(name)
-
     for raw in user_names:
         name = clean_candidate(raw)
         if name is None:
             continue
-        add(name)
-        add(name.lower())
-    if include_builtin:
-        for name in builtin_candidates():
-            add(name)
-    return out[:MAX_CANDIDATES]
+        for variant in (name, name.lower()):
+            if variant not in seen:
+                seen.add(variant)
+                yield variant
+    if min_letters is not None and max_letters is not None:
+        for name in brute_force_candidates(min_letters, max_letters):
+            if name not in seen:
+                yield name
 
 
 @dataclass(frozen=True)
@@ -200,32 +148,51 @@ class GuessResult:
 
 def guess_regions(
     packets: list[ScopedPacket],
-    candidates: list[str],
+    candidates: Iterable[str],
     *,
     min_hits: int = 2,
-    max_seconds: float = MAX_SECONDS,
-) -> tuple[list[GuessResult], bool]:
+    max_seconds: float | None = DEFAULT_MAX_SECONDS,
+    cancel: threading.Event | None = None,
+    on_progress: Callable[[int, list[GuessResult]], None] | None = None,
+) -> tuple[list[GuessResult], bool, int]:
     """Count, per candidate, how many packets its transport code explains.
 
-    Returns ``(results, timed_out)`` with results sorted by hits descending and
-    limited to candidates reaching ``min_hits``. CPU-bound: call from a thread.
+    Returns ``(results, timed_out, tried)`` with results sorted by hits descending
+    and limited to candidates reaching ``min_hits``. ``candidates`` may be a lazy
+    iterator far too large to finish; it is consumed in order until it runs out,
+    ``cancel`` is set, or ``max_seconds`` elapses (``None`` or 0 = no time limit).
+    ``on_progress(tried, results_so_far)`` is called every few hundred names.
+    CPU-bound: call from a thread.
     """
-    keyed: list[tuple[str, bytes]] = []
-    for name in candidates:
-        key = _region_key(name)
-        if key is not None:
-            keyed.append((name, key))
-
+    messages = [(bytes([p.payload_type & 0xFF]) + p.payload, p.transport_code) for p in packets]
     hits: dict[str, int] = {}
-    deadline = time.monotonic() + max_seconds
+    deadline = time.monotonic() + max_seconds if max_seconds else None
     timed_out = False
-    for packet in packets:
-        if time.monotonic() > deadline:
-            timed_out = True
-            break
-        message = bytes([packet.payload_type & 0xFF]) + packet.payload
-        target = packet.transport_code
-        for name, key in keyed:
+    tried = 0
+
+    def snapshot() -> list[GuessResult]:
+        found = [GuessResult(name, count) for name, count in hits.items()]
+        found.sort(key=lambda r: (-r.hits, r.region))
+        return found
+
+    for name in candidates:
+        if tried % 512 == 0:
+            if cancel is not None and cancel.is_set():
+                break
+            if deadline is not None and time.monotonic() > deadline:
+                timed_out = True
+                break
+            if on_progress is not None and tried:
+                on_progress(tried, snapshot())
+        # Derived inline rather than via the resolver's key cache, which would
+        # otherwise retain every name a large sweep touches.
+        normalized = normalize_region_scope(name)
+        if not normalized:
+            continue
+        tried += 1
+        key = hashlib.sha256(normalized.encode("utf-8")).digest()[:16]
+        count = 0
+        for message, target in messages:
             code = int.from_bytes(hmac.digest(key, message, "sha256")[:2], "little")
             # Firmware nudges the two reserved values.
             if code == 0:
@@ -233,11 +200,11 @@ def guess_regions(
             elif code == 0xFFFF:
                 code = 0xFFFE
             if code == target:
-                hits[name] = hits.get(name, 0) + 1
+                count += 1
+        if count >= min_hits:
+            hits[name] = count
 
-    results = [GuessResult(name, count) for name, count in hits.items() if count >= min_hits]
-    results.sort(key=lambda r: (-r.hits, r.region))
-    return results, timed_out
+    return snapshot(), timed_out, tried
 
 
 # --------------------------------------------------------------------------
@@ -421,7 +388,8 @@ __all__ = [
     "RegionImportError",
     "GuessResult",
     "ScopedPacket",
-    "builtin_candidates",
+    "brute_force_candidates",
+    "brute_force_total",
     "expand_candidates",
     "extract_region_names",
     "fetch_region_names",

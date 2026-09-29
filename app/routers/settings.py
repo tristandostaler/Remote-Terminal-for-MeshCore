@@ -3,7 +3,7 @@ import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app import host_clock
 from app.models import (
@@ -27,7 +27,7 @@ from app.send_attempts import (
     MIN_MESSAGE_RETRIES,
     clamp_message_retries,
 )
-from app.services import live_feed, region_tools
+from app.services import live_feed, region_jobs, region_tools
 from app.services.region_discovery import AUTO_DISCOVER_REGIONS_OPTIONS_HOURS
 from app.telemetry_interval import (
     DEFAULT_TELEMETRY_INTERVAL_HOURS,
@@ -946,9 +946,16 @@ class GuessRegionsRequest(BaseModel):
         default_factory=list,
         description="Extra region names to test, e.g. imported from a website",
     )
-    include_builtin: bool = Field(
+    brute_force: bool = Field(
         default=True,
-        description="Also try every 2- and 3-letter code plus subdivision pairs (onqc, ...)",
+        description="Also try every a-z name with min_letters to max_letters letters",
+    )
+    min_letters: int = Field(default=2, ge=1, le=region_tools.MAX_LETTERS)
+    max_letters: int = Field(default=3, ge=1, le=region_tools.MAX_LETTERS)
+    max_seconds: float = Field(
+        default=region_tools.DEFAULT_MAX_SECONDS,
+        ge=0,
+        description="Time budget for the run in seconds; 0 means run until finished or cancelled",
     )
     max_packets: int = Field(default=150, ge=1, le=region_tools.MAX_PACKETS)
     min_hits: int = Field(
@@ -958,6 +965,12 @@ class GuessRegionsRequest(BaseModel):
         description="Packets a name must explain to be reported (2 makes chance matches negligible)",
     )
 
+    @model_validator(mode="after")
+    def _check_letter_range(self) -> "GuessRegionsRequest":
+        if self.min_letters > self.max_letters:
+            raise ValueError("min_letters must not exceed max_letters")
+        return self
+
 
 class GuessedRegion(BaseModel):
     region: str
@@ -965,12 +978,36 @@ class GuessedRegion(BaseModel):
     pct_of_tested: float = Field(description="Share of the tested unresolved packets it explains")
 
 
-class GuessRegionsResponse(BaseModel):
+class GuessRegionsJob(BaseModel):
+    job_id: str
+    status: Literal["running", "completed", "timed_out", "cancelled", "failed"]
+    error: str | None = None
+    elapsed_seconds: float
+    max_seconds: float | None = Field(description="Time budget; null when unlimited")
     scoped_packets: int = Field(description="Distinct region-scoped packets found in storage")
     tested_packets: int = Field(description="Of those, packets no known region explained")
     candidates_tried: int
-    timed_out: bool = Field(description="True when the time budget ran out before all packets")
-    results: list[GuessedRegion]
+    candidates_total: int = Field(description="Names a complete run would have tried")
+    results: list[GuessedRegion] = Field(description="Matches so far; final once not running")
+
+
+def _job_response(job: region_jobs.RegionJob) -> GuessRegionsJob:
+    tested = job.tested_packets
+    return GuessRegionsJob(
+        job_id=job.id,
+        status=job.status,  # type: ignore[arg-type]
+        error=job.error,
+        elapsed_seconds=job.elapsed,
+        max_seconds=job.max_seconds,
+        scoped_packets=job.scoped_packets,
+        tested_packets=tested,
+        candidates_tried=job.tried,
+        candidates_total=job.candidates_total,
+        results=[
+            GuessedRegion(region=r.region, hits=r.hits, pct_of_tested=(r.hits / tested) * 100)
+            for r in job.results
+        ],
+    )
 
 
 class ImportRegionsRequest(BaseModel):
@@ -983,43 +1020,47 @@ class ImportRegionsResponse(BaseModel):
     already_known: list[str] = Field(default_factory=list)
 
 
-@router.post("/regions/guess", response_model=GuessRegionsResponse)
-async def guess_regions(request: GuessRegionsRequest) -> GuessRegionsResponse:
-    """Test candidate region names against stored region-scoped packets.
+@router.post("/regions/guess", response_model=GuessRegionsJob)
+async def start_guess_regions(request: GuessRegionsRequest) -> GuessRegionsJob:
+    """Start a background brute force of region names against stored packets.
 
-    Transport codes are one-way, so this cannot read names out of traffic; it
-    checks candidates (built-in codes plus any supplied) and reports those that
-    explain at least ``min_hits`` stored packets no known region already explains.
+    Returns immediately with the job; poll ``GET /regions/guess`` for progress and
+    partial results. Transport codes are one-way, so this cannot read names out
+    of traffic: it tests candidates and reports those explaining at least
+    ``min_hits`` stored packets no known region already explains.
     """
     known = (await AppSettingsRepository.get()).known_regions
-    candidates = region_tools.expand_candidates(
-        request.candidates, include_builtin=request.include_builtin
-    )
     rows = await RawPacketRepository.recent_data(region_tools.MAX_SCAN_ROWS)
-
-    def _work() -> tuple[int, list[region_tools.ScopedPacket], list, bool]:
-        packets, scoped_total = region_tools.scoped_packets_from_rows(
-            rows, known, limit=request.max_packets
+    try:
+        job = region_jobs.start_job(
+            rows=rows,
+            known=known,
+            user_names=request.candidates,
+            min_letters=request.min_letters if request.brute_force else None,
+            max_letters=request.max_letters if request.brute_force else None,
+            max_packets=request.max_packets,
+            min_hits=request.min_hits,
+            max_seconds=request.max_seconds or None,
         )
-        results, timed_out = region_tools.guess_regions(
-            packets, candidates, min_hits=request.min_hits
-        )
-        return scoped_total, packets, results, timed_out
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _job_response(job)
 
-    scoped_total, packets, results, timed_out = await asyncio.to_thread(_work)
-    known_lower = {name.lower() for name in known}
-    tested = len(packets)
-    return GuessRegionsResponse(
-        scoped_packets=scoped_total,
-        tested_packets=tested,
-        candidates_tried=len(candidates),
-        timed_out=timed_out,
-        results=[
-            GuessedRegion(region=r.region, hits=r.hits, pct_of_tested=(r.hits / tested) * 100)
-            for r in results
-            if r.region.lower() not in known_lower
-        ],
-    )
+
+@router.get("/regions/guess", response_model=GuessRegionsJob | None)
+async def get_guess_regions() -> GuessRegionsJob | None:
+    """Latest brute-force job (running or finished), or null if none since startup."""
+    job = region_jobs.current_job()
+    return _job_response(job) if job else None
+
+
+@router.post("/regions/guess/{job_id}/cancel", response_model=GuessRegionsJob)
+async def cancel_guess_regions(job_id: str) -> GuessRegionsJob:
+    """Ask a running brute force to stop; it keeps the matches found so far."""
+    job = region_jobs.cancel_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No such region brute-force job")
+    return _job_response(job)
 
 
 @router.post("/regions/import", response_model=ImportRegionsResponse)

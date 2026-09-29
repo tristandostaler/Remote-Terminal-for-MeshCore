@@ -1,49 +1,128 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { toast } from '../ui/sonner';
 import { api } from '../../api';
-import type { GuessRegionsResponse, ImportRegionsResponse } from '../../types';
+import type { GuessRegionsJob, ImportRegionsResponse } from '../../types';
 
 /**
- * Two ways to fill Known Regions without asking a repeater: guess names against
- * stored region-scoped packets, and import a list published on a website.
+ * Two ways to fill Known Regions without asking a repeater: brute-force names
+ * against stored region-scoped packets, and import a list published on a website.
  *
- * A packet's region code is a one-way hash, so "guess" tests candidate names
- * (every 2/3-letter code, province/state pairs like onqc, plus anything imported
+ * A packet's region code is a one-way hash, so "brute force" tests candidate names
+ * (every a-z name within a configurable letter range, plus anything imported
  * here) and reports the ones that explain several stored packets.
  */
+// Region names are at most 30 characters, so that is the only bound on the range.
+const MAX_LETTERS = 30;
+const POLL_INTERVAL_MS = 1000;
+
+const clampLetters = (value: string, fallback: number) => {
+  const n = Number.parseInt(value, 10);
+  return Number.isNaN(n) ? fallback : Math.min(MAX_LETTERS, Math.max(1, n));
+};
+
+const STATUS_LABEL: Record<GuessRegionsJob['status'], string> = {
+  running: 'Running',
+  completed: 'Finished',
+  timed_out: 'Stopped at the time limit',
+  cancelled: 'Stopped',
+  failed: 'Failed',
+};
+
+const formatDuration = (seconds: number) => {
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = total % 60;
+  return h > 0 ? `${h}h ${m}m ${sec}s` : m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+};
+
 export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: string[]) => void }) {
-  const [guessing, setGuessing] = useState(false);
-  const [guess, setGuess] = useState<GuessRegionsResponse | null>(null);
+  const [minLetters, setMinLetters] = useState(2);
+  const [maxLetters, setMaxLetters] = useState(3);
+  const [maxSeconds, setMaxSeconds] = useState(60);
+  const [job, setJob] = useState<GuessRegionsJob | null>(null);
+  const [starting, setStarting] = useState(false);
+  const guessing = starting || job?.status === 'running';
   const [url, setUrl] = useState('');
   const [importing, setImporting] = useState(false);
   const [imported, setImported] = useState<ImportRegionsResponse | null>(null);
 
+  const announceFinished = (data: GuessRegionsJob) => {
+    if (data.status === 'failed') {
+      toast.error('Region brute force failed', { description: data.error ?? undefined });
+    } else if (data.tested_packets === 0) {
+      toast.info(
+        data.scoped_packets === 0
+          ? 'No region-scoped packets are stored yet'
+          : 'Every stored scoped packet is already explained by a known region'
+      );
+    } else if (data.results.length === 0) {
+      toast.info(`No matching regions among ${data.candidates_tried.toLocaleString()} names`);
+    } else {
+      toast.success(
+        `Found ${data.results.length} region${data.results.length === 1 ? '' : 's'} — review and add`
+      );
+    }
+  };
+
+  // The sweep runs on the server; this only polls for progress. A sweep already
+  // running when the panel opens (e.g. after a reload) is picked back up.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getGuessRegionsJob()
+      .then((data) => {
+        if (!cancelled && data?.status === 'running') setJob(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const runningJobId = job?.status === 'running' ? job.job_id : null;
+  useEffect(() => {
+    if (!runningJobId) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      api
+        .getGuessRegionsJob()
+        .then((data) => {
+          if (cancelled || !data || data.job_id !== runningJobId) return;
+          setJob(data);
+          if (data.status !== 'running') announceFinished(data);
+        })
+        .catch(() => {});
+    }, POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [runningJobId]);
+
   const runGuess = async (candidates: string[] = []) => {
-    setGuessing(true);
+    setStarting(true);
     try {
-      const data = await api.guessRegions(candidates);
-      setGuess(data);
-      if (data.tested_packets === 0) {
-        toast.info(
-          data.scoped_packets === 0
-            ? 'No region-scoped packets are stored yet'
-            : 'Every stored scoped packet is already explained by a known region'
-        );
-      } else if (data.results.length === 0) {
-        toast.info(`No matching regions among ${data.candidates_tried.toLocaleString()} names`);
-      } else {
-        toast.success(
-          `Found ${data.results.length} region${data.results.length === 1 ? '' : 's'} — review and add`
-        );
-      }
+      setJob(await api.startGuessRegions(candidates, minLetters, maxLetters, maxSeconds));
     } catch (err) {
-      toast.error('Failed to guess regions', {
+      toast.error('Failed to start the region brute force', {
         description: err instanceof Error ? err.message : undefined,
       });
     } finally {
-      setGuessing(false);
+      setStarting(false);
+    }
+  };
+
+  const cancelGuess = async () => {
+    if (!job) return;
+    try {
+      setJob(await api.cancelGuessRegions(job.job_id));
+    } catch (err) {
+      toast.error('Failed to stop the brute force', {
+        description: err instanceof Error ? err.message : undefined,
+      });
     }
   };
 
@@ -93,7 +172,7 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
       <div className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium">
-            Guess regions from stored packets
+            Brute-force regions from stored packets
           </span>
           <Button
             type="button"
@@ -102,24 +181,78 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
             onClick={() => void runGuess()}
             disabled={guessing}
           >
-            {guessing ? 'Guessing... (about 10s)' : 'Guess Regions'}
+            {guessing ? 'Brute forcing...' : 'Brute Force Regions'}
           </Button>
+          {job?.status === 'running' && (
+            <Button type="button" variant="outline" size="sm" onClick={() => void cancelGuess()}>
+              Stop
+            </Button>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <label className="flex items-center gap-1">
+            Min letters
+            <Input
+              type="number"
+              min={1}
+              max={MAX_LETTERS}
+              className="w-16"
+              value={minLetters}
+              onChange={(e) => {
+                const min = clampLetters(e.target.value, minLetters);
+                setMinLetters(min);
+                if (min > maxLetters) setMaxLetters(min);
+              }}
+            />
+          </label>
+          <label className="flex items-center gap-1">
+            Max letters
+            <Input
+              type="number"
+              min={1}
+              max={MAX_LETTERS}
+              className="w-16"
+              value={maxLetters}
+              onChange={(e) => {
+                const max = clampLetters(e.target.value, maxLetters);
+                setMaxLetters(max);
+                if (max < minLetters) setMinLetters(max);
+              }}
+            />
+          </label>
+          <label className="flex items-center gap-1">
+            Time limit (s, 0 = none)
+            <Input
+              type="number"
+              min={0}
+              className="w-24"
+              value={maxSeconds}
+              onChange={(e) => {
+                const n = Number.parseInt(e.target.value, 10);
+                setMaxSeconds(Number.isNaN(n) ? 0 : Math.max(0, n));
+              }}
+            />
+          </label>
         </div>
         <p className="text-[0.8125rem] text-muted-foreground">
-          Region names cannot be read back from traffic, only tested. This tries every 2- and
-          3-letter code (airport codes, provinces, states), pairs such as onqc, and any names
-          imported below against your stored region-scoped packets, and lists the names that explain
-          at least two of them. A name matching two different packets by chance is about a
-          one-in-four-billion event, so listed names are real. Names nobody guessed cannot be found.
+          Region names cannot be read back from traffic, only tested. This tries every a-z name from{' '}
+          {minLetters} to {maxLetters} letters, and any names imported below, against your stored
+          region-scoped packets, and lists the names that explain at least two of them. A name
+          matching two different packets by chance is about a one-in-four-billion event, so listed
+          names are real. Each extra letter multiplies the work by 26, so long ranges can take a
+          very long time: the sweep runs on the server in the background, so you can leave this page
+          and come back, and it stops at the time limit (0 = run until it finishes or you press
+          Stop). Names with digits or hyphens cannot be found this way.
         </p>
-        {guess && guess.results.length > 0 && (
+        {job && (
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground">
-              Tested {guess.tested_packets.toLocaleString()} unexplained packets against{' '}
-              {guess.candidates_tried.toLocaleString()} names
-              {guess.timed_out ? ' (stopped early at the time limit)' : ''}.
+              {STATUS_LABEL[job.status]}: tried {job.candidates_tried.toLocaleString()} of{' '}
+              {job.candidates_total.toLocaleString()} names against{' '}
+              {job.tested_packets.toLocaleString()} unexplained packets in{' '}
+              {formatDuration(job.elapsed_seconds)}.
             </p>
-            {guess.results.map((r) => (
+            {job.results.map((r) => (
               <div key={r.region} className="flex items-center gap-2 text-sm font-mono">
                 <span>{r.region}</span>
                 <span className="text-xs text-muted-foreground font-sans">
@@ -127,22 +260,18 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
                 </span>
               </div>
             ))}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="border-success/50 text-success hover:bg-success/10"
-              onClick={() => onAddRegions(guess.results.map((r) => r.region))}
-            >
-              Add to Known Regions
-            </Button>
+            {job.results.length > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="border-success/50 text-success hover:bg-success/10"
+                onClick={() => onAddRegions(job.results.map((r) => r.region))}
+              >
+                Add to Known Regions
+              </Button>
+            )}
           </div>
-        )}
-        {guess && guess.results.length === 0 && guess.tested_packets > 0 && (
-          <p className="text-xs text-muted-foreground">
-            Tested {guess.tested_packets.toLocaleString()} unexplained packets against{' '}
-            {guess.candidates_tried.toLocaleString()} names; none matched twice.
-          </p>
         )}
       </div>
 
