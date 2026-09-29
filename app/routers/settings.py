@@ -21,12 +21,13 @@ from app.models import (
 )
 from app.region_scope import normalize_region_scope
 from app.repository import AppSettingsRepository, ChannelRepository, ContactRepository
+from app.repository.raw_packets import RawPacketRepository
 from app.send_attempts import (
     MAX_MESSAGE_RETRIES,
     MIN_MESSAGE_RETRIES,
     clamp_message_retries,
 )
-from app.services import live_feed
+from app.services import live_feed, region_tools
 from app.services.region_discovery import AUTO_DISCOVER_REGIONS_OPTIONS_HOURS
 from app.telemetry_interval import (
     DEFAULT_TELEMETRY_INTERVAL_HOURS,
@@ -937,4 +938,104 @@ async def get_contact_telemetry_schedule() -> TelemetrySchedule:
         len(app_settings.tracked_telemetry_contacts),
         app_settings.telemetry_interval_hours,
         app_settings.telemetry_routed_hourly,
+    )
+
+
+class GuessRegionsRequest(BaseModel):
+    candidates: list[str] = Field(
+        default_factory=list,
+        description="Extra region names to test, e.g. imported from a website",
+    )
+    include_builtin: bool = Field(
+        default=True,
+        description="Also try every 2- and 3-letter code plus subdivision pairs (onqc, ...)",
+    )
+    max_packets: int = Field(default=150, ge=1, le=region_tools.MAX_PACKETS)
+    min_hits: int = Field(
+        default=2,
+        ge=1,
+        le=50,
+        description="Packets a name must explain to be reported (2 makes chance matches negligible)",
+    )
+
+
+class GuessedRegion(BaseModel):
+    region: str
+    hits: int
+    pct_of_tested: float = Field(description="Share of the tested unresolved packets it explains")
+
+
+class GuessRegionsResponse(BaseModel):
+    scoped_packets: int = Field(description="Distinct region-scoped packets found in storage")
+    tested_packets: int = Field(description="Of those, packets no known region explained")
+    candidates_tried: int
+    timed_out: bool = Field(description="True when the time budget ran out before all packets")
+    results: list[GuessedRegion]
+
+
+class ImportRegionsRequest(BaseModel):
+    url: str = Field(description="Public http(s) page or API listing region names")
+
+
+class ImportRegionsResponse(BaseModel):
+    url: str
+    names: list[str]
+    already_known: list[str] = Field(default_factory=list)
+
+
+@router.post("/regions/guess", response_model=GuessRegionsResponse)
+async def guess_regions(request: GuessRegionsRequest) -> GuessRegionsResponse:
+    """Test candidate region names against stored region-scoped packets.
+
+    Transport codes are one-way, so this cannot read names out of traffic; it
+    checks candidates (built-in codes plus any supplied) and reports those that
+    explain at least ``min_hits`` stored packets no known region already explains.
+    """
+    known = (await AppSettingsRepository.get()).known_regions
+    candidates = region_tools.expand_candidates(
+        request.candidates, include_builtin=request.include_builtin
+    )
+    rows = await RawPacketRepository.recent_data(region_tools.MAX_SCAN_ROWS)
+
+    def _work() -> tuple[int, list[region_tools.ScopedPacket], list, bool]:
+        packets, scoped_total = region_tools.scoped_packets_from_rows(
+            rows, known, limit=request.max_packets
+        )
+        results, timed_out = region_tools.guess_regions(
+            packets, candidates, min_hits=request.min_hits
+        )
+        return scoped_total, packets, results, timed_out
+
+    scoped_total, packets, results, timed_out = await asyncio.to_thread(_work)
+    known_lower = {name.lower() for name in known}
+    tested = len(packets)
+    return GuessRegionsResponse(
+        scoped_packets=scoped_total,
+        tested_packets=tested,
+        candidates_tried=len(candidates),
+        timed_out=timed_out,
+        results=[
+            GuessedRegion(region=r.region, hits=r.hits, pct_of_tested=(r.hits / tested) * 100)
+            for r in results
+            if r.region.lower() not in known_lower
+        ],
+    )
+
+
+@router.post("/regions/import", response_model=ImportRegionsResponse)
+async def import_regions(request: ImportRegionsRequest) -> ImportRegionsResponse:
+    """Fetch a public web page or API and extract region names from it.
+
+    Nothing is saved; the caller previews the names and chooses to verify them
+    against stored packets or add them to ``known_regions``.
+    """
+    try:
+        final_url, names = await region_tools.fetch_region_names(request.url)
+    except region_tools.RegionImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    known_lower = {name.lower() for name in (await AppSettingsRepository.get()).known_regions}
+    return ImportRegionsResponse(
+        url=final_url,
+        names=[n for n in names if n.lower() not in known_lower],
+        already_known=[n for n in names if n.lower() in known_lower],
     )

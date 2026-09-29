@@ -97,6 +97,26 @@ export interface RadioRegionDiscoveryRepeater {
   regions: string[];
 }
 
+export interface GuessedRegion {
+  region: string;
+  hits: number;
+  pct_of_tested: number;
+}
+
+export interface GuessRegionsResponse {
+  scoped_packets: number;
+  tested_packets: number;
+  candidates_tried: number;
+  timed_out: boolean;
+  results: GuessedRegion[];
+}
+
+export interface ImportRegionsResponse {
+  url: string;
+  names: string[];
+  already_known: string[];
+}
+
 export interface RadioRegionDiscoveryResponse {
   repeaters_queried: number;
   repeaters_answered: number;
