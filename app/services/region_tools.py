@@ -335,8 +335,8 @@ def _walk_json(node, key: str | None, out: list[str]) -> None:  # noqa: ANN001
 def extract_region_names(body: str, content_type: str = "") -> list[str]:
     """Pull plausible region names out of JSON, HTML, CSV or plain text.
 
-    Deliberately permissive about *what* it returns and strict about the shape of
-    each name; the caller is expected to show a preview and, ideally, verify the
+    Names come back lowercased and deduplicated. Deliberately permissive about
+    *what* it returns and strict about the shape of each name; the caller is expected to show a preview and, ideally, verify the
     names against stored packets before trusting them.
     """
     raw: list[str] = []
@@ -361,9 +361,14 @@ def extract_region_names(body: str, content_type: str = "") -> list[str]:
     seen: set[str] = set()
     for token in raw:
         name = clean_candidate(token.strip().strip("\"'`()[]{}<>.:"))
-        if name is None or name.lower() in seen:
+        if name is None:
             continue
-        seen.add(name.lower())
+        # Imported names are lowercased: region names are conventionally lowercase,
+        # and their hash is case-sensitive, so a shouted "YUL" would never match.
+        name = name.lower()
+        if name in seen:
+            continue
+        seen.add(name)
         names.append(name)
         if len(names) >= MAX_IMPORTED_NAMES:
             break

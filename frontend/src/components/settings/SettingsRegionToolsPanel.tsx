@@ -72,7 +72,11 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
     setImporting(true);
     try {
       const data = await api.getLiveFeedRegions();
-      const names = data.regions.map((r) => r.code).filter(Boolean);
+      // Lowercase and dedupe: region names are conventionally lowercase and their
+      // hash is case-sensitive, so the live feed's uppercase IATA codes would never match.
+      const names = [...new Set(data.regions.map((r) => r.code?.trim().toLowerCase()))].filter(
+        (n): n is string => !!n
+      );
       setImported({ url: data.url, names, already_known: [] });
       if (names.length === 0) toast.info('The live feed reported no regions');
     } catch (err) {
