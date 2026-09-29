@@ -23,6 +23,7 @@ import { AppShell } from './components/AppShell';
 import type { MessageInputHandle } from './components/MessageInput';
 import { DistanceUnitProvider } from './contexts/DistanceUnitContext';
 import { PathHopWidthProvider } from './contexts/PathHopWidthContext';
+import { ShowRegionProvider } from './contexts/ShowRegionContext';
 import { RichPayloadProvider } from './contexts/RichPayloadContext';
 import { usePush } from './contexts/PushSubscriptionContext';
 import { messageContainsMention } from './utils/messageParser';
@@ -104,6 +105,7 @@ export function App() {
     distanceUnit,
     renderRichPayloads,
     showPathHopWidth,
+    showRegion,
     setSettingsSection,
     setSidebarOpen,
     setCrackerRunning,
@@ -111,6 +113,7 @@ export function App() {
     setDistanceUnit,
     setRenderRichPayloads,
     setShowPathHopWidth,
+    setShowRegion,
     handleCloseSettingsView,
     handleToggleSettingsView,
     handleOpenNewMessage: openNewMessageModal,
@@ -916,34 +919,36 @@ export function App() {
           showPathHopWidth={showPathHopWidth}
           setShowPathHopWidth={setShowPathHopWidth}
         >
-          <AppShell
-            localLabel={localLabel}
-            showNewMessage={showNewMessage}
-            showBulkAddResults={bulkAddResult !== null}
-            showSettings={showSettings}
-            settingsSection={settingsSection}
-            sidebarOpen={sidebarOpen}
-            showCracker={showCracker}
-            onSettingsSectionChange={setSettingsSection}
-            onSidebarOpenChange={setSidebarOpen}
-            onCrackerRunningChange={setCrackerRunning}
-            onToggleSettingsView={handleToggleSettingsView}
-            onCloseSettingsView={handleCloseSettingsView}
-            onCloseNewMessage={handleCloseNewMessage}
-            onCloseBulkAddResults={handleCloseBulkAddResults}
-            onLocalLabelChange={setLocalLabel}
-            statusProps={statusProps}
-            sidebarProps={sidebarProps}
-            conversationPaneProps={conversationPaneProps}
-            searchProps={searchProps}
-            settingsProps={settingsProps}
-            crackerProps={crackerProps}
-            newMessageModalProps={newMessageModalProps}
-            bulkAddChannelResultModalProps={bulkAddChannelResultModalProps}
-            contactInfoPaneProps={contactInfoPaneProps}
-            channelInfoPaneProps={channelInfoPaneProps}
-            onRepeaterAutoLogin={handleRepeaterAutoLogin}
-          />
+          <ShowRegionProvider showRegion={showRegion} setShowRegion={setShowRegion}>
+            <AppShell
+              localLabel={localLabel}
+              showNewMessage={showNewMessage}
+              showBulkAddResults={bulkAddResult !== null}
+              showSettings={showSettings}
+              settingsSection={settingsSection}
+              sidebarOpen={sidebarOpen}
+              showCracker={showCracker}
+              onSettingsSectionChange={setSettingsSection}
+              onSidebarOpenChange={setSidebarOpen}
+              onCrackerRunningChange={setCrackerRunning}
+              onToggleSettingsView={handleToggleSettingsView}
+              onCloseSettingsView={handleCloseSettingsView}
+              onCloseNewMessage={handleCloseNewMessage}
+              onCloseBulkAddResults={handleCloseBulkAddResults}
+              onLocalLabelChange={setLocalLabel}
+              statusProps={statusProps}
+              sidebarProps={sidebarProps}
+              conversationPaneProps={conversationPaneProps}
+              searchProps={searchProps}
+              settingsProps={settingsProps}
+              crackerProps={crackerProps}
+              newMessageModalProps={newMessageModalProps}
+              bulkAddChannelResultModalProps={bulkAddChannelResultModalProps}
+              contactInfoPaneProps={contactInfoPaneProps}
+              channelInfoPaneProps={channelInfoPaneProps}
+              onRepeaterAutoLogin={handleRepeaterAutoLogin}
+            />
+          </ShowRegionProvider>
         </PathHopWidthProvider>
       </RichPayloadProvider>
     </DistanceUnitProvider>

@@ -34,6 +34,7 @@ import {
 import { EmojiPickerPanel } from './EmojiPickerPanel';
 import { useRichPayloads } from '../contexts/RichPayloadContext';
 import { usePathHopWidth } from '../contexts/PathHopWidthContext';
+import { useShowRegion } from '../contexts/ShowRegionContext';
 import { formatHopCounts, formatPathHopWidths, type SenderInfo } from '../utils/pathUtils';
 import { getDirectContactRoute } from '../utils/pathUtils';
 import { ContactAvatar } from './ContactAvatar';
@@ -1145,6 +1146,7 @@ function MessageMetaLine({
   onShowPaths?: () => void;
   onOpenActions?: () => void;
 }) {
+  const { showRegion } = useShowRegion();
   const status = message.outgoing ? displaySendStatus(message) : null;
   const compression = compressionLabel(message);
   const attempts = message.send_attempts ?? 0;
@@ -1166,7 +1168,7 @@ function MessageMetaLine({
       {paths && paths.length > 0 && onShowPaths && (
         <HopCountBadge paths={paths} onClick={onShowPaths} outgoing={message.outgoing} />
       )}
-      {message.region && <RegionBadge region={message.region} />}
+      {showRegion && message.region && <RegionBadge region={message.region} />}
       {message.recovered_at ? <RecoveredBadge recoveredAt={message.recovered_at} /> : null}
       {status &&
         glyph &&

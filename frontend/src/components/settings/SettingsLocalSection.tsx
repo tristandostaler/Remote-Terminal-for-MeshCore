@@ -28,6 +28,8 @@ import { useRichPayloads } from '../../contexts/RichPayloadContext';
 import { setSavedRenderRichPayloads } from '../../utils/richPayloadPreference';
 import { usePathHopWidth } from '../../contexts/PathHopWidthContext';
 import { setSavedShowPathHopWidth } from '../../utils/pathHopWidthPreference';
+import { useShowRegion } from '../../contexts/ShowRegionContext';
+import { setSavedShowRegion } from '../../utils/showRegionPreference';
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_SLIDER_STEP,
@@ -236,6 +238,7 @@ export function SettingsLocalSection({
   const { distanceUnit, setDistanceUnit } = useDistanceUnit();
   const { renderRichPayloads, setRenderRichPayloads } = useRichPayloads();
   const { showPathHopWidth, setShowPathHopWidth } = usePathHopWidth();
+  const { showRegion, setShowRegion } = useShowRegion();
   const [reopenLastConversation, setReopenLastConversation] = useState(
     getReopenLastConversationEnabled
   );
@@ -500,6 +503,27 @@ export function SettingsLocalSection({
                 Append the per-hop identifier width to the hop-count badge on received messages —
                 e.g. <code className="text-[0.75rem]">(2 · 2B)</code> for a 2-hop path with 2-byte
                 hops. Direct (0-hop) messages show no width. Off by default.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3 rounded-md border border-border/60 p-3">
+            <Checkbox
+              id="show-region"
+              checked={showRegion}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                setShowRegion(v);
+                setSavedShowRegion(v);
+              }}
+              className="mt-0.5"
+            />
+            <div className="space-y-1">
+              <Label htmlFor="show-region">Show Message Region</Label>
+              <p className="text-[0.8125rem] text-muted-foreground">
+                Display the region scope (e.g. <code className="text-[0.75rem]">nl-gr</code>) in the
+                line under each message, in every channel and direct message, when the packet was
+                region-scoped. Off by default.
               </p>
             </div>
           </div>
