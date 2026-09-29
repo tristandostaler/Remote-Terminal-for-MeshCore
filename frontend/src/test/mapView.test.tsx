@@ -16,7 +16,8 @@ vi.mock('react-leaflet', () => {
   (LayersControlMock as unknown as { BaseLayer: typeof BaseLayer }).BaseLayer = BaseLayer;
   return {
     MapContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-    TileLayer: () => null,
+    TileLayer: ({ url }: { url: string }) => <div data-testid="tile-layer" data-url={url} />,
+    LayerGroup: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
     CircleMarker: forwardRef<
       HTMLDivElement,
       { children: React.ReactNode; pathOptions?: { fillColor?: string } }
@@ -40,6 +41,22 @@ vi.mock('react-leaflet', () => {
 });
 
 describe('MapView', () => {
+  it('uses anonymous Esri tiles for the dark map instead of API-keyed CARTO tiles', () => {
+    render(<MapView contacts={[]} />);
+
+    const tileUrls = screen
+      .getAllByTestId('tile-layer')
+      .map((element) => element.getAttribute('data-url'));
+
+    expect(tileUrls).toContain(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'
+    );
+    expect(tileUrls).toContain(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}'
+    );
+    expect(tileUrls.some((url) => url?.includes('cartocdn.com'))).toBe(false);
+  });
+
   it('renders a never-heard fallback for a focused contact without last_seen', () => {
     const contact: Contact = {
       public_key: 'aa'.repeat(32),
