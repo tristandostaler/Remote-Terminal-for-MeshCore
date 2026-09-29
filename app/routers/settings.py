@@ -27,6 +27,7 @@ from app.send_attempts import (
     clamp_message_retries,
 )
 from app.services import live_feed
+from app.services.region_discovery import AUTO_DISCOVER_REGIONS_OPTIONS_HOURS
 from app.telemetry_interval import (
     DEFAULT_TELEMETRY_INTERVAL_HOURS,
     TELEMETRY_INTERVAL_OPTIONS_HOURS,
@@ -107,6 +108,13 @@ class AppSettingsUpdate(BaseModel):
             f"Must be one of {list(TELEMETRY_INTERVAL_OPTIONS_HOURS)}. "
             "Effective interval is clamped up to the shortest legal value "
             "based on the current tracked-repeater count."
+        ),
+    )
+    auto_discover_regions_hours: int | None = Field(
+        default=None,
+        description=(
+            "Hours between automatic region discovery sweeps (0 = disabled). "
+            "Must be one of 0, 6, 12, 24, 72, 168."
         ),
     )
     telemetry_routed_hourly: bool | None = Field(
@@ -412,6 +420,17 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
             raw_interval = DEFAULT_TELEMETRY_INTERVAL_HOURS
         logger.info("Updating telemetry_interval_hours to %d", raw_interval)
         kwargs["telemetry_interval_hours"] = raw_interval
+
+    if update.auto_discover_regions_hours is not None:
+        if update.auto_discover_regions_hours not in AUTO_DISCOVER_REGIONS_OPTIONS_HOURS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "auto_discover_regions_hours must be one of "
+                    f"{list(AUTO_DISCOVER_REGIONS_OPTIONS_HOURS)}"
+                ),
+            )
+        kwargs["auto_discover_regions_hours"] = update.auto_discover_regions_hours
 
     # Telemetry routed hourly
     if update.telemetry_routed_hourly is not None:

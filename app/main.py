@@ -92,6 +92,7 @@ from app.services.historical_decrypt import stop_sweeps as stop_decrypt_sweeps
 from app.services.live_feed import start_live_feed, stop_live_feed
 from app.services.radio_runtime import radio_runtime as radio_manager
 from app.services.radio_stats import start_radio_stats_sampling, stop_radio_stats_sampling
+from app.services.region_discovery import stop_region_auto_discovery
 from app.version_info import get_app_build_info
 
 setup_logging()
@@ -210,6 +211,7 @@ async def lifespan(app: FastAPI):
     await stop_periodic_sync()
     await stop_telemetry_collect()
     await stop_room_polling()
+    await stop_region_auto_discovery()
     if radio_manager.meshcore:
         await radio_manager.meshcore.stop_auto_message_fetching()
     await radio_manager.disconnect()

@@ -212,6 +212,7 @@ export function SettingsRadioSection({
   const [advertIntervalHours, setAdvertIntervalHours] = useState('0');
   const [floodScope, setFloodScope] = useState('');
   const [knownRegions, setKnownRegions] = useState('');
+  const [autoDiscoverRegionsHours, setAutoDiscoverRegionsHours] = useState('0');
   const [maxRadioContacts, setMaxRadioContacts] = useState('');
   const [maxMessageRetries, setMaxMessageRetries] = useState(String(DEFAULT_MESSAGE_RETRIES));
   const [floodBusy, setFloodBusy] = useState(false);
@@ -244,6 +245,7 @@ export function SettingsRadioSection({
     setAdvertIntervalHours(String(Math.round(appSettings.advert_interval / 3600)));
     setFloodScope(stripRegionScopePrefix(appSettings.flood_scope));
     setKnownRegions((appSettings.known_regions ?? []).join('\n'));
+    setAutoDiscoverRegionsHours(String(appSettings.auto_discover_regions_hours ?? 0));
     setMaxRadioContacts(String(appSettings.max_radio_contacts));
     setMaxMessageRetries(String(appSettings.max_message_retries));
   }, [appSettings]);
@@ -489,6 +491,13 @@ export function SettingsRadioSection({
         .filter((r) => r.length > 0);
       if (JSON.stringify(parsedRegions) !== JSON.stringify(appSettings.known_regions ?? [])) {
         update.known_regions = parsedRegions;
+      }
+      const newAutoDiscoverHours = parseInt(autoDiscoverRegionsHours, 10);
+      if (
+        !isNaN(newAutoDiscoverHours) &&
+        newAutoDiscoverHours !== (appSettings.auto_discover_regions_hours ?? 0)
+      ) {
+        update.auto_discover_regions_hours = newAutoDiscoverHours;
       }
       const newMaxRadioContacts = parseInt(maxRadioContacts, 10);
       if (!isNaN(newMaxRadioContacts) && newMaxRadioContacts !== appSettings.max_radio_contacts) {
@@ -1409,6 +1418,29 @@ export function SettingsRadioSection({
             </div>
           )}
         </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="auto-discover-regions">Auto-discover regions</Label>
+        <select
+          id="auto-discover-regions"
+          value={autoDiscoverRegionsHours}
+          onChange={(e) => setAutoDiscoverRegionsHours(e.target.value)}
+          className="h-9 px-3 rounded-md border border-input bg-background text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+        >
+          <option value="0">Off</option>
+          <option value="6">Every 6 hours</option>
+          <option value="12">Every 12 hours</option>
+          <option value="24">Every day</option>
+          <option value="72">Every 3 days</option>
+          <option value="168">Every week</option>
+        </select>
+        <p className="text-[0.8125rem] text-muted-foreground">
+          Periodically asks up to 8 recently heard repeaters for their flood-allowed regions (the
+          same request as Discover Regions) and adds any new names to Known Regions. Uses a few
+          radio transmissions per sweep, and only repeaters in direct range answer. The first sweep
+          runs one interval after the app starts.
+        </p>
       </div>
 
       <div className="space-y-2">

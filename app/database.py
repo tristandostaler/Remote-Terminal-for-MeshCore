@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
     tracked_telemetry_repeaters TEXT DEFAULT '[]',
     auto_resend_channel INTEGER DEFAULT 0,
     telemetry_interval_hours INTEGER DEFAULT 8,
+    auto_discover_regions_hours INTEGER DEFAULT 0,
     vapid_private_key TEXT DEFAULT '',
     vapid_public_key TEXT DEFAULT '',
     push_conversations TEXT DEFAULT '[]',
