@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageList } from '../components/MessageList';
+import { ShowRegionProvider } from '../contexts/ShowRegionContext';
 import type { Contact, Message } from '../types';
 
 const scrollIntoViewMock = vi.fn();
@@ -375,7 +376,13 @@ describe('message meta line: every glyph explains itself', () => {
 
   it('says what the region badge means, not just its name', () => {
     render(
-      <MessageList messages={[createMessage({ region: 'nl-gr' })]} contacts={[]} loading={false} />
+      <ShowRegionProvider showRegion setShowRegion={() => {}}>
+        <MessageList
+          messages={[createMessage({ region: 'nl-gr' })]}
+          contacts={[]}
+          loading={false}
+        />
+      </ShowRegionProvider>
     );
 
     expect(screen.getByText('nl-gr').getAttribute('title')).toContain(

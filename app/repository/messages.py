@@ -27,9 +27,10 @@ class MessageRepository:
         free_text: str
         user_terms: list[str]
         channel_terms: list[str]
+        region_terms: list[str]
 
     _SEARCH_OPERATOR_RE = re.compile(
-        r'(?<!\S)(user|channel):(?:"((?:[^"\\]|\\.)*)"|(\S+))',
+        r'(?<!\S)(user|channel|region):(?:"((?:[^"\\]|\\.)*)"|(\S+))',
         re.IGNORECASE,
     )
 
@@ -274,6 +275,7 @@ class MessageRepository:
     def _parse_search_query(q: str) -> _SearchQuery:
         user_terms: list[str] = []
         channel_terms: list[str] = []
+        region_terms: list[str] = []
         fragments: list[str] = []
         last_end = 0
 
@@ -281,14 +283,19 @@ class MessageRepository:
             fragments.append(q[last_end : match.start()])
             raw_value = match.group(2) if match.group(2) is not None else match.group(3) or ""
             value = MessageRepository._unescape_search_quoted_value(raw_value)
-            if match.group(1).lower() == "user":
+            operator = match.group(1).lower()
+            if operator == "user":
                 user_terms.append(value)
+            elif operator == "region":
+                region_terms.append(value)
             else:
                 channel_terms.append(value)
             last_end = match.end()
 
-        if not user_terms and not channel_terms:
-            return MessageRepository._SearchQuery(free_text=q, user_terms=[], channel_terms=[])
+        if not user_terms and not channel_terms and not region_terms:
+            return MessageRepository._SearchQuery(
+                free_text=q, user_terms=[], channel_terms=[], region_terms=[]
+            )
 
         fragments.append(q[last_end:])
         free_text = " ".join(fragment.strip() for fragment in fragments if fragment.strip())
@@ -296,6 +303,7 @@ class MessageRepository:
             free_text=free_text,
             user_terms=user_terms,
             channel_terms=channel_terms,
+            region_terms=region_terms,
         )
 
     @staticmethod
@@ -510,6 +518,17 @@ class MessageRepository:
                 scope_clauses.append(clause)
                 params.extend(clause_params)
             query += f" AND ({' OR '.join(scope_clauses)})"
+
+        if search_query and search_query.region_terms:
+            # "none" matches messages that carried no region scope.
+            region_clauses: list[str] = []
+            for term in search_query.region_terms:
+                if term.lower() == "none":
+                    region_clauses.append("messages.region IS NULL")
+                else:
+                    region_clauses.append("messages.region = ? COLLATE NOCASE")
+                    params.append(term)
+            query += f" AND ({' OR '.join(region_clauses)})"
 
         if search_query and search_query.free_text:
             escaped_q = MessageRepository._escape_like(search_query.free_text)

@@ -34,6 +34,7 @@ import {
 import { EmojiPickerPanel } from './EmojiPickerPanel';
 import { useRichPayloads } from '../contexts/RichPayloadContext';
 import { usePathHopWidth } from '../contexts/PathHopWidthContext';
+import { useShowRegion } from '../contexts/ShowRegionContext';
 import { formatHopCounts, formatPathHopWidths, type SenderInfo } from '../utils/pathUtils';
 import { getDirectContactRoute } from '../utils/pathUtils';
 import { ContactAvatar } from './ContactAvatar';
@@ -983,7 +984,17 @@ function HopCountBadge({ paths, onClick, outgoing = false }: HopCountBadgeProps)
 }
 
 // Region scope badge for messages that arrived via a transport-routed (region-scoped) packet.
-function RegionBadge({ region }: { region: string }) {
+function RegionBadge({ region }: { region: string | null | undefined }) {
+  if (!region) {
+    return (
+      <span
+        className="align-middle text-[0.625rem] tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
+        title="No region scope: this packet was not region-scoped"
+      >
+        region: none
+      </span>
+    );
+  }
   return (
     <span
       className="align-middle text-[0.625rem] uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
@@ -1145,6 +1156,7 @@ function MessageMetaLine({
   onShowPaths?: () => void;
   onOpenActions?: () => void;
 }) {
+  const { showRegion } = useShowRegion();
   const status = message.outgoing ? displaySendStatus(message) : null;
   const compression = compressionLabel(message);
   const attempts = message.send_attempts ?? 0;
@@ -1166,7 +1178,7 @@ function MessageMetaLine({
       {paths && paths.length > 0 && onShowPaths && (
         <HopCountBadge paths={paths} onClick={onShowPaths} outgoing={message.outgoing} />
       )}
-      {message.region && <RegionBadge region={message.region} />}
+      {showRegion && <RegionBadge region={message.region} />}
       {message.recovered_at ? <RecoveredBadge recoveredAt={message.recovered_at} /> : null}
       {status &&
         glyph &&

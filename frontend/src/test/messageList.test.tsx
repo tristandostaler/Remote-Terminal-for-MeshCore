@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MessageList } from '../components/MessageList';
 import { api } from '../api';
 import { PathHopWidthProvider } from '../contexts/PathHopWidthContext';
+import { ShowRegionProvider } from '../contexts/ShowRegionContext';
 import { CONTACT_TYPE_ROOM, type Contact, type Message } from '../types';
 
 const scrollIntoViewMock = vi.fn();
@@ -64,13 +65,15 @@ describe('MessageList channel sender rendering', () => {
     expect(screen.getByTestId('corrupt-avatar')).toBeInTheDocument();
   });
 
-  it('renders a region badge for region-scoped channel messages', () => {
+  it('renders a region badge for region-scoped channel messages when the toggle is on', () => {
     render(
-      <MessageList
-        messages={[createMessage({ sender_name: 'Alice', region: 'nl-gr' })]}
-        contacts={[]}
-        loading={false}
-      />
+      <ShowRegionProvider showRegion setShowRegion={() => {}}>
+        <MessageList
+          messages={[createMessage({ sender_name: 'Alice', region: 'nl-gr' })]}
+          contacts={[]}
+          loading={false}
+        />
+      </ShowRegionProvider>
     );
 
     expect(screen.getByText('nl-gr')).toBeInTheDocument();
@@ -79,16 +82,30 @@ describe('MessageList channel sender rendering', () => {
     ).toBeInTheDocument();
   });
 
-  it('does not render a region badge for unscoped messages', () => {
+  it('hides the region badge by default', () => {
     render(
       <MessageList
-        messages={[createMessage({ sender_name: 'Alice', region: null })]}
+        messages={[createMessage({ sender_name: 'Alice', region: 'nl-gr' })]}
         contacts={[]}
         loading={false}
       />
     );
 
     expect(screen.queryByText('nl-gr')).not.toBeInTheDocument();
+  });
+
+  it('renders "region: none" for unscoped messages when the toggle is on', () => {
+    render(
+      <ShowRegionProvider showRegion setShowRegion={() => {}}>
+        <MessageList
+          messages={[createMessage({ sender_name: 'Alice', region: null })]}
+          contacts={[]}
+          loading={false}
+        />
+      </ShowRegionProvider>
+    );
+
+    expect(screen.getByText('region: none')).toBeInTheDocument();
   });
 
   it('shows per-hop byte width in the path badge when the toggle is on', () => {
