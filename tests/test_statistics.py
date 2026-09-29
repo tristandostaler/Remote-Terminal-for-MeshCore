@@ -53,6 +53,8 @@ class TestStatisticsEmpty:
             "scoped_senders": 0,
             "scoped_senders_pct": 0.0,
             "truncated": False,
+            "regions": [],
+            "regions_total_messages": 0,
         }
         assert result["packets_over_time"]["buckets"] == []
         assert result["window"] == "1d"
@@ -434,6 +436,36 @@ class TestRegionScopeStats:
             "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
             (timestamp, data, tag * 32),
         )
+
+    @pytest.mark.asyncio
+    async def test_region_breakdown_counts_and_percentages(self, test_db):
+        """Each region gets a count and share of all channel messages in the window."""
+        now = int(time.time())
+        conn = test_db.conn
+        rows = [
+            ("#alpha", now),
+            ("#alpha", now),
+            ("#beta", now),
+            (None, now),
+            ("#alpha", now - 90000),  # outside the 24h window
+        ]
+        for i, (region, ts) in enumerate(rows):
+            await conn.execute(
+                "INSERT INTO messages (type, conversation_key, text, received_at, outgoing, region)"
+                " VALUES ('CHAN', ?, ?, ?, 0, ?)",
+                ("ab" * 16, f"m{i}", ts, region),
+            )
+        await conn.commit()
+
+        stats = (await StatisticsRepository.get_all())["region_scope"]
+
+        assert stats["regions_total_messages"] == 4
+        assert [(r["region"], r["message_count"]) for r in stats["regions"]] == [
+            ("#alpha", 2),
+            ("#beta", 1),
+        ]
+        assert stats["regions"][0]["pct"] == pytest.approx(50.0)
+        assert stats["regions"][1]["pct"] == pytest.approx(25.0)
 
     @pytest.mark.asyncio
     async def test_counts_scoped_flood_group_text_only(self, test_db):

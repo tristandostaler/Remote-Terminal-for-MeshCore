@@ -430,4 +430,30 @@ describe('StatisticsView', () => {
       expect(screen.getByText('Failed to load statistics.')).toBeInTheDocument();
     });
   });
+  it('lists discovered regions and opens search filtered to the clicked one', async () => {
+    mockStatsFetch({
+      ...emptyStats,
+      region_scope: {
+        ...emptyStats.region_scope,
+        total_messages: 10,
+        regions_total_messages: 8,
+        regions: [
+          { region: '#alpha', message_count: 6, pct: 75 },
+          { region: '#beta', message_count: 0, pct: 0 },
+        ],
+      },
+    });
+    const onSearchRegion = vi.fn();
+
+    render(<StatisticsView onSearchRegion={onSearchRegion} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('#alpha')).toBeInTheDocument();
+    });
+    expect(screen.getByText('75.0%')).toBeInTheDocument();
+    expect(screen.getByText('#beta')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByText('#alpha'));
+    expect(onSearchRegion).toHaveBeenCalledWith('#alpha');
+  });
 });

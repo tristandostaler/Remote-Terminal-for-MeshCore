@@ -1200,7 +1200,17 @@ export const DEFAULT_STATS_WINDOW: StatsWindow = '1d';
  * captures), while senders requires decryption and is therefore noise-free but
  * limited to channels we hold keys for.
  */
+export interface RegionBreakdownEntry {
+  region: string;
+  message_count: number;
+  /** Share of all channel messages in the window. */
+  pct: number;
+}
+
 export interface RegionScopeStats {
+  /** Per-region channel-message counts; absent on backends that predate it. */
+  regions?: RegionBreakdownEntry[];
+  regions_total_messages?: number;
   total_messages: number;
   scoped_messages: number;
   scoped_pct: number;
