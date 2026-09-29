@@ -3,7 +3,7 @@ import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app import host_clock
 from app.models import (
@@ -946,10 +946,12 @@ class GuessRegionsRequest(BaseModel):
         default_factory=list,
         description="Extra region names to test, e.g. imported from a website",
     )
-    include_builtin: bool = Field(
+    brute_force: bool = Field(
         default=True,
-        description="Also try every 2- and 3-letter code plus subdivision pairs (onqc, ...)",
+        description="Also try every a-z name with min_letters to max_letters letters",
     )
+    min_letters: int = Field(default=2, ge=1, le=region_tools.MAX_LETTERS)
+    max_letters: int = Field(default=3, ge=1, le=region_tools.MAX_LETTERS)
     max_packets: int = Field(default=150, ge=1, le=region_tools.MAX_PACKETS)
     min_hits: int = Field(
         default=2,
@@ -957,6 +959,12 @@ class GuessRegionsRequest(BaseModel):
         le=50,
         description="Packets a name must explain to be reported (2 makes chance matches negligible)",
     )
+
+    @model_validator(mode="after")
+    def _check_letter_range(self) -> "GuessRegionsRequest":
+        if self.min_letters > self.max_letters:
+            raise ValueError("min_letters must not exceed max_letters")
+        return self
 
 
 class GuessedRegion(BaseModel):
@@ -988,12 +996,14 @@ async def guess_regions(request: GuessRegionsRequest) -> GuessRegionsResponse:
     """Test candidate region names against stored region-scoped packets.
 
     Transport codes are one-way, so this cannot read names out of traffic; it
-    checks candidates (built-in codes plus any supplied) and reports those that
+    brute-forces every a-z name in the requested length range (plus any supplied) and reports those that
     explain at least ``min_hits`` stored packets no known region already explains.
     """
     known = (await AppSettingsRepository.get()).known_regions
     candidates = region_tools.expand_candidates(
-        request.candidates, include_builtin=request.include_builtin
+        request.candidates,
+        min_letters=request.min_letters if request.brute_force else None,
+        max_letters=request.max_letters if request.brute_force else None,
     )
     rows = await RawPacketRepository.recent_data(region_tools.MAX_SCAN_ROWS)
 

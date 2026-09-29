@@ -46,13 +46,18 @@ def test_guess_min_hits_filters_chance_matches():
     assert results == []
 
 
-def test_builtin_candidates_cover_iata_provinces_and_pairs():
-    names = set(region_tools.builtin_candidates())
-    assert {"yul", "qc", "on", "onqc", "can"} <= names
+def test_brute_force_candidates_cover_letter_range():
+    names = region_tools.brute_force_candidates(2, 3)
+    assert len(names) == 26**2 + 26**3
+    assert {"qc", "yul"} <= set(names)
+    assert region_tools.brute_force_candidates(1, 1) == list("abcdefghijklmnopqrstuvwxyz")
+    assert len(region_tools.brute_force_candidates(4, 4)) == 26**4
 
 
 def test_expand_candidates_tries_typed_and_lowercase_and_rejects_junk():
-    names = region_tools.expand_candidates(["#QC", "bad name", "*", ""], include_builtin=False)
+    names = region_tools.expand_candidates(
+        ["#QC", "bad name", "*", ""], min_letters=None, max_letters=None
+    )
     assert names == ["QC", "qc"]
 
 
@@ -111,7 +116,7 @@ async def test_guess_endpoint_reports_unknown_regions(test_db):
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
         response = await client.post(
-            "/api/settings/regions/guess", json={"candidates": ["yul"], "include_builtin": False}
+            "/api/settings/regions/guess", json={"candidates": ["yul"], "brute_force": False}
         )
 
     assert response.status_code == 200
@@ -127,3 +132,29 @@ async def test_import_endpoint_rejects_private_url(test_db):
             "/api/settings/regions/import", json={"url": "http://127.0.0.1/regions"}
         )
     assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_guess_endpoint_brute_forces_letter_range(test_db):
+    for raw in _packets("yul", 3):
+        await test_db.conn.execute(
+            "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
+            (1_700_000_000, raw, raw[-32:].ljust(32, b"\0")),
+        )
+    await test_db.conn.commit()
+    await AppSettingsRepository.update(known_regions=[])
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        found = await client.post(
+            "/api/settings/regions/guess", json={"min_letters": 3, "max_letters": 3}
+        )
+        missed = await client.post(
+            "/api/settings/regions/guess", json={"min_letters": 2, "max_letters": 2}
+        )
+        bad = await client.post(
+            "/api/settings/regions/guess", json={"min_letters": 3, "max_letters": 2}
+        )
+
+    assert [r["region"] for r in found.json()["results"]] == ["yul"]
+    assert missed.json()["results"] == []
+    assert bad.status_code == 422

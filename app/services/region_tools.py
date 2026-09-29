@@ -1,4 +1,4 @@
-"""Region name guessing and importing.
+"""Region name brute-forcing and importing.
 
 A packet's transport code is a 16-bit keyed MAC over its payload, so a region
 name can never be read back out of stored traffic. It can only be *tested*: for
@@ -14,6 +14,7 @@ other websites.
 
 import hmac
 import ipaddress
+import itertools
 import json
 import re
 import socket
@@ -27,70 +28,14 @@ from urllib.parse import urljoin, urlparse
 from app.path_utils import UNDEFINED_PAYLOAD_TYPES, parse_packet_envelope
 from app.region_resolver import _region_key
 
-# Canadian provinces/territories and US states + DC, as commonly used in
-# region names, plus country codes. Joined pairs (e.g. "onqc") cover regions that
-# span several subdivisions.
-CA_SUBDIVISIONS = ("ab", "bc", "mb", "nb", "nl", "ns", "nt", "nu", "on", "pe", "qc", "sk", "yt")
-US_SUBDIVISIONS = [
-    "al",
-    "ak",
-    "az",
-    "ar",
-    "ca",
-    "co",
-    "ct",
-    "de",
-    "dc",
-    "fl",
-    "ga",
-    "hi",
-    "id",
-    "il",
-    "in",
-    "ia",
-    "ks",
-    "ky",
-    "la",
-    "me",
-    "md",
-    "ma",
-    "mi",
-    "mn",
-    "ms",
-    "mo",
-    "mt",
-    "ne",
-    "nv",
-    "nh",
-    "nj",
-    "nm",
-    "ny",
-    "nc",
-    "nd",
-    "oh",
-    "ok",
-    "or",
-    "pa",
-    "ri",
-    "sc",
-    "sd",
-    "tn",
-    "tx",
-    "ut",
-    "vt",
-    "va",
-    "wa",
-    "wv",
-    "wi",
-    "wy",
-]
-COUNTRY_CODES = ("can", "usa", "us", "ca", "uk", "gb", "mex", "aus", "nz", "nzl", "deu", "fra")
-
 # Region names use these characters (mirrors firmware RegionMap::is_name_char).
 _NAME_RE = re.compile(r"^[A-Za-z0-9$-]{1,30}$")
 
 # Work caps so a single request cannot pin the CPU indefinitely.
-MAX_CANDIDATES = 200_000
+MAX_CANDIDATES = 500_000
+DEFAULT_MIN_LETTERS = 2
+DEFAULT_MAX_LETTERS = 3
+MAX_LETTERS = 4
 MAX_PACKETS = 2_000
 MAX_SECONDS = 60.0
 MAX_SCAN_ROWS = 250_000
@@ -102,21 +47,16 @@ MAX_IMPORTED_NAMES = 2_000
 MAX_REDIRECTS = 3
 
 
-def builtin_candidates() -> list[str]:
-    """Names worth trying without any hints: 2- and 3-letter codes and pairs.
-
-    The 3-letter space covers every IATA airport code, the 2-letter space covers
-    provinces/states, and pairs of subdivisions cover multi-region names such as
-    ``onqc``. All lowercase; user-supplied names are tried as typed as well.
-    """
+def brute_force_candidates(
+    min_letters: int = DEFAULT_MIN_LETTERS, max_letters: int = DEFAULT_MAX_LETTERS
+) -> list[str]:
+    """Every lowercase a-z name with between ``min_letters`` and ``max_letters`` letters."""
     letters = string.ascii_lowercase
-    names: list[str] = []
-    names.extend(a + b for a in letters for b in letters)
-    names.extend(a + b + c for a in letters for b in letters for c in letters)
-    subdivisions = sorted({*CA_SUBDIVISIONS, *US_SUBDIVISIONS})
-    names.extend(a + b for a in subdivisions for b in subdivisions if a != b)
-    names.extend(COUNTRY_CODES)
-    return names
+    return [
+        "".join(combo)
+        for length in range(min_letters, max_letters + 1)
+        for combo in itertools.product(letters, repeat=length)
+    ]
 
 
 def clean_candidate(raw: str) -> str | None:
@@ -129,8 +69,14 @@ def clean_candidate(raw: str) -> str | None:
     return name
 
 
-def expand_candidates(user_names: Iterable[str], *, include_builtin: bool) -> list[str]:
-    """Deduplicated candidate list: user names (as typed and lowercased) then built-ins."""
+def expand_candidates(
+    user_names: Iterable[str],
+    *,
+    min_letters: int | None = DEFAULT_MIN_LETTERS,
+    max_letters: int | None = DEFAULT_MAX_LETTERS,
+) -> list[str]:
+    """Deduplicated candidate list: user names (as typed and lowercased), then every
+    a-z name of ``min_letters``..``max_letters`` letters (skipped when either is None)."""
     out: list[str] = []
     seen: set[str] = set()
 
@@ -145,8 +91,8 @@ def expand_candidates(user_names: Iterable[str], *, include_builtin: bool) -> li
             continue
         add(name)
         add(name.lower())
-    if include_builtin:
-        for name in builtin_candidates():
+    if min_letters is not None and max_letters is not None:
+        for name in brute_force_candidates(min_letters, max_letters):
             add(name)
     return out[:MAX_CANDIDATES]
 
@@ -421,7 +367,7 @@ __all__ = [
     "RegionImportError",
     "GuessResult",
     "ScopedPacket",
-    "builtin_candidates",
+    "brute_force_candidates",
     "expand_candidates",
     "extract_region_names",
     "fetch_region_names",

@@ -6,15 +6,24 @@ import { api } from '../../api';
 import type { GuessRegionsResponse, ImportRegionsResponse } from '../../types';
 
 /**
- * Two ways to fill Known Regions without asking a repeater: guess names against
- * stored region-scoped packets, and import a list published on a website.
+ * Two ways to fill Known Regions without asking a repeater: brute-force names
+ * against stored region-scoped packets, and import a list published on a website.
  *
- * A packet's region code is a one-way hash, so "guess" tests candidate names
- * (every 2/3-letter code, province/state pairs like onqc, plus anything imported
+ * A packet's region code is a one-way hash, so "brute force" tests candidate names
+ * (every a-z name within a configurable letter range, plus anything imported
  * here) and reports the ones that explain several stored packets.
  */
+const MAX_LETTERS = 4;
+
+const clampLetters = (value: string, fallback: number) => {
+  const n = Number.parseInt(value, 10);
+  return Number.isNaN(n) ? fallback : Math.min(MAX_LETTERS, Math.max(1, n));
+};
+
 export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: string[]) => void }) {
   const [guessing, setGuessing] = useState(false);
+  const [minLetters, setMinLetters] = useState(2);
+  const [maxLetters, setMaxLetters] = useState(3);
   const [guess, setGuess] = useState<GuessRegionsResponse | null>(null);
   const [url, setUrl] = useState('');
   const [importing, setImporting] = useState(false);
@@ -23,7 +32,7 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
   const runGuess = async (candidates: string[] = []) => {
     setGuessing(true);
     try {
-      const data = await api.guessRegions(candidates);
+      const data = await api.guessRegions(candidates, minLetters, maxLetters);
       setGuess(data);
       if (data.tested_packets === 0) {
         toast.info(
@@ -39,7 +48,7 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
         );
       }
     } catch (err) {
-      toast.error('Failed to guess regions', {
+      toast.error('Failed to brute-force regions', {
         description: err instanceof Error ? err.message : undefined,
       });
     } finally {
@@ -93,7 +102,7 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
       <div className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium">
-            Guess regions from stored packets
+            Brute-force regions from stored packets
           </span>
           <Button
             type="button"
@@ -102,15 +111,49 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
             onClick={() => void runGuess()}
             disabled={guessing}
           >
-            {guessing ? 'Guessing... (about 10s)' : 'Guess Regions'}
+            {guessing ? 'Brute forcing...' : 'Brute Force Regions'}
           </Button>
         </div>
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <label className="flex items-center gap-1">
+            Min letters
+            <Input
+              type="number"
+              min={1}
+              max={MAX_LETTERS}
+              className="w-16"
+              value={minLetters}
+              onChange={(e) => {
+                const min = clampLetters(e.target.value, minLetters);
+                setMinLetters(min);
+                if (min > maxLetters) setMaxLetters(min);
+              }}
+            />
+          </label>
+          <label className="flex items-center gap-1">
+            Max letters
+            <Input
+              type="number"
+              min={1}
+              max={MAX_LETTERS}
+              className="w-16"
+              value={maxLetters}
+              onChange={(e) => {
+                const max = clampLetters(e.target.value, maxLetters);
+                setMaxLetters(max);
+                if (max < minLetters) setMinLetters(max);
+              }}
+            />
+          </label>
+        </div>
         <p className="text-[0.8125rem] text-muted-foreground">
-          Region names cannot be read back from traffic, only tested. This tries every 2- and
-          3-letter code (airport codes, provinces, states), pairs such as onqc, and any names
-          imported below against your stored region-scoped packets, and lists the names that explain
-          at least two of them. A name matching two different packets by chance is about a
-          one-in-four-billion event, so listed names are real. Names nobody guessed cannot be found.
+          Region names cannot be read back from traffic, only tested. This tries every a-z name from{' '}
+          {minLetters} to {maxLetters} letters, and any names imported below, against your stored
+          region-scoped packets, and lists the names that explain at least two of them. A name
+          matching two different packets by chance is about a one-in-four-billion event, so listed
+          names are real. Each extra letter multiplies the work by 26 (4 letters can take a minute
+          or more and may stop at the time limit). Names with digits or hyphens cannot be found this
+          way.
         </p>
         {guess && guess.results.length > 0 && (
           <div className="space-y-1">

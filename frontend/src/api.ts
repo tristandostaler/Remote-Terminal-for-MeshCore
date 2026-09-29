@@ -369,10 +369,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(publicKeys && publicKeys.length > 0 ? { public_keys: publicKeys } : {}),
     }),
-  guessRegions: (candidates: string[] = [], includeBuiltin = true) =>
+  guessRegions: (candidates: string[] = [], minLetters = 2, maxLetters = 3) =>
     fetchJson<GuessRegionsResponse>('/settings/regions/guess', {
       method: 'POST',
-      body: JSON.stringify({ candidates, include_builtin: includeBuiltin }),
+      body: JSON.stringify({ candidates, min_letters: minLetters, max_letters: maxLetters }),
     }),
   importRegions: (url: string) =>
     fetchJson<ImportRegionsResponse>('/settings/regions/import', {

@@ -10,7 +10,7 @@ const okJson = (body: unknown) =>
 describe('RegionToolsPanel', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('lists guessed regions and adds them to known regions', async () => {
+  it('lists brute-forced regions and adds them to known regions', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
       okJson({
         scoped_packets: 12,
@@ -23,7 +23,7 @@ describe('RegionToolsPanel', () => {
     const onAdd = vi.fn();
     render(<RegionToolsPanel onAddRegions={onAdd} />);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Guess Regions' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Brute Force Regions' }));
     await waitFor(() => expect(screen.getByText('yul')).toBeInTheDocument());
     await userEvent.click(screen.getByRole('button', { name: 'Add to Known Regions' }));
 
