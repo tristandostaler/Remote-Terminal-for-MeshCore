@@ -616,7 +616,9 @@ type ConversationType =
   /** Per-node stats page; `id` is the node's public key. */
   | 'nodeStats'
   /** Node vs live.meshcore.ca channel-message comparison. */
-  | 'liveCompare';
+  | 'liveCompare'
+  /** Nodes whose owner is worth telling about a problem (drifting clocks). */
+  | 'ownerOutreach';
 
 export interface Conversation {
   type: ConversationType;
@@ -672,6 +674,8 @@ export interface AppSettings {
   max_message_retries: number;
   telemetry_interval_hours: number;
   auto_discover_regions_hours: number;
+  /** Days between owner-info refreshes of repeaters and rooms; 0 = off. */
+  owner_info_refresh_days: number;
   telemetry_routed_hourly: boolean;
   /** Apps on the virtual companion node may change radio settings (default off). */
   virtual_node_allow_admin_commands: boolean;
@@ -715,6 +719,7 @@ export interface AppSettingsUpdate {
   live_feed_channels?: string[];
   live_feed_poll_interval?: number;
   auto_discover_regions_hours?: number;
+  owner_info_refresh_days?: number;
 }
 
 /** One app currently connected to the virtual companion node. */
@@ -1576,6 +1581,68 @@ export interface NodeStatsResponse {
   generated_at: number;
   /** Null when this node's clock has never been measured. */
   clock_drift: NodeClockDriftStats | null;
+  /** Owner info and notes; always present, since the section edits it. */
+  owner: ContactOwnerInfo | null;
+}
+
+export interface ContactOwnerHint {
+  kind: 'callsign' | 'email' | 'handle' | 'url';
+  value: string;
+  source: 'name' | 'owner_info' | 'notes';
+}
+
+/**
+ * Who runs a node. `firmware_*` is what the node itself reported (repeater /
+ * room `owner.info`) and only a fetch writes it; `notes` is the operator's own
+ * text and only a person writes it.
+ */
+export interface ContactOwnerInfo {
+  public_key: string;
+  firmware_owner_info: string | null;
+  firmware_version: string | null;
+  /** Last time the node answered an owner-info request. */
+  fetched_at: number | null;
+  /** Last time a request was tried, answered or not. */
+  attempted_at: number | null;
+  attempt_status: 'ok' | 'no_reply' | 'login_failed' | 'error' | string | null;
+  notes: string;
+  notes_updated_at: number | null;
+  /** When the owner was last marked as contacted. */
+  notified_at: number | null;
+  hints: ContactOwnerHint[];
+}
+
+export interface ContactOwnerUpdate {
+  notes?: string;
+  /** true stamps notified_at with now, false clears it. */
+  notified?: boolean;
+}
+
+export interface OwnerOutreachItem {
+  public_key: string;
+  name: string | null;
+  type: number;
+  issue: 'clock_drift' | 'unset_clock';
+  /** Newest reading; positive = node ahead of this server. */
+  drift_seconds: number;
+  severity: DriftSeverity;
+  readings: number;
+  last_observed_at: number;
+  /** Marked contacted within the lookback, so give them time. */
+  recently_notified: boolean;
+  owner: ContactOwnerInfo;
+}
+
+export interface OwnerOutreachResponse {
+  generated_at: number;
+  lookback_seconds: number;
+  threshold_seconds: number;
+  min_readings: number;
+  nodes_measured: number;
+  median_drift_seconds: number | null;
+  /** The mesh-wide median is itself off, so this server's clock is the likelier culprit. */
+  server_clock_suspect: boolean;
+  items: OwnerOutreachItem[];
 }
 
 /** The node stats page defaults wider than the mesh snapshot — a trend needs lever arm. */

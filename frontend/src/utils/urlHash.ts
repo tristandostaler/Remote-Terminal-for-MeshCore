@@ -15,7 +15,8 @@ interface ParsedHashConversation {
     | 'bots'
     | 'statistics'
     | 'nodeStats'
-    | 'liveCompare';
+    | 'liveCompare'
+    | 'ownerOutreach';
   /** Conversation identity token (channel key or contact public key, or legacy name token) */
   name: string;
   /** Optional human-readable label segment (ignored for identity resolution) */
@@ -76,6 +77,10 @@ export function parseHashConversation(): ParsedHashConversation | null {
 
   if (hash === 'live-compare') {
     return { type: 'liveCompare', name: 'liveCompare' };
+  }
+
+  if (hash === 'owner-outreach') {
+    return { type: 'ownerOutreach', name: 'ownerOutreach' };
   }
 
   // Node stats deep link: #node-stats/{publicKey} (optionally /{label})
@@ -202,6 +207,7 @@ export function getConversationHash(conv: Conversation | null): string {
   if (conv.type === 'trace') return '#trace';
   if (conv.type === 'statistics') return '#statistics';
   if (conv.type === 'liveCompare') return '#live-compare';
+  if (conv.type === 'ownerOutreach') return '#owner-outreach';
   if (conv.type === 'bots') {
     return conv.botId ? `#bots/${encodeURIComponent(conv.botId)}` : '#bots';
   }

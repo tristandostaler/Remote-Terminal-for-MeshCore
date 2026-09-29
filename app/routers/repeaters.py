@@ -41,7 +41,11 @@ from app.models import (
     TelemetryHistoryEntry,
 )
 from app.radio_sync import ClockSyncResult, _sync_repeater_clock, fix_forward_clock
-from app.repository import ContactRepository, RepeaterTelemetryRepository
+from app.repository import (
+    ContactOwnerRepository,
+    ContactRepository,
+    RepeaterTelemetryRepository,
+)
 from app.routers.contacts import _ensure_on_radio, _resolve_contact_or_404
 from app.routers.server_control import (
     batch_cli_fetch,
@@ -430,6 +434,14 @@ async def repeater_owner_info(public_key: str) -> RepeaterOwnerInfoResponse:
     _require_repeater(contact)
 
     owner = await fetch_repeater_owner_info_binary(contact) or {}
+    # Keep what the repeater said (or that it said nothing) for the node stats
+    # page and the owner outreach list; the sweep refreshes it from here on.
+    await ContactOwnerRepository.record_fetch(
+        contact.public_key,
+        status="ok" if owner else "no_reply",
+        owner_info=owner.get("owner_info"),
+        firmware_version=owner.get("firmware_version"),
+    )
 
     # Guest password is admin-only; still fetched via CLI (guests get None).
     cli = await _batch_cli_fetch(

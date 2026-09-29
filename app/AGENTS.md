@@ -351,6 +351,21 @@ Two poisons are handled explicitly, and **both must stay handled** — each one 
 
 `find_clock_steps` takes its baseline from the **median consecutive change**, not from the fitted trend. On a reset-happy clock the fitted trend is near zero, so using it marked every ordinary reading as a step — the exact opposite of the intent. A median cannot be inflated by the jumps it is judging.
 
+### Owner info and outreach
+
+`contact_owner` (migration 091, `app/repository/contact_owner.py`) keeps who runs a node. Two kinds of data share the row and never overwrite each other:
+
+- **What the node reported**: `firmware_owner_info` / `firmware_version` from the guest-accessible owner-info binary request. Written by `POST /contacts/{key}/repeater/owner-info` and by the background sweep. Only an answered request (`attempt_status = ok`) replaces the fields, and an empty answer clears them. A miss only moves `attempted_at`, so a node out of range this week keeps what it said last week.
+- **What the operator typed**: `notes` and `notified_at` (the "contacted" mark), written only by `PATCH /contacts/{key}/owner`.
+
+The table has **no foreign key** onto `contacts`, on purpose: notes are typed by hand and must survive a contact being deleted and heard again.
+
+`hints` are not stored. `extract_contact_hints` derives them on read from the name, `owner.info` and notes: upper-case ITU-shaped callsigns, emails, URLs, `@handles` and `discord:`-style labelled handles. The patterns are deliberately conservative; a false callsign is worse than a missed one.
+
+**Sweep** (`app/services/owner_info_sweep.py`, setting `owner_info_refresh_days`, default 7, options 0/1/3/7/14/30): every 5 minutes it refreshes the **one** most overdue node, which means login plus request under a non-blocking `radio_operation`. Never-attempted nodes go first. Only nodes heard within the interval qualify. Repeaters get a guest login. Rooms qualify **only with a stored room-poll credential**: a login is what makes a room push posts since the radio's per-contact `sync_since`, which is zero for a room we never joined, so a guest login to every room would dump their history into new conversations. `request_repeater_owner_info(mc, contact)` is the lock-free half of `fetch_repeater_owner_info_binary`; use it when the caller already holds the radio.
+
+**Outreach** (`GET /contacts/owner-outreach`, `ContactOwnerRepository.list_outreach`) flags a node when its newest `OUTREACH_RECENT_READINGS` (3) hourly drift buckets within `OUTREACH_LOOKBACK_SECONDS` (7 d) are all beyond `OUTREACH_THRESHOLD_SECONDS` (`MINOR_SECONDS`, i.e. major or severe) or unset. It needs at least 2 readings, so one odd advert never lists a node. `server_clock_suspect` is set when the signed median of every node's newest reading is itself past the threshold, since independent clocks do not drift together. Sort order: not recently notified first, then real drift before never-set clocks, then worst offset. Nothing is ever sent from here; contacting an owner stays manual.
+
 ### Region-scope adoption stats (`region_scope`)
 
 `GET /statistics` reports regional flood-scope uptake as two views with different denominators that intentionally will not agree:
@@ -457,7 +472,9 @@ Web Push is a standalone subsystem in `app/push/`, separate from the fanout modu
 - `GET /contacts/{public_key}/repeater/telemetry-history` — stored telemetry history for a repeater (read-only, no radio access)
 - `POST /contacts/{public_key}/telemetry` — on-demand CayenneLPP telemetry from any contact (persists in `contact_telemetry_history`)
 - `GET /contacts/{public_key}/telemetry-history` — stored LPP telemetry history for a contact (read-only)
-- `GET /contacts/{public_key}/stats` — the node stats page in one request; `?window=` (default `1M`) drives every section, and sections are independent optional fields
+- `GET /contacts/{public_key}/stats` — the node stats page in one request; `?window=` (default `1M`) drives every section, and sections are independent optional fields. `owner` is always present (the section edits it)
+- `GET /contacts/{public_key}/owner` / `PATCH /contacts/{public_key}/owner` — saved owner info; PATCH takes `{notes?, notified?}` (see "Owner info and outreach")
+- `GET /contacts/owner-outreach` — nodes whose clock has stayed clearly wrong, with owner info
 - `POST /contacts/{public_key}/room/login` — one attempt on the effective route, then one flood retry on timeout. Body `{password?, use_stored_credential?, resync_history?}`: `password` is three-state (`null`/absent = guest unless `use_stored_credential`, `""` = guest, else the password); `use_stored_credential=true` logs in with the room's server-side stored credential and never returns it. `resync_history=true` removes the room contact from the radio before the login re-adds it, zeroing the firmware's per-contact `sync_since` cursor so the room re-pushes its whole retained post history (see "Room message sync cursor" below).
 - `POST /contacts/{public_key}/room/status`
 - `POST /contacts/{public_key}/room/lpp-telemetry`

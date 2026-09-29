@@ -227,6 +227,7 @@ export function SettingsRadioSection({
   const [floodScope, setFloodScope] = useState('');
   const [knownRegions, setKnownRegions] = useState('');
   const [autoDiscoverRegionsHours, setAutoDiscoverRegionsHours] = useState('0');
+  const [ownerInfoRefreshDays, setOwnerInfoRefreshDays] = useState('7');
   const [maxRadioContacts, setMaxRadioContacts] = useState('');
   const [maxMessageRetries, setMaxMessageRetries] = useState(String(DEFAULT_MESSAGE_RETRIES));
   const [floodBusy, setFloodBusy] = useState(false);
@@ -260,6 +261,7 @@ export function SettingsRadioSection({
     setFloodScope(stripRegionScopePrefix(appSettings.flood_scope));
     setKnownRegions((appSettings.known_regions ?? []).join('\n'));
     setAutoDiscoverRegionsHours(String(appSettings.auto_discover_regions_hours ?? 0));
+    setOwnerInfoRefreshDays(String(appSettings.owner_info_refresh_days ?? 7));
     setMaxRadioContacts(String(appSettings.max_radio_contacts));
     setMaxMessageRetries(String(appSettings.max_message_retries));
   }, [appSettings]);
@@ -509,6 +511,13 @@ export function SettingsRadioSection({
         newAutoDiscoverHours !== (appSettings.auto_discover_regions_hours ?? 0)
       ) {
         update.auto_discover_regions_hours = newAutoDiscoverHours;
+      }
+      const newOwnerInfoDays = parseInt(ownerInfoRefreshDays, 10);
+      if (
+        !isNaN(newOwnerInfoDays) &&
+        newOwnerInfoDays !== (appSettings.owner_info_refresh_days ?? 7)
+      ) {
+        update.owner_info_refresh_days = newOwnerInfoDays;
       }
       const newMaxRadioContacts = parseInt(maxRadioContacts, 10);
       if (!isNaN(newMaxRadioContacts) && newMaxRadioContacts !== appSettings.max_radio_contacts) {
@@ -1453,6 +1462,29 @@ export function SettingsRadioSection({
           same request as Discover Regions) and adds any new names to Known Regions. Uses a few
           radio transmissions per sweep, and only repeaters in direct range answer. The first sweep
           runs one interval after the app starts.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="owner-info-refresh">Refresh owner info</Label>
+        <select
+          id="owner-info-refresh"
+          value={ownerInfoRefreshDays}
+          onChange={(e) => setOwnerInfoRefreshDays(e.target.value)}
+          className="h-9 px-3 rounded-md border border-input bg-background text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+        >
+          <option value="0">Off</option>
+          <option value="1">Every day</option>
+          <option value="3">Every 3 days</option>
+          <option value="7">Every week</option>
+          <option value="14">Every 2 weeks</option>
+          <option value="30">Every month</option>
+        </select>
+        <p className="text-[0.8125rem] text-muted-foreground">
+          Logs in to each repeater heard within the interval (as guest) and saves its owner info for
+          the node stats page and Owner Outreach. One node every 5 minutes, so a big mesh spreads
+          over a day or two. Room servers are only included when a password (or guest login) is
+          saved for room polling, because logging in makes a room push its post history.
         </p>
       </div>
 

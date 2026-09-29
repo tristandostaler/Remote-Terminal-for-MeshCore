@@ -46,6 +46,8 @@ function resolveConversationFromHash(
       return { type: 'statistics', id: 'statistics', name: 'Statistics' };
     case 'liveCompare':
       return { type: 'liveCompare', id: 'liveCompare', name: 'Live Compare' };
+    case 'ownerOutreach':
+      return { type: 'ownerOutreach', id: 'ownerOutreach', name: 'Owner Outreach' };
     case 'nodeStats': {
       // Resolve through contacts for a readable title when we can, but never
       // gate on it: the page fetches by key and the backend accepts a prefix,
@@ -186,6 +188,15 @@ export function useConversationRouter({
       hasSetDefaultConversation.current = true;
       return;
     }
+    if (hashConv?.type === 'ownerOutreach') {
+      setActiveConversationState({
+        type: 'ownerOutreach',
+        id: 'ownerOutreach',
+        name: 'Owner Outreach',
+      });
+      hasSetDefaultConversation.current = true;
+      return;
+    }
     if (hashConv?.type === 'bots') {
       setActiveConversationState({
         type: 'bots',
@@ -219,7 +230,8 @@ export function useConversationRouter({
           lastViewed.type === 'visualizer' ||
           lastViewed.type === 'trace' ||
           lastViewed.type === 'statistics' ||
-          lastViewed.type === 'liveCompare')
+          lastViewed.type === 'liveCompare' ||
+          lastViewed.type === 'ownerOutreach')
       ) {
         setActiveConversationState(lastViewed);
         hasSetDefaultConversation.current = true;

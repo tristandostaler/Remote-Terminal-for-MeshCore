@@ -46,6 +46,9 @@ import type {
   RepeaterSettingsResponse,
   RepeaterSettingsSchemaResponse,
   NodeStatsResponse,
+  OwnerOutreachResponse,
+  ContactOwnerInfo,
+  ContactOwnerUpdate,
   RepeaterRegionsResponse,
   RepeaterStatusResponse,
   TelemetryHistoryEntry,
@@ -773,6 +776,18 @@ export const api = {
       `/contacts/${publicKey}/stats${window ? `?window=${encodeURIComponent(window)}` : ''}`,
       { signal }
     ),
+
+  getContactOwner: (publicKey: string) =>
+    fetchJson<ContactOwnerInfo>(`/contacts/${publicKey}/owner`),
+
+  updateContactOwner: (publicKey: string, update: ContactOwnerUpdate) =>
+    fetchJson<ContactOwnerInfo>(`/contacts/${publicKey}/owner`, {
+      method: 'PATCH',
+      body: JSON.stringify(update),
+    }),
+
+  getOwnerOutreach: (signal?: AbortSignal) =>
+    fetchJson<OwnerOutreachResponse>('/contacts/owner-outreach', { signal }),
 
   getStatistics: (window?: StatsWindow) =>
     fetchJson<StatisticsResponse>(

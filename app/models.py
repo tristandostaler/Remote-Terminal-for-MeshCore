@@ -1742,6 +1742,14 @@ class AppSettings(BaseModel):
             "found regions are merged into known_regions. 0 = disabled."
         ),
     )
+    owner_info_refresh_days: int = Field(
+        default=7,
+        description=(
+            "Days between owner-info refreshes of each recently heard repeater and room "
+            "server (guest login + owner-info request, one node every few minutes). "
+            "0 = disabled."
+        ),
+    )
     telemetry_routed_hourly: bool = Field(
         default=False,
         description=(
@@ -2354,6 +2362,88 @@ class NodeClockDriftStats(ClockDriftSummary):
     )
 
 
+class ContactOwnerHint(BaseModel):
+    """One way to reach a node's owner, spotted in its name, owner.info or notes."""
+
+    kind: Literal["callsign", "email", "handle", "url"]
+    value: str
+    source: Literal["name", "owner_info", "notes"]
+
+
+class ContactOwnerInfo(BaseModel):
+    """Who runs a node, as far as this server knows.
+
+    ``firmware_*`` is what the node itself reported (repeater / room server
+    ``owner.info``) and is only ever written by a fetch. ``notes`` is the
+    operator's own free text and is only ever written by hand.
+    """
+
+    public_key: str
+    firmware_owner_info: str | None = Field(
+        default=None, description="owner.info the node reported on its last answered fetch"
+    )
+    firmware_version: str | None = None
+    fetched_at: int | None = Field(
+        default=None, description="Last time the node answered an owner-info request"
+    )
+    attempted_at: int | None = Field(
+        default=None, description="Last time an owner-info request was tried, answered or not"
+    )
+    attempt_status: str | None = Field(
+        default=None,
+        description="Outcome of the last attempt: ok, no_reply, login_failed or error",
+    )
+    notes: str = Field(default="", description="Operator's own notes about the owner")
+    notes_updated_at: int | None = None
+    notified_at: int | None = Field(
+        default=None, description="When the operator last marked the owner as contacted"
+    )
+    hints: list[ContactOwnerHint] = Field(default_factory=list)
+
+
+class ContactOwnerUpdateRequest(BaseModel):
+    notes: str | None = Field(
+        default=None, max_length=2000, description="Replace the notes; omit to leave them"
+    )
+    notified: bool | None = Field(
+        default=None,
+        description="true stamps notified_at with now, false clears it; omit to leave it",
+    )
+
+
+class OwnerOutreachItem(BaseModel):
+    public_key: str
+    name: str | None = None
+    type: int = 0
+    issue: Literal["clock_drift", "unset_clock"]
+    drift_seconds: int = Field(description="Newest reading; positive = node ahead of us")
+    severity: Literal["in_sync", "minor", "major", "severe"]
+    readings: int = Field(description="Recent readings that all agree on the problem")
+    last_observed_at: int
+    recently_notified: bool = Field(
+        description="Owner was marked contacted within the lookback, so give them time"
+    )
+    owner: ContactOwnerInfo
+
+
+class OwnerOutreachResponse(BaseModel):
+    """Nodes with a problem worth telling their owner about."""
+
+    generated_at: int
+    lookback_seconds: int
+    threshold_seconds: int = Field(description="A reading beyond this is a problem")
+    min_readings: int
+    nodes_measured: int = Field(description="Nodes with any clock reading in the lookback")
+    median_drift_seconds: float | None = Field(
+        default=None, description="Signed median of every node's newest reading (unset excluded)"
+    )
+    server_clock_suspect: bool = Field(
+        description="The median itself is beyond the threshold, so this server's clock is the "
+        "likelier culprit"
+    )
+    items: list[OwnerOutreachItem]
+
+
 class NodeStatsResponse(BaseModel):
     """Everything the node stats page shows for one node over one window."""
 
@@ -2367,6 +2457,11 @@ class NodeStatsResponse(BaseModel):
     generated_at: int = Field(description="Server clock when the snapshot was built")
     clock_drift: NodeClockDriftStats | None = Field(
         default=None, description="Null when this node's clock has never been measured"
+    )
+    owner: ContactOwnerInfo | None = Field(
+        default=None,
+        description="Owner info and notes. Always present; the section edits it, so it "
+        "exists even while empty",
     )
 
 

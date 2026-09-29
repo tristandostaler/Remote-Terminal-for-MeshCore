@@ -37,6 +37,9 @@ const VisualizerView = lazy(() =>
 const StatisticsView = lazy(() =>
   import('./StatisticsView').then((m) => ({ default: m.StatisticsView }))
 );
+const OwnerOutreachView = lazy(() =>
+  import('./OwnerOutreachView').then((m) => ({ default: m.OwnerOutreachView }))
+);
 const NodeStatsView = lazy(() =>
   import('./nodeStats/NodeStatsView').then((m) => ({ default: m.NodeStatsView }))
 );
@@ -90,7 +93,7 @@ interface ConversationPaneProps {
   onSelectConversation: (conversation: Conversation) => void;
   onOpenContactInfo: (publicKey: string, fromChannel?: boolean) => void;
   /** Opens the per-node stats page. */
-  onOpenNodeStats?: (publicKey: string) => void;
+  onOpenNodeStats?: (publicKey: string, name?: string) => void;
   /** Opens message search filtered to a region (statistics region rows). */
   onSearchRegion?: (region: string) => void;
   /** Leaves the node stats page; undefined hides the back button. */
@@ -375,6 +378,18 @@ export function ConversationPane({
     );
   }
 
+  if (activeConversation.type === 'ownerOutreach') {
+    return (
+      <Suspense fallback={<LoadingPane label="Loading owner outreach..." />}>
+        <OwnerOutreachView
+          contacts={contacts}
+          onOpenNodeStats={onOpenNodeStats}
+          onSelectConversation={onSelectConversation}
+        />
+      </Suspense>
+    );
+  }
+
   if (activeConversation.type === 'nodeStats') {
     return (
       <Suspense fallback={<LoadingPane label="Loading node stats..." />}>
@@ -414,6 +429,7 @@ export function ConversationPane({
           onToggleFavorite={onToggleFavorite}
           onDeleteContact={onDeleteContact}
           onOpenContactInfo={onOpenContactInfo}
+          onOpenNodeStats={onOpenNodeStats}
           trackedTelemetryRepeaters={trackedTelemetryRepeaters}
           onToggleTrackedTelemetry={onToggleTrackedTelemetry}
           clockSyncRepeaters={clockSyncRepeaters}

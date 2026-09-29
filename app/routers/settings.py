@@ -28,6 +28,7 @@ from app.send_attempts import (
     clamp_message_retries,
 )
 from app.services import live_feed, region_jobs, region_tools
+from app.services.owner_info_sweep import OWNER_INFO_REFRESH_OPTIONS_DAYS
 from app.services.region_discovery import AUTO_DISCOVER_REGIONS_OPTIONS_HOURS
 from app.telemetry_interval import (
     DEFAULT_TELEMETRY_INTERVAL_HOURS,
@@ -116,6 +117,13 @@ class AppSettingsUpdate(BaseModel):
         description=(
             "Hours between automatic region discovery sweeps (0 = disabled). "
             "Must be one of 0, 6, 12, 24, 72, 168."
+        ),
+    )
+    owner_info_refresh_days: int | None = Field(
+        default=None,
+        description=(
+            "Days between automatic owner-info refreshes of repeaters and room servers "
+            f"(0 = disabled). Must be one of {list(OWNER_INFO_REFRESH_OPTIONS_DAYS)}."
         ),
     )
     telemetry_routed_hourly: bool | None = Field(
@@ -432,6 +440,17 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
                 ),
             )
         kwargs["auto_discover_regions_hours"] = update.auto_discover_regions_hours
+
+    if update.owner_info_refresh_days is not None:
+        if update.owner_info_refresh_days not in OWNER_INFO_REFRESH_OPTIONS_DAYS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "owner_info_refresh_days must be one of "
+                    f"{list(OWNER_INFO_REFRESH_OPTIONS_DAYS)}"
+                ),
+            )
+        kwargs["owner_info_refresh_days"] = update.owner_info_refresh_days
 
     # Telemetry routed hourly
     if update.telemetry_routed_hourly is not None:

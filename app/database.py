@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
     auto_resend_channel INTEGER DEFAULT 0,
     telemetry_interval_hours INTEGER DEFAULT 8,
     auto_discover_regions_hours INTEGER DEFAULT 0,
+    owner_info_refresh_days INTEGER DEFAULT 7,
     vapid_private_key TEXT DEFAULT '',
     vapid_public_key TEXT DEFAULT '',
     push_conversations TEXT DEFAULT '[]',

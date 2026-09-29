@@ -32,6 +32,7 @@ async def test_db():
     from app.repository import (
         aeic_image,
         channels,
+        contact_owner,
         contact_telemetry,
         contacts,
         live_feed,
@@ -68,6 +69,7 @@ async def test_db():
         virtual_node_channel_slots,
         virtual_node_clients,
         live_feed,
+        contact_owner,
     ]
     originals = [(mod, mod.db) for mod in submodules]
 

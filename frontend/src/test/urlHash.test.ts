@@ -93,6 +93,15 @@ describe('parseHashConversation', () => {
     expect(result).toEqual({ type: 'liveCompare', name: 'liveCompare' });
   });
 
+  it('parses #owner-outreach as the owner outreach tool', () => {
+    window.location.hash = '#owner-outreach';
+
+    expect(parseHashConversation()).toEqual({ type: 'ownerOutreach', name: 'ownerOutreach' });
+    expect(
+      getConversationHash({ type: 'ownerOutreach', id: 'ownerOutreach', name: 'Owner Outreach' })
+    ).toBe('#owner-outreach');
+  });
+
   it('redirects the legacy #settings/statistics hash to the statistics tool', () => {
     window.location.hash = '#settings/statistics';
 

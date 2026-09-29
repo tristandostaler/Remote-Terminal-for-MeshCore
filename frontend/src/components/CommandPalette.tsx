@@ -3,6 +3,7 @@ import {
   BarChart3,
   Bot,
   GitCompareArrows,
+  UserSearch,
   Hash,
   Map,
   MessageSquare,
@@ -62,7 +63,16 @@ interface ToolItem extends Searchable {
   id: string;
   name: string;
   icon: React.ComponentType<{ className?: string }>;
-  type: 'raw' | 'map' | 'visualizer' | 'search' | 'trace' | 'bots' | 'statistics' | 'liveCompare';
+  type:
+    | 'raw'
+    | 'map'
+    | 'visualizer'
+    | 'search'
+    | 'trace'
+    | 'bots'
+    | 'statistics'
+    | 'liveCompare'
+    | 'ownerOutreach';
 }
 
 interface SettingItem extends Searchable {
@@ -103,6 +113,13 @@ const TOOL_ITEMS: ToolItem[] = [
     icon: GitCompareArrows,
     type: 'liveCompare',
     searchText: 'live compare meshcore.ca corescope coverage',
+  },
+  {
+    id: 'ownerOutreach',
+    name: 'Owner Outreach',
+    icon: UserSearch,
+    type: 'ownerOutreach',
+    searchText: 'owner outreach clock drift contact repeater owners',
   },
 ];
 
