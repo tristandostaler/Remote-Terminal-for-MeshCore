@@ -103,12 +103,18 @@ export interface GuessedRegion {
   pct_of_tested: number;
 }
 
-export interface GuessRegionsResponse {
+export type GuessRegionsStatus = 'running' | 'completed' | 'timed_out' | 'cancelled' | 'failed';
+
+export interface GuessRegionsJob {
+  job_id: string;
+  status: GuessRegionsStatus;
+  error: string | null;
+  elapsed_seconds: number;
+  max_seconds: number | null;
   scoped_packets: number;
   tested_packets: number;
   candidates_tried: number;
   candidates_total: number;
-  timed_out: boolean;
   results: GuessedRegion[];
 }
 

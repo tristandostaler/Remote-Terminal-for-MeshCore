@@ -20,8 +20,9 @@ import json
 import re
 import socket
 import string
+import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
@@ -35,9 +36,9 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9$-]{1,30}$")
 # Work caps so a single request cannot pin the CPU indefinitely.
 DEFAULT_MIN_LETTERS = 2
 DEFAULT_MAX_LETTERS = 3
-MAX_LETTERS = 8
+MAX_LETTERS = 30  # the firmware's region-name length limit; the only bound on the range
 MAX_PACKETS = 2_000
-MAX_SECONDS = 60.0
+DEFAULT_MAX_SECONDS = 60.0  # default budget for a run; 0 means no limit
 MAX_SCAN_ROWS = 250_000
 
 # Import limits.
@@ -150,24 +151,39 @@ def guess_regions(
     candidates: Iterable[str],
     *,
     min_hits: int = 2,
-    max_seconds: float = MAX_SECONDS,
+    max_seconds: float | None = DEFAULT_MAX_SECONDS,
+    cancel: threading.Event | None = None,
+    on_progress: Callable[[int, list[GuessResult]], None] | None = None,
 ) -> tuple[list[GuessResult], bool, int]:
     """Count, per candidate, how many packets its transport code explains.
 
     Returns ``(results, timed_out, tried)`` with results sorted by hits descending
     and limited to candidates reaching ``min_hits``. ``candidates`` may be a lazy
-    iterator far too large to finish; it is consumed in order until the time
-    budget runs out. CPU-bound: call from a thread.
+    iterator far too large to finish; it is consumed in order until it runs out,
+    ``cancel`` is set, or ``max_seconds`` elapses (``None`` or 0 = no time limit).
+    ``on_progress(tried, results_so_far)`` is called every few hundred names.
+    CPU-bound: call from a thread.
     """
     messages = [(bytes([p.payload_type & 0xFF]) + p.payload, p.transport_code) for p in packets]
     hits: dict[str, int] = {}
-    deadline = time.monotonic() + max_seconds
+    deadline = time.monotonic() + max_seconds if max_seconds else None
     timed_out = False
     tried = 0
+
+    def snapshot() -> list[GuessResult]:
+        found = [GuessResult(name, count) for name, count in hits.items()]
+        found.sort(key=lambda r: (-r.hits, r.region))
+        return found
+
     for name in candidates:
-        if tried % 512 == 0 and time.monotonic() > deadline:
-            timed_out = True
-            break
+        if tried % 512 == 0:
+            if cancel is not None and cancel.is_set():
+                break
+            if deadline is not None and time.monotonic() > deadline:
+                timed_out = True
+                break
+            if on_progress is not None and tried:
+                on_progress(tried, snapshot())
         # Derived inline rather than via the resolver's key cache, which would
         # otherwise retain every name a large sweep touches.
         normalized = normalize_region_scope(name)
@@ -188,9 +204,7 @@ def guess_regions(
         if count >= min_hits:
             hits[name] = count
 
-    results = [GuessResult(name, count) for name, count in hits.items()]
-    results.sort(key=lambda r: (-r.hits, r.region))
-    return results, timed_out, tried
+    return snapshot(), timed_out, tried
 
 
 # --------------------------------------------------------------------------

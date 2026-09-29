@@ -23,7 +23,7 @@ import type {
   RadioConfigUpdate,
   RadioDiscoveryResponse,
   RadioRegionDiscoveryResponse,
-  GuessRegionsResponse,
+  GuessRegionsJob,
   ImportRegionsResponse,
   RadioTraceHopRequest,
   RadioTraceResponse,
@@ -369,11 +369,24 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(publicKeys && publicKeys.length > 0 ? { public_keys: publicKeys } : {}),
     }),
-  guessRegions: (candidates: string[] = [], minLetters = 2, maxLetters = 3) =>
-    fetchJson<GuessRegionsResponse>('/settings/regions/guess', {
+  startGuessRegions: (
+    candidates: string[],
+    minLetters: number,
+    maxLetters: number,
+    maxSeconds: number
+  ) =>
+    fetchJson<GuessRegionsJob>('/settings/regions/guess', {
       method: 'POST',
-      body: JSON.stringify({ candidates, min_letters: minLetters, max_letters: maxLetters }),
+      body: JSON.stringify({
+        candidates,
+        min_letters: minLetters,
+        max_letters: maxLetters,
+        max_seconds: maxSeconds,
+      }),
     }),
+  getGuessRegionsJob: () => fetchJson<GuessRegionsJob | null>('/settings/regions/guess'),
+  cancelGuessRegions: (jobId: string) =>
+    fetchJson<GuessRegionsJob>(`/settings/regions/guess/${jobId}/cancel`, { method: 'POST' }),
   importRegions: (url: string) =>
     fetchJson<ImportRegionsResponse>('/settings/regions/import', {
       method: 'POST',
