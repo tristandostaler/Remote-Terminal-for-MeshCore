@@ -28,6 +28,7 @@ import type {
   ClockDriftHistogramBin,
   NoiseFloorHistoryStats,
   PacketsOverTime,
+  RegionBreakdownEntry,
   RegionScopeStats,
   RepeaterClockDriftEntry,
   RepeaterClockDriftStats,
@@ -85,6 +86,47 @@ function WindowSelector({
         </button>
       ))}
     </div>
+  );
+}
+
+const TOP_REGIONS_SHOWN = 5;
+
+function RegionTable({
+  entries,
+  onSearchRegion,
+}: {
+  entries: RegionBreakdownEntry[];
+  onSearchRegion?: (region: string) => void;
+}) {
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-muted-foreground">
+          <th className="text-left font-normal pb-1">Region</th>
+          <th className="text-right font-normal pb-1">Messages</th>
+          <th className="text-right font-normal pb-1">Share</th>
+        </tr>
+      </thead>
+      <tbody>
+        {entries.map((entry) => (
+          <tr
+            key={entry.region}
+            className={`border-t border-border/50 ${
+              onSearchRegion ? 'cursor-pointer hover:bg-muted/50 transition-colors' : ''
+            }`}
+            role={onSearchRegion ? 'button' : undefined}
+            tabIndex={onSearchRegion ? 0 : undefined}
+            onKeyDown={onSearchRegion ? handleKeyboardActivate : undefined}
+            onClick={() => onSearchRegion?.(entry.region)}
+            title={onSearchRegion ? `Search messages in ${entry.region}` : undefined}
+          >
+            <td className="py-1 pr-2 truncate max-w-[14rem]">{entry.region}</td>
+            <td className="text-right py-1 font-medium">{entry.message_count.toLocaleString()}</td>
+            <td className="text-right py-1 text-muted-foreground">{formatPercent(entry.pct)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -155,38 +197,24 @@ function RegionScopeStatsPanel({
             {(stats.regions_total_messages ?? 0).toLocaleString()} in the window.
             {onSearchRegion ? ' Click a row to search its messages.' : ''}
           </p>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-muted-foreground">
-                <th className="text-left font-normal pb-1">Region</th>
-                <th className="text-right font-normal pb-1">Messages</th>
-                <th className="text-right font-normal pb-1">Share</th>
-              </tr>
-            </thead>
-            <tbody>
-              {regions.map((entry) => (
-                <tr
-                  key={entry.region}
-                  className={`border-t border-border/50 ${
-                    onSearchRegion ? 'cursor-pointer hover:bg-muted/50 transition-colors' : ''
-                  }`}
-                  role={onSearchRegion ? 'button' : undefined}
-                  tabIndex={onSearchRegion ? 0 : undefined}
-                  onKeyDown={onSearchRegion ? handleKeyboardActivate : undefined}
-                  onClick={() => onSearchRegion?.(entry.region)}
-                  title={onSearchRegion ? `Search messages in ${entry.region}` : undefined}
-                >
-                  <td className="py-1 pr-2 truncate max-w-[14rem]">{entry.region}</td>
-                  <td className="text-right py-1 font-medium">
-                    {entry.message_count.toLocaleString()}
-                  </td>
-                  <td className="text-right py-1 text-muted-foreground">
-                    {formatPercent(entry.pct)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <RegionTable
+            entries={regions.slice(0, TOP_REGIONS_SHOWN)}
+            onSearchRegion={onSearchRegion}
+          />
+          {regions.length > TOP_REGIONS_SHOWN && (
+            <details className="mt-2 group">
+              <summary className="cursor-pointer select-none text-xs text-muted-foreground hover:text-foreground">
+                Show {regions.length - TOP_REGIONS_SHOWN} more region
+                {regions.length - TOP_REGIONS_SHOWN === 1 ? '' : 's'}
+              </summary>
+              <div className="mt-1 max-h-72 overflow-y-auto">
+                <RegionTable
+                  entries={regions.slice(TOP_REGIONS_SHOWN)}
+                  onSearchRegion={onSearchRegion}
+                />
+              </div>
+            </details>
+          )}
         </div>
       )}
       {floor > 0 && stats.scoped_messages > 0 && (

@@ -456,4 +456,27 @@ describe('StatisticsView', () => {
     await userEvent.click(screen.getByText('#alpha'));
     expect(onSearchRegion).toHaveBeenCalledWith('#alpha');
   });
+
+  it('shows the top 5 regions and tucks the rest into a collapsed list', async () => {
+    const regions = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((name, i) => ({
+      region: `#${name}`,
+      message_count: 10 - i,
+      pct: 10 - i,
+    }));
+    mockStatsFetch({
+      ...emptyStats,
+      region_scope: { ...emptyStats.region_scope, regions, regions_total_messages: 100 },
+    });
+
+    render(<StatisticsView />);
+
+    await waitFor(() => expect(screen.getByText('#a')).toBeInTheDocument());
+    const details = screen.getByText(/Show 2 more regions/).closest('details');
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute('open');
+    // First five sit outside the collapsed section, the rest inside it.
+    expect(details?.contains(screen.getByText('#e'))).toBe(false);
+    expect(details?.contains(screen.getByText('#f'))).toBe(true);
+    expect(details?.contains(screen.getByText('#g'))).toBe(true);
+  });
 });
