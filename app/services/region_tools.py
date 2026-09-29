@@ -12,6 +12,7 @@ it in a thread) and a guarded fetch/parse for lists of region names published on
 other websites.
 """
 
+import hashlib
 import hmac
 import ipaddress
 import itertools
@@ -20,22 +21,21 @@ import re
 import socket
 import string
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 from app.path_utils import UNDEFINED_PAYLOAD_TYPES, parse_packet_envelope
-from app.region_resolver import _region_key
+from app.region_scope import normalize_region_scope
 
 # Region names use these characters (mirrors firmware RegionMap::is_name_char).
 _NAME_RE = re.compile(r"^[A-Za-z0-9$-]{1,30}$")
 
 # Work caps so a single request cannot pin the CPU indefinitely.
-MAX_CANDIDATES = 500_000
 DEFAULT_MIN_LETTERS = 2
 DEFAULT_MAX_LETTERS = 3
-MAX_LETTERS = 4
+MAX_LETTERS = 8
 MAX_PACKETS = 2_000
 MAX_SECONDS = 60.0
 MAX_SCAN_ROWS = 250_000
@@ -49,14 +49,20 @@ MAX_REDIRECTS = 3
 
 def brute_force_candidates(
     min_letters: int = DEFAULT_MIN_LETTERS, max_letters: int = DEFAULT_MAX_LETTERS
-) -> list[str]:
-    """Every lowercase a-z name with between ``min_letters`` and ``max_letters`` letters."""
+) -> Iterator[str]:
+    """Lazily yield every lowercase a-z name of ``min_letters``..``max_letters`` letters.
+
+    Lazy because the space explodes (8 letters is ~2e11 names); shortest first.
+    """
     letters = string.ascii_lowercase
-    return [
-        "".join(combo)
-        for length in range(min_letters, max_letters + 1)
-        for combo in itertools.product(letters, repeat=length)
-    ]
+    for length in range(min_letters, max_letters + 1):
+        for combo in itertools.product(letters, repeat=length):
+            yield "".join(combo)
+
+
+def brute_force_total(min_letters: int, max_letters: int) -> int:
+    """How many names ``brute_force_candidates`` would yield if run to completion."""
+    return sum(26**n for n in range(min_letters, max_letters + 1))
 
 
 def clean_candidate(raw: str) -> str | None:
@@ -74,27 +80,22 @@ def expand_candidates(
     *,
     min_letters: int | None = DEFAULT_MIN_LETTERS,
     max_letters: int | None = DEFAULT_MAX_LETTERS,
-) -> list[str]:
-    """Deduplicated candidate list: user names (as typed and lowercased), then every
+) -> Iterator[str]:
+    """Lazily yield user names (as typed and lowercased, deduplicated), then every
     a-z name of ``min_letters``..``max_letters`` letters (skipped when either is None)."""
-    out: list[str] = []
     seen: set[str] = set()
-
-    def add(name: str) -> None:
-        if name not in seen:
-            seen.add(name)
-            out.append(name)
-
     for raw in user_names:
         name = clean_candidate(raw)
         if name is None:
             continue
-        add(name)
-        add(name.lower())
+        for variant in (name, name.lower()):
+            if variant not in seen:
+                seen.add(variant)
+                yield variant
     if min_letters is not None and max_letters is not None:
         for name in brute_force_candidates(min_letters, max_letters):
-            add(name)
-    return out[:MAX_CANDIDATES]
+            if name not in seen:
+                yield name
 
 
 @dataclass(frozen=True)
@@ -146,32 +147,36 @@ class GuessResult:
 
 def guess_regions(
     packets: list[ScopedPacket],
-    candidates: list[str],
+    candidates: Iterable[str],
     *,
     min_hits: int = 2,
     max_seconds: float = MAX_SECONDS,
-) -> tuple[list[GuessResult], bool]:
+) -> tuple[list[GuessResult], bool, int]:
     """Count, per candidate, how many packets its transport code explains.
 
-    Returns ``(results, timed_out)`` with results sorted by hits descending and
-    limited to candidates reaching ``min_hits``. CPU-bound: call from a thread.
+    Returns ``(results, timed_out, tried)`` with results sorted by hits descending
+    and limited to candidates reaching ``min_hits``. ``candidates`` may be a lazy
+    iterator far too large to finish; it is consumed in order until the time
+    budget runs out. CPU-bound: call from a thread.
     """
-    keyed: list[tuple[str, bytes]] = []
-    for name in candidates:
-        key = _region_key(name)
-        if key is not None:
-            keyed.append((name, key))
-
+    messages = [(bytes([p.payload_type & 0xFF]) + p.payload, p.transport_code) for p in packets]
     hits: dict[str, int] = {}
     deadline = time.monotonic() + max_seconds
     timed_out = False
-    for packet in packets:
-        if time.monotonic() > deadline:
+    tried = 0
+    for name in candidates:
+        if tried % 512 == 0 and time.monotonic() > deadline:
             timed_out = True
             break
-        message = bytes([packet.payload_type & 0xFF]) + packet.payload
-        target = packet.transport_code
-        for name, key in keyed:
+        # Derived inline rather than via the resolver's key cache, which would
+        # otherwise retain every name a large sweep touches.
+        normalized = normalize_region_scope(name)
+        if not normalized:
+            continue
+        tried += 1
+        key = hashlib.sha256(normalized.encode("utf-8")).digest()[:16]
+        count = 0
+        for message, target in messages:
             code = int.from_bytes(hmac.digest(key, message, "sha256")[:2], "little")
             # Firmware nudges the two reserved values.
             if code == 0:
@@ -179,11 +184,13 @@ def guess_regions(
             elif code == 0xFFFF:
                 code = 0xFFFE
             if code == target:
-                hits[name] = hits.get(name, 0) + 1
+                count += 1
+        if count >= min_hits:
+            hits[name] = count
 
-    results = [GuessResult(name, count) for name, count in hits.items() if count >= min_hits]
+    results = [GuessResult(name, count) for name, count in hits.items()]
     results.sort(key=lambda r: (-r.hits, r.region))
-    return results, timed_out
+    return results, timed_out, tried
 
 
 # --------------------------------------------------------------------------
@@ -368,6 +375,7 @@ __all__ = [
     "GuessResult",
     "ScopedPacket",
     "brute_force_candidates",
+    "brute_force_total",
     "expand_candidates",
     "extract_region_names",
     "fetch_region_names",

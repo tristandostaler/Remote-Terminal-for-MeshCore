@@ -977,6 +977,7 @@ class GuessRegionsResponse(BaseModel):
     scoped_packets: int = Field(description="Distinct region-scoped packets found in storage")
     tested_packets: int = Field(description="Of those, packets no known region explained")
     candidates_tried: int
+    candidates_total: int = Field(description="Names a complete run would have tried")
     timed_out: bool = Field(description="True when the time budget ran out before all packets")
     results: list[GuessedRegion]
 
@@ -1005,24 +1006,32 @@ async def guess_regions(request: GuessRegionsRequest) -> GuessRegionsResponse:
         min_letters=request.min_letters if request.brute_force else None,
         max_letters=request.max_letters if request.brute_force else None,
     )
+    candidates_total = len(
+        list(region_tools.expand_candidates(request.candidates, min_letters=None, max_letters=None))
+    ) + (
+        region_tools.brute_force_total(request.min_letters, request.max_letters)
+        if request.brute_force
+        else 0
+    )
     rows = await RawPacketRepository.recent_data(region_tools.MAX_SCAN_ROWS)
 
-    def _work() -> tuple[int, list[region_tools.ScopedPacket], list, bool]:
+    def _work() -> tuple[int, list[region_tools.ScopedPacket], list, bool, int]:
         packets, scoped_total = region_tools.scoped_packets_from_rows(
             rows, known, limit=request.max_packets
         )
-        results, timed_out = region_tools.guess_regions(
+        results, timed_out, tried = region_tools.guess_regions(
             packets, candidates, min_hits=request.min_hits
         )
-        return scoped_total, packets, results, timed_out
+        return scoped_total, packets, results, timed_out, tried
 
-    scoped_total, packets, results, timed_out = await asyncio.to_thread(_work)
+    scoped_total, packets, results, timed_out, tried = await asyncio.to_thread(_work)
     known_lower = {name.lower() for name in known}
     tested = len(packets)
     return GuessRegionsResponse(
         scoped_packets=scoped_total,
         tested_packets=tested,
-        candidates_tried=len(candidates),
+        candidates_tried=tried,
+        candidates_total=candidates_total,
         timed_out=timed_out,
         results=[
             GuessedRegion(region=r.region, hits=r.hits, pct_of_tested=(r.hits / tested) * 100)

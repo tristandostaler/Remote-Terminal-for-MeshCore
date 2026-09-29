@@ -26,7 +26,7 @@ def test_guess_finds_region_that_explains_multiple_packets():
     packets, scoped = region_tools.scoped_packets_from_rows(rows, [], limit=50)
     assert scoped == 4 and len(packets) == 4
 
-    results, timed_out = region_tools.guess_regions(packets, ["yul", "yyz", "onqc"], min_hits=2)
+    results, timed_out, _ = region_tools.guess_regions(packets, ["yul", "yyz", "onqc"], min_hits=2)
 
     assert not timed_out
     assert [(r.region, r.hits) for r in results] == [("yul", 4)]
@@ -42,21 +42,25 @@ def test_guess_skips_packets_explained_by_known_regions():
 
 def test_guess_min_hits_filters_chance_matches():
     packets, _ = region_tools.scoped_packets_from_rows(_packets("yul", 1), [], limit=10)
-    results, _ = region_tools.guess_regions(packets, ["yul"], min_hits=2)
+    results, _, _ = region_tools.guess_regions(packets, ["yul"], min_hits=2)
     assert results == []
 
 
 def test_brute_force_candidates_cover_letter_range():
-    names = region_tools.brute_force_candidates(2, 3)
+    names = list(region_tools.brute_force_candidates(2, 3))
     assert len(names) == 26**2 + 26**3
     assert {"qc", "yul"} <= set(names)
-    assert region_tools.brute_force_candidates(1, 1) == list("abcdefghijklmnopqrstuvwxyz")
-    assert len(region_tools.brute_force_candidates(4, 4)) == 26**4
+    assert list(region_tools.brute_force_candidates(1, 1)) == list("abcdefghijklmnopqrstuvwxyz")
+    assert region_tools.brute_force_total(4, 8) == sum(26**n for n in range(4, 9))
+    # Lazy: an 8-letter sweep must not be materialized up front.
+    assert next(iter(region_tools.brute_force_candidates(8, 8))) == "aaaaaaaa"
 
 
 def test_expand_candidates_tries_typed_and_lowercase_and_rejects_junk():
-    names = region_tools.expand_candidates(
-        ["#QC", "bad name", "*", ""], min_letters=None, max_letters=None
+    names = list(
+        region_tools.expand_candidates(
+            ["#QC", "bad name", "*", ""], min_letters=None, max_letters=None
+        )
     )
     assert names == ["QC", "qc"]
 
@@ -158,3 +162,12 @@ async def test_guess_endpoint_brute_forces_letter_range(test_db):
     assert [r["region"] for r in found.json()["results"]] == ["yul"]
     assert missed.json()["results"] == []
     assert bad.status_code == 422
+
+
+def test_guess_stops_at_time_limit_and_reports_names_tried():
+    packets, _ = region_tools.scoped_packets_from_rows(_packets("yul", 3), [], limit=10)
+    results, timed_out, tried = region_tools.guess_regions(
+        packets, region_tools.brute_force_candidates(8, 8), max_seconds=0.2
+    )
+    assert timed_out and results == []
+    assert 0 < tried < 26**8

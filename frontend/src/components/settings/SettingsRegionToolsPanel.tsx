@@ -13,7 +13,7 @@ import type { GuessRegionsResponse, ImportRegionsResponse } from '../../types';
  * (every a-z name within a configurable letter range, plus anything imported
  * here) and reports the ones that explain several stored packets.
  */
-const MAX_LETTERS = 4;
+const MAX_LETTERS = 8;
 
 const clampLetters = (value: string, fallback: number) => {
   const n = Number.parseInt(value, 10);
@@ -111,7 +111,7 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
             onClick={() => void runGuess()}
             disabled={guessing}
           >
-            {guessing ? 'Brute forcing...' : 'Brute Force Regions'}
+            {guessing ? 'Brute forcing... (up to 60s)' : 'Brute Force Regions'}
           </Button>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -151,16 +151,20 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
           {minLetters} to {maxLetters} letters, and any names imported below, against your stored
           region-scoped packets, and lists the names that explain at least two of them. A name
           matching two different packets by chance is about a one-in-four-billion event, so listed
-          names are real. Each extra letter multiplies the work by 26 (4 letters can take a minute
-          or more and may stop at the time limit). Names with digits or hyphens cannot be found this
+          names are real. Each extra letter multiplies the work by 26 and a run stops after 60
+          seconds, so in practice 4 letters is about the most that can finish; longer ranges only
+          cover the first names alphabetically. Names with digits or hyphens cannot be found this
           way.
         </p>
         {guess && guess.results.length > 0 && (
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground">
               Tested {guess.tested_packets.toLocaleString()} unexplained packets against{' '}
-              {guess.candidates_tried.toLocaleString()} names
-              {guess.timed_out ? ' (stopped early at the time limit)' : ''}.
+              {guess.candidates_tried.toLocaleString()}
+              {guess.timed_out
+                ? ` of ${guess.candidates_total.toLocaleString()} names (stopped at the time limit, so the rest were not tried)`
+                : ' names'}
+              .
             </p>
             {guess.results.map((r) => (
               <div key={r.region} className="flex items-center gap-2 text-sm font-mono">
@@ -184,7 +188,9 @@ export function RegionToolsPanel({ onAddRegions }: { onAddRegions: (names: strin
         {guess && guess.results.length === 0 && guess.tested_packets > 0 && (
           <p className="text-xs text-muted-foreground">
             Tested {guess.tested_packets.toLocaleString()} unexplained packets against{' '}
-            {guess.candidates_tried.toLocaleString()} names; none matched twice.
+            {guess.candidates_tried.toLocaleString()}
+            {guess.timed_out ? ` of ${guess.candidates_total.toLocaleString()}` : ''} names; none
+            matched twice.
           </p>
         )}
       </div>

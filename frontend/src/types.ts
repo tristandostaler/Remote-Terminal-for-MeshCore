@@ -107,6 +107,7 @@ export interface GuessRegionsResponse {
   scoped_packets: number;
   tested_packets: number;
   candidates_tried: number;
+  candidates_total: number;
   timed_out: boolean;
   results: GuessedRegion[];
 }
