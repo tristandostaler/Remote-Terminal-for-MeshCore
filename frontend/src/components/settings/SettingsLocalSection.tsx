@@ -479,7 +479,8 @@ export function SettingsLocalSection({
                 <code className="text-[0.75rem]">g:abc123</code> or{' '}
                 <code className="text-[0.75rem]">r:1a2b:05</code>). When enabled, these render as
                 the GIF image or reaction emoji instead of the raw text. Reactions show generically
-                (the emoji is not tied to a specific message). GIFs load from media.giphy.com, which
+                (the emoji is not tied to a specific message). Also adds a GIF button to the message
+                composer for sending Giphy GIFs the same way. GIFs load from giphy.com, which
                 reaches outside your local network and exposes your IP to Giphy — so this is off by
                 default.
               </p>

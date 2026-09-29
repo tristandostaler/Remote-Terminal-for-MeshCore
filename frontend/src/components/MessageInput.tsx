@@ -13,9 +13,11 @@ import {
 } from 'react';
 import { ImagePlus, Loader2, Mic, Plus, Smile, X } from 'lucide-react';
 import { EmojiPickerPanel } from './EmojiPickerPanel';
+import { GifPickerPanel } from './GifPickerPanel';
+import { useRichPayloads } from '../contexts/RichPayloadContext';
 import { api } from '../api';
 import type { ReplyContext } from '../types';
-import { formatReplyText } from '../utils/meshcoreOpenPayloads';
+import { formatReplyText, giphyUrlForId, parseGif } from '../utils/meshcoreOpenPayloads';
 import { findActiveMentionQuery, filterMentionCandidates } from '../utils/mentionAutocomplete';
 import {
   encodeMeshImage,
@@ -129,6 +131,10 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
   const [cancelVoice, setCancelVoice] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const [gifPickerOpen, setGifPickerOpen] = useState(false);
+  // The GIF button reaches Giphy, so it follows the same opt-in as rendering
+  // received GIFs (off by default because it exposes the browser's IP).
+  const { renderRichPayloads: gifsEnabled } = useRichPayloads();
   // Emoji, photo and voice live behind one "+" so the resting composer is a
   // single button and the text field gets the width.
   const [actionsOpen, setActionsOpen] = useState(false);
@@ -622,6 +628,26 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
     [text.length]
   );
 
+  // A GIF is sent as meshcore-open's `g:<id>` text payload. Picking one puts
+  // that payload in the draft, and -- as in meshcore-open -- a draft that is
+  // exactly a GIF payload shows the GIF with a remove button in place of the
+  // text field, so Send (or Enter) sends it through the normal text path,
+  // reply prefix included.
+  const pendingGifId = gifsEnabled ? parseGif(text) : null;
+  const gifPreviewRef = useRef<HTMLDivElement>(null);
+
+  const pickGif = useCallback((gifId: string) => {
+    setText(`g:${gifId}`);
+    setGifPickerOpen(false);
+    setActionsOpen(false);
+    requestAnimationFrame(() => gifPreviewRef.current?.focus());
+  }, []);
+
+  const removeGif = useCallback(() => {
+    setText('');
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
+
   // Show counter for messages (not raw).
   // Desktop: always visible. Mobile: only show count after 100 characters.
   const showCharCounter = limits !== null;
@@ -794,11 +820,14 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
             className="flex-shrink-0 rounded-full"
             aria-label={actionsOpen ? 'Hide message options' : 'Show message options'}
             aria-expanded={actionsOpen}
-            title="Emoji, photo and voice message"
+            title={
+              gifsEnabled ? 'Emoji, GIF, photo and voice message' : 'Emoji, photo and voice message'
+            }
             disabled={disabled || sending}
             onClick={() => {
               setActionsOpen((open) => !open);
               setEmojiPickerOpen(false);
+              setGifPickerOpen(false);
             }}
           >
             {actionsOpen ? <X size={18} /> : <Plus size={18} />}
@@ -816,7 +845,10 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
               aria-label="Add emoji"
               aria-expanded={emojiPickerOpen}
               disabled={disabled || sending}
-              onClick={() => setEmojiPickerOpen((open) => !open)}
+              onClick={() => {
+                setEmojiPickerOpen((open) => !open);
+                setGifPickerOpen(false);
+              }}
             >
               <Smile size={18} />
             </Button>
@@ -831,6 +863,37 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
                 {/* Same picker as message reactions: the MCO Advanced table,
                     quick row first, full categorized grid behind the ⋯. */}
                 <EmojiPickerPanel emojiLabel={(emoji) => `Insert ${emoji}`} onPick={insertEmoji} />
+              </div>
+            )}
+          </div>
+        )}
+        {!voiceActive && gifsEnabled && (actionsOpen || !voiceConversation) && (
+          // Deliberately not `relative`: the picker anchors to the composer
+          // row's left edge rather than this button, which sits far enough
+          // right that a 20rem panel would run off a phone screen.
+          <div className="flex-shrink-0">
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="rounded-full text-xs font-bold"
+              aria-label="Add GIF"
+              aria-expanded={gifPickerOpen}
+              disabled={disabled || sending}
+              onClick={() => {
+                setGifPickerOpen((open) => !open);
+                setEmojiPickerOpen(false);
+              }}
+            >
+              GIF
+            </Button>
+            {gifPickerOpen && (
+              <div
+                role="dialog"
+                aria-label="GIF picker"
+                className="absolute bottom-12 left-0 z-20 w-[20rem] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
+              >
+                <GifPickerPanel onPick={pickGif} />
               </div>
             )}
           </div>
@@ -951,6 +1014,41 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
                 </span>
               </>
             )}
+          </div>
+        ) : pendingGifId ? (
+          <div
+            ref={gifPreviewRef}
+            tabIndex={-1}
+            role="group"
+            aria-label="GIF to send"
+            className="flex min-w-0 flex-1 items-center gap-2 rounded-md focus-visible:outline-none"
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                handleSubmit(event as unknown as FormEvent);
+              } else if (event.key === 'Escape' || event.key === 'Backspace') {
+                event.preventDefault();
+                removeGif();
+              }
+            }}
+          >
+            <img
+              src={giphyUrlForId(pendingGifId)}
+              alt="GIF preview"
+              className="max-h-32 max-w-[10rem] rounded-md bg-muted object-contain"
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 flex-shrink-0"
+              aria-label="Remove GIF"
+              title="Remove GIF"
+              disabled={sending}
+              onClick={removeGif}
+            >
+              <X size={16} />
+            </Button>
           </div>
         ) : (
           <div className="relative min-w-0 flex-1">
