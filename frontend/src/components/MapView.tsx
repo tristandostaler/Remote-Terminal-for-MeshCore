@@ -8,6 +8,7 @@ import {
   useMapEvents,
   Polyline,
   LayersControl,
+  LayerGroup,
 } from 'react-leaflet';
 import type { LatLngBoundsExpression, CircleMarker as LeafletCircleMarker } from 'leaflet';
 import L from 'leaflet';
@@ -39,14 +40,16 @@ interface MapViewProps {
 }
 
 // --- Tile layer presets ---
-// Every provider here is free and works without an API key. Attribution strings
-// follow each provider's requirements; do not remove them. If you add a new
-// provider, verify its terms of service (especially for Esri / Google-style
-// satellite tiles) before committing.
+// Every provider here is configured for anonymous access without an API key.
+// Attribution strings follow each provider's requirements; do not remove them.
+// If you add a new provider, verify its terms of service (especially for Esri /
+// Google-style satellite tiles) before committing.
 interface TileLayerPreset {
   id: string;
   label: string;
   url: string;
+  /** Optional transparent labels/reference layer rendered above the base. */
+  overlayUrl?: string;
   attribution: string;
   background: string;
   /** Highest zoom the provider publishes tiles at. When the layer is active,
@@ -74,12 +77,14 @@ const TILE_LAYERS: readonly TileLayerPreset[] = [
   },
   {
     id: 'dark',
-    label: 'Dark (CARTO)',
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    label: 'Dark (Esri)',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    overlayUrl:
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
     attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
+      'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, HERE, Garmin, OpenStreetMap contributors, and the GIS user community',
     background: '#0d0d0d',
-    maxZoom: 19,
+    maxZoom: 16,
   },
   {
     id: 'topographic',
@@ -1103,11 +1108,14 @@ export function MapView({
                 name={layer.label}
                 checked={layer.id === selectedLayerId}
               >
-                <TileLayer
-                  url={layer.url}
-                  attribution={layer.attribution}
-                  maxZoom={layer.maxZoom}
-                />
+                <LayerGroup>
+                  <TileLayer
+                    url={layer.url}
+                    attribution={layer.attribution}
+                    maxZoom={layer.maxZoom}
+                  />
+                  {layer.overlayUrl && <TileLayer url={layer.overlayUrl} maxZoom={layer.maxZoom} />}
+                </LayerGroup>
               </LayersControl.BaseLayer>
             ))}
           </LayersControl>
