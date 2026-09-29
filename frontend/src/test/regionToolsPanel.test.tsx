@@ -67,6 +67,7 @@ describe('RegionToolsPanel', () => {
         regions: [
           { code: 'YUL', label: 'Montreal' },
           { code: 'YYZ', label: 'Toronto' },
+          { code: 'yul', label: 'Montreal again' },
         ],
       })
     );
@@ -74,7 +75,7 @@ describe('RegionToolsPanel', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Load from live feed' }));
 
-    await waitFor(() => expect(screen.getByText(/YUL\s+YYZ/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/yul\s+yyz/)).toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Check against packets' })).toBeInTheDocument();
   });
 });

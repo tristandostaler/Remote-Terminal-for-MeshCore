@@ -70,6 +70,18 @@ def test_extract_names_from_json_html_and_text():
     assert region_tools.extract_region_names("yul\nqc, on\n", "text/plain") == ["yul", "qc", "on"]
 
 
+def test_extract_names_lowercases_and_dedupes():
+    assert region_tools.extract_region_names("YUL\nyul\nOnQc, QC\n", "text/plain") == [
+        "yul",
+        "onqc",
+        "qc",
+    ]
+    assert region_tools.extract_region_names('["YUL", "Yyz"]', "application/json") == [
+        "yul",
+        "yyz",
+    ]
+
+
 @pytest.mark.parametrize(
     "url",
     [
