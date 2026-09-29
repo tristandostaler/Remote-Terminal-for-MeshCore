@@ -1857,6 +1857,14 @@ class PacketsOverTime(BaseModel):
     buckets: list[PacketBucket] = Field(default_factory=list)
 
 
+class RegionBreakdownEntry(BaseModel):
+    """Channel messages attributed to one discovered region in the window."""
+
+    region: str
+    message_count: int
+    pct: float = Field(description="Share of all channel messages in the window")
+
+
 class RegionScopeStats(BaseModel):
     """Regional flood-scope adoption over the selected statistics window.
 
@@ -1893,6 +1901,13 @@ class RegionScopeStats(BaseModel):
     truncated: bool = Field(
         default=False,
         description="True when the packet scan hit its row cap — traffic counts are a sample",
+    )
+    regions: list[RegionBreakdownEntry] = Field(
+        default_factory=list,
+        description="Per-region stored channel-message counts, including zero-traffic known regions",
+    )
+    regions_total_messages: int = Field(
+        default=0, description="Stored channel messages in the window (denominator for regions)"
     )
 
 

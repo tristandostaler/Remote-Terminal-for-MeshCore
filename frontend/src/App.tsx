@@ -718,6 +718,9 @@ export function App() {
     onSelectConversation: handleSelectConversationWithTargetReset,
     onOpenContactInfo: handleOpenContactInfo,
     onOpenNodeStats: handleOpenNodeStats,
+    onSearchRegion: (region: string) => {
+      handleOpenSearchWithQuery(`region:${quoteSearchOperatorValue(region)}`);
+    },
     onBackFromNodeStats: handleBackFromNodeStats,
     onOpenChannelInfo: handleOpenChannelInfo,
     onSenderClick: handleSenderClick,

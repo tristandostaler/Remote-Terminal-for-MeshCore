@@ -91,6 +91,8 @@ interface ConversationPaneProps {
   onOpenContactInfo: (publicKey: string, fromChannel?: boolean) => void;
   /** Opens the per-node stats page. */
   onOpenNodeStats?: (publicKey: string) => void;
+  /** Opens message search filtered to a region (statistics region rows). */
+  onSearchRegion?: (region: string) => void;
   /** Leaves the node stats page; undefined hides the back button. */
   onBackFromNodeStats?: () => void;
   onOpenChannelInfo: (channelKey: string) => void;
@@ -187,6 +189,7 @@ export function ConversationPane({
   onSelectConversation,
   onOpenContactInfo,
   onOpenNodeStats,
+  onSearchRegion,
   onBackFromNodeStats,
   onOpenChannelInfo,
   onSenderClick,
@@ -355,6 +358,7 @@ export function ConversationPane({
       <Suspense fallback={<LoadingPane label="Loading statistics..." />}>
         <StatisticsView
           onOpenNodeStats={onOpenNodeStats}
+          onSearchRegion={onSearchRegion}
           onOpenLiveCompare={() =>
             onSelectConversation({ type: 'liveCompare', id: 'liveCompare', name: 'Live Compare' })
           }

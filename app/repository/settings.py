@@ -896,6 +896,56 @@ class StatisticsRepository:
         }
 
     @staticmethod
+    async def _region_breakdown(cutoff: int | None) -> dict:
+        """Per-region channel-message counts over the window.
+
+        Reads the resolved ``messages.region`` label, so it covers channels we hold
+        keys for and regions that resolved against ``known_regions``. Regions in
+        ``known_regions`` with no traffic in the window are listed with a zero
+        count so every discovered region stays visible. Percentages are of all
+        channel messages in the window (scoped or not).
+        """
+        where = "WHERE type = 'CHAN'"
+        params: tuple = ()
+        if cutoff is not None:
+            where += " AND received_at >= ?"
+            params = (cutoff,)
+        async with db.readonly() as conn:
+            async with conn.execute(
+                f"SELECT COUNT(*) AS total FROM messages {where}", params
+            ) as cursor:
+                total_row = await cursor.fetchone()
+            async with conn.execute(
+                f"""
+                SELECT region, COUNT(*) AS cnt
+                FROM messages
+                {where} AND region IS NOT NULL AND region != ''
+                GROUP BY region COLLATE NOCASE
+                """,
+                params,
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        total = (total_row["total"] if total_row else 0) or 0
+        counts: dict[str, int] = {row["region"]: row["cnt"] for row in rows}
+        lowered = {name.lower() for name in counts}
+        for name in (await AppSettingsRepository.get()).known_regions:
+            if name and name.lower() not in lowered:
+                counts[name] = 0
+                lowered.add(name.lower())
+
+        regions = [
+            {
+                "region": name,
+                "message_count": count,
+                "pct": (count / total) * 100 if total else 0.0,
+            }
+            for name, count in counts.items()
+        ]
+        regions.sort(key=lambda r: (-r["message_count"], r["region"].lower()))
+        return {"regions": regions, "regions_total_messages": total}
+
+    @staticmethod
     async def _repeater_clock_drift(cutoff: int | None, now: int) -> dict:
         """Aggregate repeater clock drift over the window.
 
@@ -1225,6 +1275,7 @@ class StatisticsRepository:
         known_channels_active = await StatisticsRepository._known_channels_active(cutoff)
         path_hash_width, region_scope = await StatisticsRepository._packet_shape(cutoff)
         region_scope.update(await StatisticsRepository._region_scope_senders(cutoff))
+        region_scope.update(await StatisticsRepository._region_breakdown(cutoff))
         multibyte_rollout = await StatisticsRepository._multibyte_rollout()
         packets_over_time = await StatisticsRepository._packets_over_time(cutoff, now)
         repeater_clock_drift = await StatisticsRepository._repeater_clock_drift(cutoff, now)

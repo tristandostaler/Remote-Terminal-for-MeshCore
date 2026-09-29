@@ -96,10 +96,14 @@ function WindowSelector({
 function RegionScopeStatsPanel({
   stats,
   windowKey,
+  onSearchRegion,
 }: {
   stats: RegionScopeStats;
   windowKey: StatsWindow;
+  /** Opens message search filtered to a region. */
+  onSearchRegion?: (region: string) => void;
 }) {
+  const regions = stats.regions ?? [];
   // Corrupt RF captures land in the packet table with random headers, some of
   // which claim to be region-scoped. At or below the measured floor there is
   // nothing to report but noise, so withhold the percentage and say so.
@@ -143,6 +147,48 @@ function RegionScopeStatsPanel({
           </span>
         </div>
       </div>
+      {regions.length > 0 && (
+        <div className="mt-4">
+          <h4 className="text-sm font-medium mb-1">By region</h4>
+          <p className="text-xs text-muted-foreground mb-2">
+            Stored channel messages per discovered region, as a share of all{' '}
+            {(stats.regions_total_messages ?? 0).toLocaleString()} in the window.
+            {onSearchRegion ? ' Click a row to search its messages.' : ''}
+          </p>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-muted-foreground">
+                <th className="text-left font-normal pb-1">Region</th>
+                <th className="text-right font-normal pb-1">Messages</th>
+                <th className="text-right font-normal pb-1">Share</th>
+              </tr>
+            </thead>
+            <tbody>
+              {regions.map((entry) => (
+                <tr
+                  key={entry.region}
+                  className={`border-t border-border/50 ${
+                    onSearchRegion ? 'cursor-pointer hover:bg-muted/50 transition-colors' : ''
+                  }`}
+                  role={onSearchRegion ? 'button' : undefined}
+                  tabIndex={onSearchRegion ? 0 : undefined}
+                  onKeyDown={onSearchRegion ? handleKeyboardActivate : undefined}
+                  onClick={() => onSearchRegion?.(entry.region)}
+                  title={onSearchRegion ? `Search messages in ${entry.region}` : undefined}
+                >
+                  <td className="py-1 pr-2 truncate max-w-[14rem]">{entry.region}</td>
+                  <td className="text-right py-1 font-medium">
+                    {entry.message_count.toLocaleString()}
+                  </td>
+                  <td className="text-right py-1 text-muted-foreground">
+                    {formatPercent(entry.pct)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {floor > 0 && stats.scoped_messages > 0 && (
         <p className="text-[0.8125rem] text-muted-foreground mt-2">
           {withinNoise
@@ -752,9 +798,12 @@ function DriftRankingTable({
 export function StatisticsView({
   onOpenNodeStats,
   onOpenLiveCompare,
+  onSearchRegion,
 }: {
   /** Passed through so a repeater name in the drift tables opens its stats page. */
   onOpenNodeStats?: (publicKey: string) => void;
+  /** Opens message search filtered to a region (from the region breakdown rows). */
+  onSearchRegion?: (region: string) => void;
   /** Opens the Live Compare page from the live feed comparison section. */
   onOpenLiveCompare?: () => void;
 } = {}) {
@@ -1081,7 +1130,11 @@ export function StatisticsView({
               <Separator />
 
               {/* Region Scope */}
-              <RegionScopeStatsPanel stats={stats.region_scope} windowKey={shownWindow} />
+              <RegionScopeStatsPanel
+                stats={stats.region_scope}
+                windowKey={shownWindow}
+                onSearchRegion={onSearchRegion}
+              />
 
               {/* Live feed comparison (live.meshcore.ca) — only once something is mirrored */}
               {stats.live_compare && (
