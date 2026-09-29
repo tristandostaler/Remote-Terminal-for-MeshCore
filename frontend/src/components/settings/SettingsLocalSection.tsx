@@ -523,7 +523,8 @@ export function SettingsLocalSection({
               <p className="text-[0.8125rem] text-muted-foreground">
                 Display the region scope (e.g. <code className="text-[0.75rem]">nl-gr</code>) in the
                 line under each message, in every channel and direct message, when the packet was
-                region-scoped. Off by default.
+                region-scoped, or <code className="text-[0.75rem]">region: none</code> when it was
+                not. Off by default.
               </p>
             </div>
           </div>

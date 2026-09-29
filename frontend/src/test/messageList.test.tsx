@@ -94,7 +94,7 @@ describe('MessageList channel sender rendering', () => {
     expect(screen.queryByText('nl-gr')).not.toBeInTheDocument();
   });
 
-  it('does not render a region badge for unscoped messages', () => {
+  it('renders "region: none" for unscoped messages when the toggle is on', () => {
     render(
       <ShowRegionProvider showRegion setShowRegion={() => {}}>
         <MessageList
@@ -105,7 +105,7 @@ describe('MessageList channel sender rendering', () => {
       </ShowRegionProvider>
     );
 
-    expect(screen.queryByText('nl-gr')).not.toBeInTheDocument();
+    expect(screen.getByText('region: none')).toBeInTheDocument();
   });
 
   it('shows per-hop byte width in the path badge when the toggle is on', () => {
