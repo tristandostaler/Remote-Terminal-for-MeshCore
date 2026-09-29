@@ -356,7 +356,11 @@ Every message carries one small row under its text — time, hop badge, region, 
 
 ### Composer options tray (`MessageInput`)
 
-Emoji, photo and voice sit behind one `+` so the resting composer is a single button and the text field gets the width. The emoji button opens the shared `EmojiPickerPanel` (the MCO Advanced reaction table: quick row first, full categorized grid behind the `⋯`) in a popover, inserting at the caret — the same panel the message-actions dialog uses for reactions, so composing and reacting offer the same emojis in the same order. Three things about the tray are load-bearing:
+Emoji, GIF, photo and voice sit behind one `+` so the resting composer is a single button and the text field gets the width. The emoji button opens the shared `EmojiPickerPanel` (the MCO Advanced reaction table: quick row first, full categorized grid behind the `⋯`) in a popover, inserting at the caret — the same panel the message-actions dialog uses for reactions, so composing and reacting offer the same emojis in the same order.
+
+The **GIF** button (a text-labelled "GIF" slot right after emoji) opens `GifPickerPanel`, a port of meshcore-open's `gif_picker.dart`: Giphy trending on open, search on Enter, 25 results rated G, using the same public beta API key meshcore-open ships. It is shown only while "Render MeshCore Open GIFs & Reactions" (`RichPayloadContext`) is on, because both the picker and the preview reach Giphy and expose the browser's IP — the same opt-in that already gates rendering received GIFs. Picking a GIF puts meshcore-open's `g:<id>` payload in the draft; as in meshcore-open, a draft that is exactly a GIF payload (`parseGif`) shows the GIF with a remove button in place of the textarea, and Send/Enter sends it through the ordinary text path, so a GIF sent while replying goes out in the reply wire form `"@[Name] >quote\ng:<id>"`. The search box is not a nested `<form>` (invalid inside the composer's): its Enter handler must `preventDefault` so it searches rather than submitting the draft.
+
+Three things about the tray are load-bearing:
 
 - **The file input stays mounted while the tray is collapsed.** The tray closes the moment a file is picked, so an input that unmounted with it would drop the `change` event the OS dialog is about to deliver.
 - **The tray is skipped entirely when `voiceConversation` is absent**, leaving the emoji button in the row on its own. Hiding a lone button behind a second tap buys nothing.

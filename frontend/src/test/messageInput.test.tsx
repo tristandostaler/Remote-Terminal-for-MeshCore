@@ -6,9 +6,10 @@
  */
 
 import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import { MessageInput } from '../components/MessageInput';
+import { RichPayloadProvider } from '../contexts/RichPayloadContext';
 import { api } from '../api';
 import { toast } from '../components/ui/sonner';
 import { encodeMeshImage, prepareAeicImage } from '../services/imageCodec';
@@ -109,8 +110,9 @@ describe('MessageInput', () => {
     replyContext?: ReplyContext | null;
     onCancelReply?: () => void;
     mentionCandidates?: string[];
+    gifs?: boolean;
   }) {
-    return render(
+    const input = (
       <MessageInput
         onSend={onSend}
         disabled={props.disabled ?? false}
@@ -124,6 +126,15 @@ describe('MessageInput', () => {
         placeholder="Type a message..."
         voiceConversation={props.voice ? { type: 'PRIV', key: 'aa'.repeat(32) } : undefined}
       />
+    );
+    return render(
+      props.gifs ? (
+        <RichPayloadProvider renderRichPayloads setRenderRichPayloads={() => {}}>
+          {input}
+        </RichPayloadProvider>
+      ) : (
+        input
+      )
     );
   }
 
@@ -681,6 +692,119 @@ describe('MessageInput', () => {
         })
       );
       expect(screen.queryByRole('button', { name: 'Send image' })).not.toBeInTheDocument();
+    });
+  });
+
+  describe('GIF sending', () => {
+    const fetchMock = vi.fn();
+
+    beforeEach(() => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          data: [
+            {
+              id: 'abc123',
+              title: 'Waving cat',
+              images: { fixed_height_small: { url: 'https://media.giphy.com/small.gif' } },
+            },
+          ],
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('hides the GIF button while rendering MeshCore Open GIFs is off', () => {
+      renderInput({ conversationType: 'channel', voice: true });
+      openActions();
+
+      expect(screen.queryByRole('button', { name: 'Add GIF' })).toBeNull();
+    });
+
+    it('offers GIF as a fourth tray action when enabled', () => {
+      renderInput({ conversationType: 'channel', voice: true, gifs: true });
+      openActions();
+
+      expect(screen.getByRole('button', { name: 'Add GIF' })).toHaveTextContent('GIF');
+    });
+
+    it('picks a GIF, previews it, and sends the meshcore-open g:<id> payload', async () => {
+      renderInput({ conversationType: 'channel', voice: true, gifs: true });
+      openActions();
+      fireEvent.click(screen.getByRole('button', { name: 'Add GIF' }));
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Send GIF: Waving cat' }));
+
+      expect(fetchMock.mock.calls[0][0]).toContain('https://api.giphy.com/v1/gifs/trending?');
+      expect(screen.getByAltText('GIF preview')).toHaveAttribute(
+        'src',
+        'https://media.giphy.com/media/abc123/giphy.gif'
+      );
+      expect(screen.queryByPlaceholderText('Type a message...')).toBeNull();
+
+      fireEvent.click(getSendButton());
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith('g:abc123'));
+      expect(getInput()).toHaveValue('');
+    });
+
+    it('sends a GIF picked while replying as a meshcore-open reply', async () => {
+      renderInput({
+        conversationType: 'channel',
+        voice: true,
+        gifs: true,
+        replyContext: { senderName: 'Alice', preview: 'hi' },
+      });
+      openActions();
+      fireEvent.click(screen.getByRole('button', { name: 'Add GIF' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Send GIF: Waving cat' }));
+      fireEvent.click(getSendButton());
+
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith('@[Alice] >hi\ng:abc123'));
+    });
+
+    it('searches on Enter without submitting the composer', async () => {
+      renderInput({ conversationType: 'channel', voice: true, gifs: true });
+      openActions();
+      fireEvent.click(screen.getByRole('button', { name: 'Add GIF' }));
+      await screen.findByRole('button', { name: 'Send GIF: Waving cat' });
+
+      const search = screen.getByRole('searchbox', { name: 'Search GIFs' });
+      fireEvent.change(search, { target: { value: 'cats & dogs' } });
+      fireEvent.keyDown(search, { key: 'Enter' });
+
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      const url = new URL(fetchMock.mock.calls[1][0] as string);
+      expect(url.pathname).toBe('/v1/gifs/search');
+      expect(url.searchParams.get('q')).toBe('cats & dogs');
+      expect(url.searchParams.get('rating')).toBe('g');
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('removes a picked GIF and restores the text field', async () => {
+      renderInput({ conversationType: 'channel', voice: true, gifs: true });
+      openActions();
+      fireEvent.click(screen.getByRole('button', { name: 'Add GIF' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Send GIF: Waving cat' }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Remove GIF' }));
+
+      expect(getInput()).toHaveValue('');
+      expect(screen.queryByAltText('GIF preview')).toBeNull();
+    });
+
+    it('shows a retry when Giphy cannot be reached', async () => {
+      fetchMock.mockRejectedValueOnce(new Error('offline'));
+      renderInput({ conversationType: 'channel', voice: true, gifs: true });
+      openActions();
+      fireEvent.click(screen.getByRole('button', { name: 'Add GIF' }));
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+
+      expect(await screen.findByRole('button', { name: 'Send GIF: Waving cat' })).toBeVisible();
     });
   });
 
