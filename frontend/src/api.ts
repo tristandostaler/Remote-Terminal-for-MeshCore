@@ -786,6 +786,10 @@ export const api = {
       body: JSON.stringify(update),
     }),
 
+  /** Guest login + owner-info request now; can take ~20 s over LoRa. */
+  refreshContactOwner: (publicKey: string) =>
+    fetchJson<ContactOwnerInfo>(`/contacts/${publicKey}/owner/refresh`, { method: 'POST' }),
+
   getOwnerOutreach: (signal?: AbortSignal) =>
     fetchJson<OwnerOutreachResponse>('/contacts/owner-outreach', { signal }),
 

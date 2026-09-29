@@ -29,12 +29,15 @@ CHECK_INTERVAL_SECONDS = 300
 _task: asyncio.Task | None = None
 
 
-async def refresh_owner_info(public_key: str, credential: str | None) -> str:
+async def refresh_owner_info(
+    public_key: str, credential: str | None, *, blocking: bool = False
+) -> str:
     """Log in to one node, ask for its owner info, and record the outcome.
 
     Returns the recorded status (``ok``, ``no_reply``, ``login_failed``,
     ``error``). Raises ``RadioOperationBusyError`` without recording anything,
-    so a busy radio never counts as the node failing to answer.
+    so a busy radio never counts as the node failing to answer. The sweep
+    passes ``blocking=False`` and tries again later; a button press waits.
     """
     from app.routers.server_control import (
         prepare_authenticated_contact_connection,
@@ -50,7 +53,7 @@ async def refresh_owner_info(public_key: str, credential: str | None) -> str:
     try:
         async with radio_manager.radio_operation(
             f"owner_info_sweep:{public_key[:12]}",
-            blocking=False,
+            blocking=blocking,
             pause_polling=True,
             suspend_auto_fetch=True,
         ) as mc:

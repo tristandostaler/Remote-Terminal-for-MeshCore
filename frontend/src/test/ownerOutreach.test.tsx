@@ -203,3 +203,58 @@ describe('NodeStatsView owner section', () => {
     expect(onBack).toHaveBeenCalled();
   });
 });
+
+describe('Fetch owner info button', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('fetches from the outreach card and shows the answer in place', async () => {
+    const fetchSpy = mockFetch({
+      [`/contacts/${KEY}/owner/refresh`]: () =>
+        owner({
+          firmware_owner_info: 'Alice|VA2NEW',
+          attempt_status: 'ok',
+          fetched_at: 1_700_000_500,
+          hints: [{ kind: 'callsign', value: 'VA2NEW', source: 'owner_info' }],
+        }),
+      '/contacts/owner-outreach': () => outreach(),
+    });
+    render(<OwnerOutreachView contacts={[]} onSelectConversation={vi.fn()} />);
+
+    const card = await screen.findByTestId('owner-outreach-item');
+    await userEvent.click(within(card).getByRole('button', { name: 'Fetch owner info' }));
+
+    expect(await within(card).findByText(/VA2NEW/, { selector: 'p' })).toBeInTheDocument();
+    const post = fetchSpy.mock.calls.find((call) => String(call[0]).includes('/owner/refresh'));
+    expect(post?.[1]?.method).toBe('POST');
+  });
+
+  it('is not offered for chat nodes', async () => {
+    mockFetch({ '/contacts/owner-outreach': () => outreach({ items: [item({ type: 1 })] }) });
+    render(<OwnerOutreachView contacts={[]} onSelectConversation={vi.fn()} />);
+
+    const card = await screen.findByTestId('owner-outreach-item');
+    expect(within(card).queryByRole('button', { name: 'Fetch owner info' })).toBeNull();
+  });
+
+  it('fetches from the node stats owner section', async () => {
+    mockFetch({
+      [`/contacts/${KEY}/owner/refresh`]: () =>
+        owner({ firmware_owner_info: 'Fresh owner', attempt_status: 'ok', fetched_at: 1 }),
+      [`/contacts/${KEY}/stats`]: () => ({
+        public_key: KEY,
+        name: 'Hilltop',
+        type: 2,
+        window: '1M',
+        window_seconds: 30 * 86400,
+        generated_at: 1_700_000_000,
+        clock_drift: null,
+        owner: owner(),
+      }),
+    });
+    render(<NodeStatsView publicKey={KEY} contacts={[]} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Fetch owner info' }));
+
+    expect(await screen.findByText('Fresh owner')).toBeInTheDocument();
+  });
+});
