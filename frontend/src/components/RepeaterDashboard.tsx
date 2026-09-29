@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { toast } from './ui/sonner';
 import { Button } from './ui/button';
-import { Bell, Info, Route, Star, Trash2 } from 'lucide-react';
+import { BarChart3, Bell, Info, Route, Star, Trash2 } from 'lucide-react';
 import { DirectTraceIcon } from './DirectTraceIcon';
 import { RepeaterLogin } from './RepeaterLogin';
 import { ServerLoginStatusBanner } from './ServerLoginStatusBanner';
@@ -47,6 +47,8 @@ interface RepeaterDashboardProps {
   onToggleFavorite: (type: 'channel' | 'contact', id: string) => void;
   onDeleteContact: (publicKey: string) => void;
   onOpenContactInfo?: (publicKey: string) => void;
+  /** Opens this repeater's node stats page (owner, clock drift history). */
+  onOpenNodeStats?: (publicKey: string, name?: string) => void;
   trackedTelemetryRepeaters: string[];
   onToggleTrackedTelemetry: (publicKey: string) => Promise<void>;
   clockSyncRepeaters: string[];
@@ -72,6 +74,7 @@ export function RepeaterDashboard({
   onToggleFavorite,
   onDeleteContact,
   onOpenContactInfo,
+  onOpenNodeStats,
   trackedTelemetryRepeaters,
   onToggleTrackedTelemetry,
   clockSyncRepeaters,
@@ -244,6 +247,16 @@ export function RepeaterDashboard({
               aria-label="Path Discovery"
             >
               <Route className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+            </button>
+          )}
+          {onOpenNodeStats && (
+            <button
+              className="p-1 rounded hover:bg-accent text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => onOpenNodeStats(conversation.id, conversation.name)}
+              title="Node stats. Owner info and notes, clock drift history"
+              aria-label="Node stats"
+            >
+              <BarChart3 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             </button>
           )}
           <button

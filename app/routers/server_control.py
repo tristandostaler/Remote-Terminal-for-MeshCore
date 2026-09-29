@@ -538,40 +538,58 @@ async def fetch_repeater_owner_info_binary(
         # Ensure contact is on radio for reply routing.
         await _ensure_on_radio(mc, contact)
         await asyncio.sleep(1.0)  # settle after add_contact
-
-        send_result = await mc.commands.send_binary_req(
-            contact.public_key,
-            _RepeaterBinaryReqType.OWNER_INFO,
-            timeout=timeout,
-            min_timeout=min_timeout,
+        return await request_repeater_owner_info(
+            mc, contact, timeout=timeout, min_timeout=min_timeout
         )
-        if send_result.type == EventType.ERROR:
-            logger.debug("owner-info binary req send error: %s", send_result.payload)
-            return None
 
-        expected_ack = send_result.payload.get("expected_ack")
-        if expected_ack is None:
-            logger.debug("owner-info binary req missing expected_ack: %s", send_result.payload)
-            return None
-        exp_tag = expected_ack.hex()
 
-        wait_timeout = (
-            timeout if timeout > 0 else send_result.payload.get("suggested_timeout", 4000) / 800
+async def request_repeater_owner_info(
+    mc,
+    contact: Contact,
+    *,
+    timeout: float = 10.0,
+    min_timeout: float = 5.0,
+) -> dict[str, str | None] | None:
+    """Send the owner-info binary request on a radio the caller already holds.
+
+    The caller must hold the radio lock and have put ``contact`` on the radio
+    (the telemetry loop does both), which is why this is split from
+    :func:`fetch_repeater_owner_info_binary` -- that one takes the lock itself
+    and would deadlock inside a held ``radio_operation``.
+    """
+    send_result = await mc.commands.send_binary_req(
+        contact.public_key,
+        _RepeaterBinaryReqType.OWNER_INFO,
+        timeout=timeout,
+        min_timeout=min_timeout,
+    )
+    if send_result.type == EventType.ERROR:
+        logger.debug("owner-info binary req send error: %s", send_result.payload)
+        return None
+
+    expected_ack = send_result.payload.get("expected_ack")
+    if expected_ack is None:
+        logger.debug("owner-info binary req missing expected_ack: %s", send_result.payload)
+        return None
+    exp_tag = expected_ack.hex()
+
+    wait_timeout = (
+        timeout if timeout > 0 else send_result.payload.get("suggested_timeout", 4000) / 800
+    )
+    wait_timeout = max(wait_timeout, min_timeout)
+
+    response = await mc.wait_for_event(
+        EventType.BINARY_RESPONSE,
+        attribute_filters={"tag": exp_tag},
+        timeout=wait_timeout,
+    )
+    if response is None:
+        logger.info(
+            "No owner-info binary response from %s within %.1fs",
+            contact.public_key[:12],
+            wait_timeout,
         )
-        wait_timeout = max(wait_timeout, min_timeout)
-
-        response = await mc.wait_for_event(
-            EventType.BINARY_RESPONSE,
-            attribute_filters={"tag": exp_tag},
-            timeout=wait_timeout,
-        )
-        if response is None:
-            logger.info(
-                "No owner-info binary response from %s within %.1fs",
-                contact.public_key[:12],
-                wait_timeout,
-            )
-            return None
+        return None
 
     return _parse_owner_info_payload(response.payload.get("data", ""))
 

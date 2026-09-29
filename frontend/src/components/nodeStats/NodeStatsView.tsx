@@ -17,15 +17,21 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, RefreshCw } from 'lucide-react';
+import { ArrowLeft, MessageSquare, RefreshCw, Router } from 'lucide-react';
 
 import { api, isAbortError } from '../../api';
 import { ContactAvatar } from '../ContactAvatar';
 import { Separator } from '../ui/separator';
 import { getContactDisplayName } from '../../utils/pubkey';
-import { CONTACT_TYPE_REPEATER, NODE_STATS_DEFAULT_WINDOW, STATS_WINDOWS } from '../../types';
-import type { Contact, NodeStatsResponse, StatsWindow } from '../../types';
+import {
+  CONTACT_TYPE_REPEATER,
+  CONTACT_TYPE_ROOM,
+  NODE_STATS_DEFAULT_WINDOW,
+  STATS_WINDOWS,
+} from '../../types';
+import type { Contact, ContactOwnerInfo, NodeStatsResponse, StatsWindow } from '../../types';
 import { ClockDriftStats } from './ClockDriftStats';
+import { OwnerStats } from './OwnerStats';
 import { formatDateTime, windowPhrase } from './nodeStatsShared';
 
 const CONTACT_TYPE_LABELS: Record<number, string> = {
@@ -107,6 +113,12 @@ export function NodeStatsView({
   }, [publicKey, selectedWindow, reloadNonce]);
 
   const handleRefresh = useCallback(() => setReloadNonce((n) => n + 1), []);
+  // A save in the owner section returns the new record; splice it into the
+  // snapshot rather than refetching every section for a notes edit.
+  const handleOwnerChange = useCallback(
+    (owner: ContactOwnerInfo) => setStats((prev) => (prev ? { ...prev, owner } : prev)),
+    []
+  );
 
   const contact = contacts.find((c) => c.public_key.toLowerCase() === publicKey.toLowerCase());
   // Prefer the live contact name: it tracks WebSocket renames, while the payload
@@ -119,6 +131,13 @@ export function NodeStatsView({
   // While a wider window loads the previous snapshot stays on screen, so
   // headings must follow the data rather than the pending selection.
   const shownWindow = stats?.window ?? selectedWindow;
+  const isServer = nodeType === CONTACT_TYPE_REPEATER || nodeType === CONTACT_TYPE_ROOM;
+  const openLabel =
+    nodeType === CONTACT_TYPE_REPEATER
+      ? 'Open repeater'
+      : nodeType === CONTACT_TYPE_ROOM
+        ? 'Open room'
+        : 'Open conversation';
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -152,7 +171,24 @@ export function NodeStatsView({
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                title={
+                  nodeType === CONTACT_TYPE_REPEATER ? 'Open the repeater dashboard' : openLabel
+                }
+              >
+                {nodeType === CONTACT_TYPE_REPEATER ? (
+                  <Router className="h-3.5 w-3.5" aria-hidden="true" />
+                ) : (
+                  <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
+                )}
+                {openLabel}
+              </button>
+            )}
             <WindowSelector
               value={selectedWindow}
               onChange={setSelectedWindow}
@@ -185,6 +221,10 @@ export function NodeStatsView({
           ) : stats ? (
             <div className="space-y-6">
               {/* ---- Section list. Add new sections here; see the file header. ---- */}
+              {stats.owner && (
+                <OwnerStats owner={stats.owner} isServer={isServer} onChange={handleOwnerChange} />
+              )}
+
               {stats.clock_drift && (
                 <ClockDriftStats drift={stats.clock_drift} windowKey={shownWindow} />
               )}

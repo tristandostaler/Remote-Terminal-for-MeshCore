@@ -399,6 +399,7 @@ Supported routes:
 - `#trace`
 - `#statistics`
 - `#live-compare`
+- `#owner-outreach`
 - `#node-stats/{publicKey}`
 - `#node-stats/{publicKey}/{label}`
 - `#settings/{section}`
@@ -660,6 +661,13 @@ Rules the page depends on:
 - **Headings read from `stats.window`**, not the pending selection — the previous snapshot stays on screen while a wider window loads, and a heading that changes before its numbers do is a lie. Same rule as `StatisticsView`.
 - **The header prefers the live contact** over the payload's name, so a WebSocket rename shows up immediately; the payload is a snapshot from whenever the request went out.
 - **Deep links resolve without contacts.** `useConversationRouter` sets the conversation from the hash token alone rather than waiting for the contact list, because the page fetches by key and the backend accepts a prefix. Back goes to the node's own conversation rather than browser history, which a cold deep link does not have.
+
+### Owner section and Owner Outreach
+
+- **Owner section** (`nodeStats/OwnerStats.tsx`) is the first section on the node stats page. It renders from `stats.owner`, which the backend always sends, even when empty. It shows the node's reported `owner.info` (repeaters and rooms only), the derived hint chips (`OwnerHints`: callsigns link to QRZ, emails to `mailto:`), and `OwnerNotesEditor`. This is the one section that **writes**: a save calls `PATCH /contacts/{key}/owner`, and the returned record is spliced into the page snapshot through `onChange`. It still never fetches. The editor follows an incoming record only while the draft is clean, so a refresh never discards typing.
+- **Header links**: the node stats header carries a labelled "Open repeater" / "Open room" / "Open conversation" button (same handler as the back arrow). The repeater dashboard header has a `BarChart3` "Node stats" button (`onOpenNodeStats`) going the other way.
+- **Owner Outreach** (`OwnerOutreachView.tsx`, conversation type `ownerOutreach`, `#owner-outreach`, sidebar › Tools and the command palette) shows one card per flagged node from `GET /contacts/owner-outreach`: drift, owner info, hints, compact notes editor, "Copy message" (`outreachMessage`, which mentions `clkreboot` only for fast clocks, since firmware will not step a clock backwards), open the node, and open node stats. Nothing is sent from the page. Edits update the card in place without re-sorting until the next refresh. A `server_clock_suspect` payload shows a warning banner first.
+- **Setting**: Settings › Radio › "Refresh owner info" edits `owner_info_refresh_days`.
 
 ### Region-scope adoption panel
 

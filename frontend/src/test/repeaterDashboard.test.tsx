@@ -213,6 +213,18 @@ describe('RepeaterDashboard', () => {
     expect(notFetched.length).toBeGreaterThanOrEqual(7); // At least 7 data panes (incl. LPP Sensors)
   });
 
+  it('links to the node stats page from the header', () => {
+    const onOpenNodeStats = vi.fn();
+    render(<RepeaterDashboard {...defaultProps} onOpenNodeStats={onOpenNodeStats} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Node stats' }));
+
+    expect(onOpenNodeStats).toHaveBeenCalledWith(
+      defaultProps.conversation.id,
+      defaultProps.conversation.name
+    );
+  });
+
   it('shows Load All button when logged in', () => {
     mockHook.loggedIn = true;
 

@@ -17,6 +17,7 @@ from app.models import (
     AppSettings,
 )
 from app.path_utils import bucket_path_hash_widths, bucket_region_scope, parse_packet_envelope
+from app.repository.contact_owner import DEFAULT_OWNER_INFO_REFRESH_DAYS
 from app.send_attempts import clamp_message_retries
 from app.stats_windows import DEFAULT_STATS_WINDOW, bucket_seconds_for_span, window_cutoff
 from app.telemetry_interval import DEFAULT_TELEMETRY_INTERVAL_HOURS
@@ -74,7 +75,7 @@ class AppSettingsRepository:
                    virtual_node_allow_admin_commands,
                    live_feed_enabled, live_feed_url, live_feed_region,
                    live_feed_channels, live_feed_poll_interval,
-                   auto_discover_regions_hours
+                   auto_discover_regions_hours, owner_info_refresh_days
             FROM app_settings WHERE id = 1
             """
         ) as cursor:
@@ -193,6 +194,16 @@ class AppSettingsRepository:
         except (KeyError, TypeError, ValueError):
             auto_discover_regions_hours = 0
 
+        try:
+            raw_owner_days = row["owner_info_refresh_days"]
+            owner_info_refresh_days = (
+                max(0, int(raw_owner_days))
+                if raw_owner_days is not None
+                else DEFAULT_OWNER_INFO_REFRESH_DAYS
+            )
+        except (KeyError, TypeError, ValueError):
+            owner_info_refresh_days = DEFAULT_OWNER_INFO_REFRESH_DAYS
+
         # Parse telemetry_routed_hourly boolean
         try:
             telemetry_routed_hourly = bool(row["telemetry_routed_hourly"])
@@ -253,6 +264,7 @@ class AppSettingsRepository:
             max_message_retries=max_message_retries,
             telemetry_interval_hours=telemetry_interval_hours,
             auto_discover_regions_hours=auto_discover_regions_hours,
+            owner_info_refresh_days=owner_info_refresh_days,
             telemetry_routed_hourly=telemetry_routed_hourly,
             virtual_node_allow_admin_commands=virtual_node_allow_admin_commands,
             live_feed_enabled=live_feed_enabled,
@@ -291,6 +303,7 @@ class AppSettingsRepository:
         live_feed_channels: list[str] | None = None,
         live_feed_poll_interval: int | None = None,
         auto_discover_regions_hours: int | None = None,
+        owner_info_refresh_days: int | None = None,
     ) -> None:
         """Apply field updates using an already-acquired connection.
 
@@ -368,6 +381,10 @@ class AppSettingsRepository:
             updates.append("auto_discover_regions_hours = ?")
             params.append(auto_discover_regions_hours)
 
+        if owner_info_refresh_days is not None:
+            updates.append("owner_info_refresh_days = ?")
+            params.append(owner_info_refresh_days)
+
         if telemetry_interval_hours is not None:
             updates.append("telemetry_interval_hours = ?")
             params.append(telemetry_interval_hours)
@@ -441,6 +458,7 @@ class AppSettingsRepository:
         live_feed_channels: list[str] | None = None,
         live_feed_poll_interval: int | None = None,
         auto_discover_regions_hours: int | None = None,
+        owner_info_refresh_days: int | None = None,
     ) -> AppSettings:
         """Update app settings. Only provided fields are updated."""
         async with db.tx() as conn:
@@ -471,6 +489,7 @@ class AppSettingsRepository:
                 live_feed_channels=live_feed_channels,
                 live_feed_poll_interval=live_feed_poll_interval,
                 auto_discover_regions_hours=auto_discover_regions_hours,
+                owner_info_refresh_days=owner_info_refresh_days,
             )
             return await AppSettingsRepository._get_in_conn(conn)
 

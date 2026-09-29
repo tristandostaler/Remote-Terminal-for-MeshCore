@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronRight,
   GitCompareArrows,
+  UserSearch,
   LockOpen,
   Logs,
   Map,
@@ -894,6 +895,18 @@ export function Sidebar({
               type: 'liveCompare',
               id: 'liveCompare',
               name: 'Live Compare',
+            }),
+        }),
+        renderSidebarActionRow({
+          key: 'tool-owner-outreach',
+          active: isActive('ownerOutreach', 'ownerOutreach'),
+          icon: <UserSearch className="h-4 w-4" />,
+          label: 'Owner Outreach',
+          onClick: () =>
+            handleSelectConversation({
+              type: 'ownerOutreach',
+              id: 'ownerOutreach',
+              name: 'Owner Outreach',
             }),
         }),
         renderSidebarActionRow({

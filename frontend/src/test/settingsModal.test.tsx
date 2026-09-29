@@ -79,6 +79,7 @@ const baseSettings: AppSettings = {
   max_message_retries: 3,
   telemetry_interval_hours: 8,
   auto_discover_regions_hours: 0,
+  owner_info_refresh_days: 7,
   telemetry_routed_hourly: false,
   virtual_node_allow_admin_commands: false,
   live_feed_enabled: false,

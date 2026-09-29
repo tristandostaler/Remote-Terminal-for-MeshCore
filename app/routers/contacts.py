@@ -13,6 +13,8 @@ from app.models import (
     ContactActiveRoom,
     ContactAdvertPathSummary,
     ContactAnalytics,
+    ContactOwnerInfo,
+    ContactOwnerUpdateRequest,
     ContactRoutingOverrideRequest,
     ContactTelemetryResponse,
     ContactUpsert,
@@ -20,6 +22,7 @@ from app.models import (
     LppSensor,
     NearestRepeater,
     NodeStatsResponse,
+    OwnerOutreachResponse,
     PathDiscoveryResponse,
     PathDiscoveryRoute,
     TelemetryHistoryEntry,
@@ -32,6 +35,7 @@ from app.repository import (
     ContactAdvertPathRepository,
     ContactClockDriftRepository,
     ContactNameHistoryRepository,
+    ContactOwnerRepository,
     ContactRepository,
     MessageRepository,
 )
@@ -729,7 +733,37 @@ async def get_node_stats(
         clock_drift=await ContactClockDriftRepository.get_detail(
             contact.public_key, window_seconds=span, now=now
         ),
+        owner=await ContactOwnerRepository.get(contact.public_key, name=contact.name),
     )
+
+
+@router.get("/owner-outreach", response_model=OwnerOutreachResponse)
+async def get_owner_outreach() -> OwnerOutreachResponse:
+    """Nodes whose clock has been clearly wrong lately, with what is known of the owner.
+
+    Read-only; nothing is sent. Contacting an owner stays a manual step, and
+    ``PATCH /contacts/{key}/owner`` with ``notified`` records that it happened.
+    """
+    return await ContactOwnerRepository.list_outreach()
+
+
+@router.get("/{public_key}/owner", response_model=ContactOwnerInfo)
+async def get_contact_owner(public_key: str) -> ContactOwnerInfo:
+    """Saved owner info and notes for one node (no radio access)."""
+    contact = await _resolve_contact_or_404(public_key)
+    return await ContactOwnerRepository.get(contact.public_key, name=contact.name)
+
+
+@router.patch("/{public_key}/owner", response_model=ContactOwnerInfo)
+async def update_contact_owner(
+    public_key: str, request: ContactOwnerUpdateRequest
+) -> ContactOwnerInfo:
+    """Edit the operator's notes about a node's owner and/or its contacted mark."""
+    contact = await _resolve_contact_or_404(public_key)
+    await ContactOwnerRepository.update(
+        contact.public_key, notes=request.notes, notified=request.notified
+    )
+    return await ContactOwnerRepository.get(contact.public_key, name=contact.name)
 
 
 @router.get("/{public_key}/telemetry-history", response_model=list[TelemetryHistoryEntry])
