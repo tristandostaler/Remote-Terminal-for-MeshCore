@@ -132,7 +132,19 @@ BOT_META = {
             "max": 32,
             "help": (
                 "0 uses half the cores, which keeps a Pi responsive and off the edge of its "
-                "power supply. Takes effect the next time a model is loaded."
+                "power supply. Changing it reloads the model."
+            ),
+        },
+        {
+            "key": "fast_arm_layout",
+            "label": "Faster ARM weight layout (uses about twice the memory)",
+            "type": "bool",
+            "default": False,
+            "help": (
+                "On a Pi 5 and other recent ARM CPUs, llama.cpp can rearrange the model in "
+                "memory so answers come faster -- but it keeps a second copy of the model to "
+                "do it, which can run a small board out of memory. Leave off unless you have "
+                "RAM to spare. Changing it reloads the model."
             ),
         },
     ],
@@ -145,6 +157,7 @@ BOT_META = {
         "temperature": 0.7,
         "time_limit_seconds": 6,
         "threads": 0,
+        "fast_arm_layout": False,
     },
 }
 
@@ -166,7 +179,11 @@ async def ask(ctx, msg):
         await ctx.reply(f"🤖 ask: {exc}")
         return
 
-    state = llm_runtime.ensure(spec, threads=int(_number(ctx, "threads", 0, 0, 32)))
+    state = llm_runtime.ensure(
+        spec,
+        threads=int(_number(ctx, "threads", 0, 0, 32)),
+        repack=bool(ctx.settings.get("fast_arm_layout", False)),
+    )
     question = msg.arg_text.strip()
     if state != "ready":
         if state == "error":

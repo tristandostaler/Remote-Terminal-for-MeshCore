@@ -419,6 +419,12 @@ Tiny models are chatty and often wrong. Treat the answers as entertainment.
 - **The smallest model needs ~180 MB**, and most of that is the model file
   memory-mapped from disk, which Linux can drop under pressure. Only ~50 MB is
   memory nothing else can reclaim.
+- **No second copy of the model on ARM.** On a Pi 5 (and other ARM CPUs with
+  dot-product instructions) llama.cpp normally rearranges the weights into a
+  faster layout at load time, keeping a second, unreclaimable copy of the whole
+  model in memory. The bot turns that off. If you have RAM to spare, the
+  **Faster ARM weight layout** setting turns it back on for quicker answers;
+  the memory check then counts the model twice.
 - **CPU threads default to half the cores**, so a Pi on a marginal power supply
   isn't pinned at 100% (a common cause of brown-out reboots that look like
   crashes).

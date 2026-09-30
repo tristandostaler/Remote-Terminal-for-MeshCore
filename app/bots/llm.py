@@ -26,6 +26,7 @@ Nothing imports it until a model is loaded, so the app runs without it.
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import importlib
 import logging
@@ -33,6 +34,7 @@ import os
 import shutil
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -64,6 +66,45 @@ USE_MMAP = True
 # takes the whole server with it) or a Pi thrashing its SD card.
 LOAD_OVERHEAD_MB = 64
 MEMORY_RESERVE_MB = 128
+
+
+@contextlib.contextmanager
+def _weight_repacking(enabled: bool) -> Iterator[None]:
+    """Let llama.cpp repack weights at load time, or keep them as the file has them.
+
+    On ARM CPUs with dot-product instructions (a Pi 5; not a Pi 4), llama.cpp
+    rewrites Q8_0, Q4_0 and Q4_K weights into an interleaved layout that
+    multiplies faster -- in a second, anonymous copy, while the memory-mapped
+    original stays resident too. That doubles the unreclaimable footprint of
+    the very models meant for small boards (x86 does the same for Q4_0: a
+    stand-in SmolLM2 135M Q4_0 measured 102 MB unreclaimable with repacking,
+    45 MB without). Off by default; the bot's "faster ARM layout" setting
+    turns it back on.
+
+    ``Llama()`` takes no argument for it, but builds its model params from
+    ``llama_model_default_params()`` at load, so that one call is wrapped for
+    the duration of the load. Loads are serialized under the generate lock.
+    """
+    import llama_cpp.llama_cpp as low  # type: ignore[import-not-found]
+
+    original = low.llama_model_default_params
+    fields = {name for name, *_ in getattr(low.llama_model_params, "_fields_", ())}
+    if enabled or "use_extra_bufts" not in fields:
+        yield
+        return
+
+    def without_repacking() -> Any:
+        params = original()
+        params.use_extra_bufts = False
+        return params
+
+    low.llama_model_default_params = without_repacking
+    try:
+        yield
+    finally:
+        low.llama_model_default_params = original
+
+
 # A failed download/load is retried on the next question after this long.
 RETRY_AFTER_SECONDS = 60
 
@@ -325,6 +366,8 @@ class LlmRuntime:
         self._done_bytes = 0
         self._total_bytes = 0
         self._worker: threading.Thread | None = None
+        # (spec, threads, repack) of the current/last load: a change reloads.
+        self._load_key: tuple[ModelSpec, int, bool] | None = None
         self._failed_at = 0.0
 
     # -- inspection ------------------------------------------------------
@@ -365,28 +408,34 @@ class LlmRuntime:
         return "No model loaded"
 
     # -- preparation -----------------------------------------------------
-    def ensure(self, spec: ModelSpec, threads: int = 0) -> str:
+    def ensure(self, spec: ModelSpec, threads: int = 0, repack: bool = False) -> str:
         """Make ``spec`` the loaded model, in the background. Returns the state.
 
         ``ready`` means :meth:`generate` can be called now. A preparation that is
         already running is never interrupted: asking for another model meanwhile
         returns the current state, and the switch happens on a later call.
+        Changing ``threads`` or ``repack`` reloads the model with them.
         """
+        load_key = (spec, threads, repack)
         with self._state_lock:
             busy = self._state in ("downloading", "loading")
-            if busy or (self._state == "ready" and self._spec == spec):
+            if busy or (self._state == "ready" and self._load_key == load_key):
                 return self._state
             # Retry a failed model, but not on every message.
             failed_recently = time.monotonic() - self._failed_at < RETRY_AFTER_SECONDS
-            if self._state == "error" and self._spec == spec and failed_recently:
+            if self._state == "error" and self._load_key == load_key and failed_recently:
                 return self._state
             self._spec = spec
+            self._load_key = load_key
             self._state = "downloading"
             self._error = ""
             self._done_bytes = 0
             self._total_bytes = spec.download_mb << 20
             self._worker = threading.Thread(
-                target=self._prepare, args=(spec, threads), name="llm-prepare", daemon=True
+                target=self._prepare,
+                args=(spec, threads, repack),
+                name="llm-prepare",
+                daemon=True,
             )
             self._worker.start()
             return self._state
@@ -396,7 +445,7 @@ class LlmRuntime:
             for name, value in fields.items():
                 setattr(self, f"_{name}", value)
 
-    def _prepare(self, spec: ModelSpec, threads: int) -> None:
+    def _prepare(self, spec: ModelSpec, threads: int, repack: bool = False) -> None:
         try:
             # The package may have been installed since the server started
             # (run.sh compiles it in the background), so drop stale finder caches.
@@ -411,21 +460,22 @@ class LlmRuntime:
             with self._generate_lock:
                 self._llm = None
                 gc.collect()
-                self._check_memory(spec, path)
+                self._check_memory(spec, path, repack)
                 # One thread count for both phases: llama.cpp otherwise runs the
                 # prompt on every core, and a Pi pinned at 100% on a marginal
                 # power supply browns out and reboots.
                 n_threads = threads or max(1, (os.cpu_count() or 2) // 2)
-                llm = Llama(
-                    model_path=str(path),
-                    n_ctx=CONTEXT_TOKENS,
-                    n_batch=BATCH_TOKENS,
-                    n_threads=n_threads,
-                    n_threads_batch=n_threads,
-                    use_mmap=USE_MMAP,
-                    use_mlock=False,
-                    verbose=False,
-                )
+                with _weight_repacking(repack):
+                    llm = Llama(
+                        model_path=str(path),
+                        n_ctx=CONTEXT_TOKENS,
+                        n_batch=BATCH_TOKENS,
+                        n_threads=n_threads,
+                        n_threads_batch=n_threads,
+                        use_mmap=USE_MMAP,
+                        use_mlock=False,
+                        verbose=False,
+                    )
                 self._llm = llm
             self._set(state="ready")
             logger.info("tinyllm bot: %s loaded from %s", spec.name, path)
@@ -433,12 +483,16 @@ class LlmRuntime:
             logger.warning("tinyllm bot: preparing %s failed: %s", spec.name, exc)
             self._set(state="error", error=str(exc)[:200], failed_at=time.monotonic())
 
-    def _check_memory(self, spec: ModelSpec, path: Path) -> None:
-        """Refuse a load that would not leave the system room to breathe."""
+    def _check_memory(self, spec: ModelSpec, path: Path, repack: bool = False) -> None:
+        """Refuse a load that would not leave the system room to breathe.
+
+        With repacking on, the weights may be held twice (see _weight_repacking).
+        """
         available = available_memory_mb()
         if available is None:
             return
-        needed = (path.stat().st_size >> 20) + LOAD_OVERHEAD_MB + MEMORY_RESERVE_MB
+        weights_mb = (path.stat().st_size >> 20) * (2 if repack else 1)
+        needed = weights_mb + LOAD_OVERHEAD_MB + MEMORY_RESERVE_MB
         if available < needed:
             raise RuntimeError(
                 f"not enough free memory for {spec.name}: needs about {needed} MB, "

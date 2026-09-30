@@ -96,6 +96,13 @@ operators).
   `MemAvailable` and the cgroup limit headroom) is below file + 64 + 128 MB —
   the model runs in the server's own process, so an OOM kill takes the radio
   server with it. `n_threads_batch = n_threads` (default half the cores).
+  Weight **repacking is off** (`_weight_repacking` wraps
+  `llama_model_default_params` during the load to set `use_extra_bufts=False`;
+  `Llama()` has no argument for it): on ARM with dotprod (Pi 5) llama.cpp
+  otherwise keeps a second, anonymous copy of Q8_0/Q4_0/Q4_K weights next to
+  the mmapped file. The `fast_arm_layout` setting re-enables it and
+  `_check_memory` then counts the weights twice. `ensure` keys the loaded model
+  on (spec, threads, repack), so changing either setting reloads.
   `run.sh` caps the llama.cpp compile at one job per ~800 MB free (measured
   ~700 MB per compiler process), niced.
   Docker: `MESHCORE_ENABLE_LLM=true` makes `run.sh` compile llama-cpp-python

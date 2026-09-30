@@ -74,7 +74,8 @@ class _FakeRuntime:
         self.answer = answer
         self.asked: list = []
 
-    def ensure(self, spec, threads=0):
+    def ensure(self, spec, threads=0, repack=False):
+        self.ensured = (spec, threads, repack)
         return self.state
 
     def describe(self):
@@ -148,6 +149,16 @@ class TestAskBot:
         runtime = _FakeRuntime(answer=llm.LlmPromptTooLongError("exceed context window"))
         replies = await _run(monkeypatch, runtime, BotTestRequest(text="ask " + "🙂" * 400))
         assert replies == ["🤖 That question is too long for this model, try a shorter one."]
+
+    async def test_weight_repacking_is_off_unless_asked_for(self, test_db, monkeypatch):
+        runtime = _FakeRuntime()
+        await _run(monkeypatch, runtime, BotTestRequest(text="ask hi"))
+        assert runtime.ensured[2] is False
+        runtime = _FakeRuntime()
+        await _run(
+            monkeypatch, runtime, BotTestRequest(text="ask hi"), settings={"fast_arm_layout": True}
+        )
+        assert runtime.ensured[2] is True
 
     async def test_dm_answer_has_no_mention(self, test_db, monkeypatch):
         replies = await _run(
@@ -304,3 +315,30 @@ class TestMemory:
     def test_the_smallest_model_comes_first(self):
         assert llm.CATALOG[0].download_mb == min(spec.download_mb for spec in llm.CATALOG)
         assert llm.CATALOG[0].ram_mb == min(spec.ram_mb for spec in llm.CATALOG)
+
+    def test_repacking_counts_the_weights_twice(self, tmp_path, monkeypatch):
+        runtime = llm.LlmRuntime(model_dir=tmp_path)
+        path = self._model(tmp_path, 100)
+        monkeypatch.setattr(llm, "available_memory_mb", lambda: 300)
+        runtime._check_memory(llm.CATALOG[0], path, repack=False)
+        with pytest.raises(RuntimeError, match="needs about 392 MB"):
+            runtime._check_memory(llm.CATALOG[0], path, repack=True)
+
+    def test_changing_threads_or_repacking_reloads(self, tmp_path, monkeypatch):
+        runtime = llm.LlmRuntime(model_dir=tmp_path)
+        monkeypatch.setattr(runtime, "_prepare", lambda *args: None)
+        spec = llm.CATALOG[0]
+        runtime._state, runtime._load_key = "ready", (spec, 0, False)
+        assert runtime.ensure(spec) == "ready"
+        assert runtime.ensure(spec, repack=True) == "downloading"
+        runtime._state = "ready"
+        assert runtime.ensure(spec, threads=2, repack=True) == "downloading"
+
+    def test_repacking_switch_reaches_llama_cpp(self):
+        low = pytest.importorskip("llama_cpp.llama_cpp")
+        assert low.llama_model_default_params().use_extra_bufts is True
+        with llm._weight_repacking(False):
+            assert low.llama_model_default_params().use_extra_bufts is False
+        assert low.llama_model_default_params().use_extra_bufts is True
+        with llm._weight_repacking(True):
+            assert low.llama_model_default_params().use_extra_bufts is True
