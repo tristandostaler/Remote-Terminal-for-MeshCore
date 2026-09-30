@@ -256,6 +256,7 @@ function SchemaField({
 
   if (field.type === 'select') {
     const inputId = `bot-setting-${field.key}`;
+    const chosen = (field.options ?? []).find((opt) => opt.value === String(current));
     return (
       <div>
         <label htmlFor={inputId} className="block text-xs text-muted-foreground mb-1">
@@ -273,6 +274,11 @@ function SchemaField({
             </option>
           ))}
         </select>
+        {chosen?.description && (
+          <div className="text-[0.6875rem] text-foreground/80 mt-1.5 rounded-md border border-input bg-muted px-2.5 py-1.5">
+            {chosen.description}
+          </div>
+        )}
         {field.help && (
           <div className="text-[0.6875rem] text-muted-foreground mt-1">{field.help}</div>
         )}

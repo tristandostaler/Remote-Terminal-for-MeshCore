@@ -80,6 +80,23 @@ operators).
   `frontend/src/utils/botScope.ts`. `tests/test_bot_default_scope.py` asserts
   they do. The same module holds `no_rooms()`, the empty room pick list every
   layer defaults to.
+- `llm.py` — the `tinyllm` bot's tiny on-device LLM runtime (optional `llm` extra,
+  `llama-cpp-python`). Owns the model catalog the bot's Settings dropdown is
+  generated from (label + per-option `description` with download size and RAM;
+  the editor shows the chosen option's `description` under any `select`), and
+  the process-wide `llm_runtime` singleton — bot code is re-exec'd on every
+  settings save, so a model held in the bot's namespace would be reloaded each
+  time. Download + load always run in a background thread (a first download
+  dwarfs the 10 s `BOT_EXECUTION_TIMEOUT`); a run only starts it and reports
+  progress. Generation streams tokens and stops at a deadline (≤ 7 s) so the
+  reply still goes out inside the timeout; one answer at a time.
+  Docker: `MESHCORE_ENABLE_LLM=true` makes `run.sh` compile llama-cpp-python
+  in the background *after* the server is up (`uv sync --inexact`, never
+  before `exec`: a Pi takes 10-20 min), leaving `.installing` /
+  `.install-failed` / `.install.log` in the model dir; `_missing_package_reason`
+  reads them, and `importlib.invalidate_caches()` lets the next retry import
+  the package without a restart. Every `uv sync` in `run.sh` names all extras
+  wanted or already present, because a sync removes the ones it isn't told of.
 - `placeholders.py` — `{total_contacts}`-style tokens for scheduled messages.
 - `library/` — built-in bots as real `.py` files under `library/code/`, each
   self-describing via a module-level `BOT_META` dict (metadata +

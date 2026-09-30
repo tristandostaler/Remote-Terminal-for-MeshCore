@@ -1,6 +1,6 @@
 name: "RemoteTerm for MeshCore Advanced"
 description: "RemoteTerm for MeshCore Advanced - MeshCore web client with bots, compression and images"
-version: "1.29.0"
+version: "1.30.0"
 slug: "remoteterm"
 init: false
 arch:
@@ -23,6 +23,12 @@ options:
   # and decoding a photo wants ~2.4 GB of free RAM. Leave off on small hardware;
   # the add-on logs a warning and runs normally if it cannot be installed.
   MESHCORE_ENABLE_AEIC: false
+  # Optional tiny on-device AI for the built-in `tinyllm` bot. Compiles
+  # llama-cpp-python in the background after being switched on (10-20 minutes
+  # on a Pi; the add-on keeps running meanwhile), then enable the `tinyllm` bot
+  # under Bots and pick a model there: 100 MB - 1.1 GB download and
+  # 250 MB - 1.5 GB of RAM while loaded.
+  MESHCORE_ENABLE_LLM: false
   # Virtual companion node: lets the MeshCore app (TCP/WiFi), meshcore-cli or
   # the Home Assistant MeshCore integration use this radio through RemoteTerm.
   # The node listens on container port 5000; pick the host port under
@@ -48,6 +54,7 @@ schema:
   MESHCORE_DATABASE_PATH: str
   MESHCORE_LOG_LEVEL: list(DEBUG|INFO|WARNING|ERROR)
   MESHCORE_ENABLE_AEIC: bool
+  MESHCORE_ENABLE_LLM: bool
   MESHCORE_VIRTUAL_NODE_ENABLED: bool
   MESHCORE_VIRTUAL_NODE_READ_ONLY: bool
   MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT: int(0,10000)
