@@ -90,7 +90,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.4.0",
+    "version": "1.4.1",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "settings_schema": [
@@ -245,11 +245,11 @@ BOT_META = {
             "default": True,
             "help": (
                 "Search the markdown files in the tinyllm-docs folder (beside the database; "
-                "seeded with MeshCore basics, a regions guide and MeshCore's CLI reference "
-                "and FAQ) and give the best matches to the model with each question. "
-                "Add your own .md files there (the shipped ones are overwritten on "
-                "restart); "
-                "each heading starts a searchable section."
+                "it ships with MeshCore notes and emergency notes: first aid, water, "
+                "power and weather safety, radio, navigation) and give the best matches "
+                "to the model with each question. Add your own .md files there; the "
+                "shipped ones are overwritten on restart. Each heading starts a "
+                "searchable section."
             ),
         },
         {

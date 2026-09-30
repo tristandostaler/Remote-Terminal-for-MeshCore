@@ -104,6 +104,12 @@ _STOPWORDS = frozenset(
         "there",
         "get",
         "set",
+        "someone",
+        "somebody",
+        "anyone",
+        "anybody",
+        "something",
+        "during",
         # Small talk: "hello" alone must not pull in the one note that happens
         # to mention it.
         "hello",
@@ -149,7 +155,9 @@ def _fold(word: str) -> str:
         word = word[:-3]
     elif len(word) > 4 and word.endswith("ed") and not word.endswith("eed"):
         word = word[:-2]
-    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+    if len(word) > 4 and word.endswith("ies"):
+        word = word[:-3] + "y"
+    elif len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
         word = word[:-1]
     return word
 

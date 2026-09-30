@@ -1094,11 +1094,43 @@ class TestDocsIndex:
         for question, expected in cases.items():
             assert expected in index.search(question, 700)[0].title, question
 
+    def test_the_emergency_notes_answer_common_questions(self):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
+        cases = {
+            "how do I do CPR": "CPR",
+            "someone is choking": "Choking",
+            "how to use a tourniquet": "tourniquets",
+            "how to treat a burn": "Burns",
+            "signs of a stroke": "Stroke",
+            "how much bleach to purify water": "Purify water with bleach",
+            "how long is food safe in the fridge without power": "Fridge and freezer",
+            "can I run a generator in the garage": "Generator safety",
+            "I smell gas": "Gas leak",
+            "what to do during a tornado": "Tornado",
+            "what channel is the marine emergency": "Marine VHF",
+            "weather radio frequency": "Weather and emergency broadcast radio",
+            "how to call mayday": "Mayday",
+            "how to find north without a compass": "Find north",
+            "how to send an emergency message on the mesh": "emergency message on the mesh",
+        }
+        for question, expected in cases.items():
+            assert expected in index.search(question, 700)[0].title, question
+
     def test_small_talk_finds_no_notes(self):
         from app.bots.bots_utils.tinyllm import llm_docs
 
         index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
-        for chat in ("hello", "hi there", "thanks!", "good morning", "what is the power of love?"):
+        for chat in (
+            "hello",
+            "hi there",
+            "thanks!",
+            "good morning",
+            "what is the power of love?",
+            "tell me a joke",
+            "write me a poem about the sea",
+        ):
             assert index.search(chat, 700) == [], chat
 
     def test_word_forms_meet(self):
@@ -1106,6 +1138,7 @@ class TestDocsIndex:
 
         assert llm_docs._fold("flooding") == llm_docs._fold("floods") == llm_docs._fold("flooded")
         assert llm_docs._fold("regions") == llm_docs._fold("region")
+        assert llm_docs._fold("frequencies") == llm_docs._fold("frequency")
         assert llm_docs._fold("address") == "address"
 
 

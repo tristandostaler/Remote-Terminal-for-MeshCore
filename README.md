@@ -214,7 +214,7 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_AEIC_MODEL_DIR` | `data/models/aeic` | Where that codec's ~958 MB model is installed. Defaults to `models/aeic` beside the database so it survives container recreation |
 | `MESHCORE_ENABLE_LLM` | false | Install the `tinyllm` bot's llama-cpp-python on start (Docker / HA add-on). See [Optional: Tiny On-Device AI Bot](#optional-tiny-on-device-ai-bot-tinyllm) |
 | `MESHCORE_LLM_MODEL_DIR` | `data/models/llm` | Where the `tinyllm` bot's models are downloaded. Defaults to `models/llm` beside the database |
-| `MESHCORE_LLM_DOCS_DIR` | `data/tinyllm-docs` | Markdown reference notes the `tinyllm` bot searches. Holds MeshCore basics, a regions guide and MeshCore's CLI reference and FAQ, refreshed on every restart; add your own `.md` files, which are kept. Defaults to `tinyllm-docs` beside the database |
+| `MESHCORE_LLM_DOCS_DIR` | `data/tinyllm-docs` | Markdown reference notes the `tinyllm` bot searches. Holds MeshCore notes and emergency notes (first aid, water, safety, radio, navigation), refreshed on every restart; add your own `.md` files, which are kept. Defaults to `tinyllm-docs` beside the database |
 | `UV_CACHE_DIR` | `data/.uv-cache` | Docker / HA add-on: where downloaded Python packages and the compiled llama.cpp are cached, so a container update reinstalls in seconds instead of recompiling. Defaults to `.uv-cache` beside the database |
 | `MESHCORE_DISABLE_BOTS` | false | Disable bot system entirely (blocks execution and config; an intermediate security precaution, but not as good as basic auth) |
 | `MESHCORE_BASIC_AUTH_USERNAME` | | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
@@ -419,9 +419,13 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    **Reference notes.** For knowledge questions the bot searches a folder of
    markdown files, `tinyllm-docs` beside the database (in the add-on's config
    folder on Home Assistant), and gives the best-matching sections to the
-   model. It starts with MeshCore basics, a regions guide (add, remove, allow
+   model. It ships with MeshCore basics, a regions guide (add, remove, allow
    or block flooding, home region) and MeshCore's own CLI command reference and
-   FAQ. Those shipped files are refreshed from the release on every restart
+   FAQ, plus emergency notes for when the mesh works but the internet does
+   not: first aid, water and food, power and severe-weather safety, emergency
+   radio frequencies and signals, and outdoor navigation. These are general
+   guidance, not medical training -- a tiny model can garble numbers, so keep a
+   printed first-aid manual too. Those shipped files are refreshed from the release on every restart
    (so edits to them do not last); add your own `.md` files next to them,
    which are never touched -- every heading starts a searchable section. The search is
    plain keyword matching (no second model, no extra RAM), which is what

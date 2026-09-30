@@ -149,7 +149,11 @@ operators).
   quick guide) is hand-written; `meshcore-cli.md` and `meshcore-faq.md` are
   MeshCore's own docs (MIT, license in their header comments) converted by
   `scripts/build/update_tinyllm_docs.py <MeshCore checkout>` -- rerun it when
-  MeshCore updates them. The bot budgets the context by characters (~3/token, no tokenizer
+  MeshCore updates them. `emergency-*.md` (first aid, water/food, home
+  safety and weather, radio, outdoors) are hand-written from public guidance
+  (Red Cross, CDC, WHO, ICAO); headings are phrased the way people ask, and
+  `tests/test_bots_tinyllm.py` pins sample questions to their sections --
+  rerun it after editing any shipped note. The bot budgets the context by characters (~3/token, no tokenizer
   in the server): what is left after prompt, question and answer goes to
   history (up to half) and notes (the rest), searched with the question plus
   the previous one; overflow retries drop history, then notes. `context_tokens`
