@@ -141,6 +141,10 @@ class ModelSpec:
     speed: str
     quality: str
     notes: str
+    # The prompt the bot uses with this model unless the operator picks
+    # "Custom". Sized to what the model can follow: the smallest ones repeat
+    # whatever the prompt says about them, so theirs says almost nothing.
+    system_prompt: str
 
     @property
     def url(self) -> str:
@@ -159,6 +163,7 @@ class ModelSpec:
             f"{self.params} parameters, {self.quant}. Download {_fmt_mb(self.download_mb)} "
             f"(once, to the server's model folder); about {_fmt_mb(self.ram_mb)} of RAM while "
             f"loaded. Speed: {self.speed}. Quality: {self.quality}. {self.notes} "
+            f"Default prompt: \u201c{self.system_prompt}\u201d. "
             f"Source: huggingface.co/{self.repo}"
         )
 
@@ -171,6 +176,24 @@ def _fmt_mb(mb: int) -> str:
 # CONTEXT_TOKENS + runtime overhead, rounded up (the two SmolLM2 135M rows are
 # measured). Speeds are rough CPU figures for a Raspberry Pi 5 / an x86
 # mini-PC; a Pi 4 is about half.
+# Default system prompts, per model size. A 135-360M model cannot follow
+# instructions so much as continue text: told it is "an assistant on a
+# low-bandwidth mesh radio network", it answers "hello" by describing itself as
+# one (seen on a real node). So the tiny ones get one plain instruction, and
+# nothing about their setting; a character limit is meaningless to them, and
+# answer length is capped in code anyway. Larger models can use a little more.
+TINY_PROMPT = "You are a friendly chatbot. Reply with one short sentence."
+GEMMA_PROMPT = "Reply with one short, friendly sentence."
+SMALL_PROMPT = (
+    "You are a helpful assistant in a radio chat. "
+    "Answer in one or two short sentences of plain text."
+)
+LARGE_PROMPT = (
+    "You are a helpful assistant in a radio chat. Answer in one or two short "
+    "sentences of plain text, under 140 characters."
+)
+CUSTOM_MODEL_PROMPT = "You are a friendly chatbot. Reply with one or two short sentences."
+
 CATALOG: tuple[ModelSpec, ...] = (
     ModelSpec(
         key="smollm2-135m-q4",
@@ -187,6 +210,7 @@ CATALOG: tuple[ModelSpec, ...] = (
             "The lightest option, for a Pi with 1 GB or less: the Q8 build's model, "
             "compressed harder, so answers are slightly rougher."
         ),
+        system_prompt=TINY_PROMPT,
     ),
     ModelSpec(
         key="smollm2-135m",
@@ -200,6 +224,7 @@ CATALOG: tuple[ModelSpec, ...] = (
         speed="very fast (~40 tok/s Pi 5, 100+ tok/s x86)",
         quality="Toy: grammatical but often wrong or off-topic",
         notes="Smallest option; fine for playful one-liners, not for facts.",
+        system_prompt=TINY_PROMPT,
     ),
     ModelSpec(
         key="gemma3-270m",
@@ -213,6 +238,7 @@ CATALOG: tuple[ModelSpec, ...] = (
         speed="fast (~25 tok/s Pi 5, 70+ tok/s x86)",
         quality="Basic: short friendly chat, weak on facts",
         notes="Google's tiny model; follows a system prompt surprisingly well for its size.",
+        system_prompt=GEMMA_PROMPT,
     ),
     ModelSpec(
         key="smollm2-360m",
@@ -226,6 +252,7 @@ CATALOG: tuple[ModelSpec, ...] = (
         speed="fast (~20 tok/s Pi 5, 60 tok/s x86)",
         quality="Basic: decent small talk",
         notes="English only.",
+        system_prompt=TINY_PROMPT,
     ),
     ModelSpec(
         key="qwen2.5-0.5b",
@@ -239,6 +266,7 @@ CATALOG: tuple[ModelSpec, ...] = (
         speed="good (~15 tok/s Pi 5, 50 tok/s x86)",
         quality="Recommended: best of the tiny tier, simple facts and instructions",
         notes="Multilingual. The default: the best answers that still fit a Pi 4.",
+        system_prompt=SMALL_PROMPT,
     ),
     ModelSpec(
         key="llama3.2-1b",
@@ -252,6 +280,7 @@ CATALOG: tuple[ModelSpec, ...] = (
         speed="moderate (~8 tok/s Pi 5, 30 tok/s x86)",
         quality="Good: noticeably smarter, better general knowledge",
         notes="Needs a Pi 5 or better to answer inside the 10 s bot limit.",
+        system_prompt=SMALL_PROMPT,
     ),
     ModelSpec(
         key="qwen2.5-1.5b",
@@ -265,6 +294,7 @@ CATALOG: tuple[ModelSpec, ...] = (
         speed="slow on a Pi (~5 tok/s Pi 5, 20 tok/s x86)",
         quality="Best: the most capable option here",
         notes="Best on an x86 host; on a Pi replies are cut short by the time limit.",
+        system_prompt=LARGE_PROMPT,
     ),
 )
 
@@ -317,6 +347,7 @@ def resolve_spec(settings: dict[str, Any]) -> ModelSpec:
         speed="?",
         quality="?",
         notes="",
+        system_prompt=CUSTOM_MODEL_PROMPT,
     )
 
 

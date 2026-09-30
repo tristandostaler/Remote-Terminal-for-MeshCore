@@ -601,6 +601,11 @@ class BotContext:
         for part in parts:
             await self.reply(part, region=region)
 
+    async def reply_budget(self) -> int:
+        """Bytes one reply message to the current target can carry (156 for a DM
+        or room, less the radio's ``"<name>: "`` framing on a channel)."""
+        return await self._resolve_split_budget()
+
     async def _resolve_split_budget(self) -> int:
         """Bytes one message to the reply target can carry.
 

@@ -134,35 +134,47 @@ class TestAskBot:
         assert messages[-1] == {"role": "user", "content": "capital of France?"}
         assert kwargs["deadline_seconds"] <= 7
 
-    async def test_system_prompt_asks_for_under_140_characters(self, test_db, monkeypatch):
+    async def _prompt(self, monkeypatch, settings):
         runtime = _FakeRuntime()
-        await _run(monkeypatch, runtime, BotTestRequest(text="ask hi"))
-        assert "under 140 characters" in runtime.asked[0][0][0]["content"]
+        await _run(monkeypatch, runtime, BotTestRequest(text="ask hi"), settings=settings)
+        return runtime.asked[0][0][0]["content"]
 
-    async def test_old_default_prompt_is_upgraded_but_a_custom_one_is_kept(
-        self, test_db, monkeypatch
-    ):
-        """A version refresh never rewrites stored settings, so an install seeded
-        with the old 200-character default must still get the new prompt."""
-        old = (
+    async def test_the_prompt_follows_the_model(self, test_db, monkeypatch):
+        assert (
+            await self._prompt(monkeypatch, {})
+            == llm.CATALOG_BY_KEY[llm.DEFAULT_MODEL].system_prompt
+        )
+        for spec in llm.CATALOG:
+            prompt = await self._prompt(monkeypatch, {"model": spec.key})
+            assert prompt == spec.system_prompt, spec.key
+
+    async def test_a_custom_prompt_survives_model_changes(self, test_db, monkeypatch):
+        custom = {"prompt_mode": "custom", "system_prompt": "Talk like a pirate."}
+        for spec in llm.CATALOG:
+            prompt = await self._prompt(monkeypatch, {**custom, "model": spec.key})
+            assert prompt == "Talk like a pirate.", spec.key
+        # "Match the model" ignores text left in the custom box.
+        match = {"prompt_mode": "model", "system_prompt": "Talk like a pirate."}
+        assert await self._prompt(monkeypatch, match) != "Talk like a pirate."
+        # Custom with nothing written falls back to the model's prompt.
+        empty = await self._prompt(monkeypatch, {"prompt_mode": "custom", "system_prompt": ""})
+        assert empty == llm.CATALOG_BY_KEY[llm.DEFAULT_MODEL].system_prompt
+
+    async def test_settings_from_before_prompt_modes(self, test_db, monkeypatch):
+        """No prompt_mode stored: an old default means "match the model", a
+        hand-written prompt means "custom" -- never erased."""
+        for old in (
             "You are a helpful assistant on a low-bandwidth mesh radio network. "
             "Answer in one or two short sentences, plain text, no markdown, "
-            "under 200 characters."
-        )
-        runtime = _FakeRuntime()
-        await _run(
-            monkeypatch, runtime, BotTestRequest(text="ask hi"), settings={"system_prompt": old}
-        )
-        assert "under 140 characters" in runtime.asked[0][0][0]["content"]
-
-        runtime = _FakeRuntime()
-        await _run(
-            monkeypatch,
-            runtime,
-            BotTestRequest(text="ask hi"),
-            settings={"system_prompt": "Talk like a pirate."},
-        )
-        assert runtime.asked[0][0][0]["content"] == "Talk like a pirate."
+            "under 200 characters.",
+            "You are a helpful assistant on a low-bandwidth mesh radio network. "
+            "Answer in one or two short sentences, plain text, no markdown, "
+            "under 140 characters.",
+            "",
+        ):
+            prompt = await self._prompt(monkeypatch, {"system_prompt": old})
+            assert prompt == llm.CATALOG_BY_KEY[llm.DEFAULT_MODEL].system_prompt
+        assert await self._prompt(monkeypatch, {"system_prompt": "Be a pirate."}) == "Be a pirate."
 
     async def test_too_long_question_gets_a_clear_reply(self, test_db, monkeypatch):
         runtime = _FakeRuntime(answer=llm.LlmPromptTooLongError("exceed context window"))
@@ -252,13 +264,99 @@ class TestAskBot:
         )
         assert "custom model needs" in replies[0]
 
-    async def test_long_answer_is_split_not_truncated(self, test_db, monkeypatch):
-        answer = " ".join(["word"] * 80)
+    async def test_a_rambling_answer_is_capped_to_one_message(self, test_db, monkeypatch):
+        answer = "Hello there. " + " ".join(["word"] * 80) + "."
         replies = await _run(
             monkeypatch, _FakeRuntime(answer=answer), BotTestRequest(text="ask x", is_dm=True)
         )
-        assert len(replies) > 1
+        assert len(replies) == 1
+        assert len(replies[0].encode()) <= 156
+
+    async def test_more_messages_when_allowed(self, test_db, monkeypatch):
+        answer = " ".join(["word"] * 80)
+        replies = await _run(
+            monkeypatch,
+            _FakeRuntime(answer=answer),
+            BotTestRequest(text="ask x", is_dm=True),
+            settings={"max_messages": 3},
+        )
+        assert 1 < len(replies) <= 3
         assert all(len(r.encode()) <= 156 for r in replies)
+
+
+class TestFitMessages:
+    def _fit(self, text, budget=60, n=1):
+        return _bot_namespace()["fit_messages"](text, budget, n)
+
+    def test_short_text_is_untouched(self):
+        assert self._fit("Hi there.") == "Hi there."
+
+    def test_cuts_at_a_sentence_end(self):
+        text = "The first sentence is here. The second one is far too long to fit in it."
+        assert self._fit(text) == "The first sentence is here."
+
+    def test_falls_back_to_a_word_boundary(self):
+        out = self._fit("word " * 40)
+        assert out.endswith("\u2026") and len(out.encode()) <= 60
+        assert not out[:-1].endswith(" ")
+
+    def test_multibyte_text_never_breaks_a_character(self):
+        out = self._fit("🙂" * 100)
+        out.encode()  # would raise on a broken surrogate
+        assert len(out.encode()) <= 60
+
+
+class TestSettingsMigration:
+    async def test_seeding_migrates_stored_settings_on_refresh(self, test_db):
+        """A refresh replaces code and schema but never settings; migrate_settings
+        brings them in line so the Settings tab shows what the bot does."""
+        from app.bots.library import ensure_seeded
+        from app.repository.bots import BotRepository
+
+        entry = get_library_entry("tinyllm")
+        old_default = (
+            "You are a helpful assistant on a low-bandwidth mesh radio network. "
+            "Answer in one or two short sentences, plain text, no markdown, "
+            "under 140 characters."
+        )
+        existing = await BotRepository.get_by_builtin_key("tinyllm")
+        if existing is None:
+            existing = await BotRepository.create(
+                name="tinyllm", code=entry["code"], builtin_key="tinyllm"
+            )
+        await BotRepository.update(
+            existing.id,
+            builtin_version="1.1.1",
+            settings={"system_prompt": old_default, "max_tokens": 64, "model": "gemma3-270m"},
+        )
+        await ensure_seeded()
+        migrated = (await BotRepository.get(existing.id)).settings
+        assert migrated["prompt_mode"] == "model"
+        assert migrated["system_prompt"] == ""
+        assert migrated["max_tokens"] == 40
+        assert migrated["model"] == "gemma3-270m"
+
+        await BotRepository.update(
+            existing.id,
+            builtin_version="1.1.1",
+            settings={"system_prompt": "Talk like a pirate.", "max_tokens": 80},
+        )
+        await ensure_seeded()
+        kept = (await BotRepository.get(existing.id)).settings
+        assert kept == {
+            "prompt_mode": "custom",
+            "system_prompt": "Talk like a pirate.",
+            "max_tokens": 80,
+        }
+
+    def test_model_details_show_the_default_prompt(self):
+        for option in llm.model_options()[:-1]:
+            spec = llm.CATALOG_BY_KEY[option["value"]]
+            assert spec.system_prompt in option["description"]
+
+
+def _bot_namespace():
+    return load_bot_code(get_library_entry("tinyllm")["code"]).namespace
 
 
 _FAKE_LLAMA = textwrap.dedent(
