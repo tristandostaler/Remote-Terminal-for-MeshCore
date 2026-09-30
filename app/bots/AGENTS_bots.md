@@ -93,9 +93,23 @@ operators).
   **Memory** (measured, SmolLM2 135M Q8: ~200 MB, ~45 MB unreclaimable): weights
   stay memory-mapped (reclaimable page cache), `n_ctx` 512 / `n_batch` 64, and
   `_check_memory` refuses a load when `available_memory_mb()` (min of
-  `MemAvailable` and the cgroup limit headroom) is below file + 64 + 128 MB —
-  the model runs in the server's own process, so an OOM kill takes the radio
-  server with it. `n_threads_batch = n_threads` (default half the cores).
+  `MemAvailable` and the cgroup limit headroom) is below file + 64 + 128 MB.
+  `n_threads_batch = n_threads` (default half the cores).
+  **The model runs in a child process** (`_ModelProcess` →
+  `python -m app.bots.llm --worker`, JSON lines over stdin/stdout, one reply per
+  request; `_worker_main` moves fd 1 to stderr so native prints can't corrupt
+  the protocol). The child sets its own `oom_score_adj` to 1000, so the kernel
+  kills the model rather than the radio server; EOF/silence past
+  deadline + 3 s raises `LlmWorkerDiedError` with a plain reason
+  (`_exit_reason`: -9 = out of memory, -4 = illegal instruction) and puts the
+  runtime in `error` (retried after `RETRY_AFTER_SECONDS`). The server never
+  imports `llama_cpp` (`find_spec` only). **Idle unload**: a daemon reaper
+  (`unload_if_idle`, every 10 s) stops the child after `unload_after_minutes`
+  unused (0 = after every answer; never mid-answer — it only takes the
+  generate lock non-blocking); state goes `idle` with `unloaded`, and the next
+  `ensure` reloads. The bot waits `RELOAD_WAIT_SECONDS` (4 s) for a reload and
+  takes the elapsed time out of the answer deadline (`RUN_BUDGET_SECONDS`
+  7.5 s), so a reload still answers in the same run.
   Weight **repacking is off** (`_weight_repacking` wraps
   `llama_model_default_params` during the load to set `use_extra_bufts=False`;
   `Llama()` has no argument for it): on ARM with dotprod (Pi 5) llama.cpp

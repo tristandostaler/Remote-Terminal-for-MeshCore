@@ -425,6 +425,15 @@ Tiny models are chatty and often wrong. Treat the answers as entertainment.
   model in memory. The bot turns that off. If you have RAM to spare, the
   **Faster ARM weight layout** setting turns it back on for quicker answers;
   the memory check then counts the model twice.
+- **The model runs in its own process**, marked as the first thing the kernel
+  kills when memory runs out. If that happens, the bot replies that the model
+  was stopped for lack of memory and the radio server keeps running; the next
+  question reloads it.
+- **The model is unloaded when idle.** After 5 minutes with no questions
+  (setting: *Unload the model after*) its memory is freed entirely; the next
+  question reloads it, typically in well under a second once the file is in
+  the page cache, a few seconds from an SD card, and still answers in the same
+  reply. Set it to 0 to hold the memory only while an answer is being written.
 - **CPU threads default to half the cores**, so a Pi on a marginal power supply
   isn't pinned at 100% (a common cause of brown-out reboots that look like
   crashes).

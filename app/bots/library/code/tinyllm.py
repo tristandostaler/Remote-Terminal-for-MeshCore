@@ -1,6 +1,6 @@
 """tinyllm: ask a tiny on-device language model — ``ask``, ``ai``, ``llm`` or ``tinyllm``.
 
-Answers with a small GGUF model run inside this server by llama-cpp-python —
+Answers with a small GGUF model run on this server by llama-cpp-python —
 no Ollama, no cloud API, nothing to host. Pick the model in Settings: the
 dropdown shows each one's download size, RAM use, speed and quality, from the
 catalog in ``app/bots/llm.py``.
@@ -15,17 +15,24 @@ Needs the optional ``llm`` extra: ``uv sync --extra llm``.
 """
 
 import asyncio
+import time
 
 from app.bots.llm import (
     CUSTOM_MODEL,
     DEFAULT_MODEL,
     LlmBusyError,
     LlmPromptTooLongError,
+    LlmWorkerDiedError,
     llm_runtime,
     model_options,
     resolve_spec,
 )
 from remoteterm import bot
+
+# How long a question waits for a reload before answering "warming up", and
+# the time a run may use before the engine's 10 s timeout, leaving room to send.
+RELOAD_WAIT_SECONDS = 4
+RUN_BUDGET_SECONDS = 7.5
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant on a low-bandwidth mesh radio network. "
@@ -49,7 +56,7 @@ BOT_META = {
     "description": "Ask a tiny on-device AI model a question (no cloud, no Ollama)",
     "long_description": (
         "`ask <question>` (or `ai`, `llm` or `tinyllm <question>`) answers with a small language model that runs "
-        "inside this server — nothing is sent to a cloud service. Choose the model below; each "
+        "on this server — nothing is sent to a cloud service. Choose the model below; each "
         "option lists its download size and the RAM it uses while loaded. The first question "
         "downloads and loads the model in the background (`ask` alone shows progress). Needs "
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
@@ -136,6 +143,19 @@ BOT_META = {
             ),
         },
         {
+            "key": "unload_after_minutes",
+            "label": "Unload the model after (minutes idle)",
+            "type": "int",
+            "default": 5,
+            "min": 0,
+            "max": 1440,
+            "help": (
+                "Frees the model's memory when nobody has asked anything for this long; the "
+                "next question reloads it (about a second, a few on a Pi). 0 unloads right "
+                "after every answer, so the memory is only used while answering."
+            ),
+        },
+        {
             "key": "fast_arm_layout",
             "label": "Faster ARM weight layout (uses about twice the memory)",
             "type": "bool",
@@ -157,6 +177,7 @@ BOT_META = {
         "temperature": 0.7,
         "time_limit_seconds": 6,
         "threads": 0,
+        "unload_after_minutes": 5,
         "fast_arm_layout": False,
     },
 }
@@ -179,12 +200,18 @@ async def ask(ctx, msg):
         await ctx.reply(f"🤖 ask: {exc}")
         return
 
+    started = time.monotonic()
     state = llm_runtime.ensure(
         spec,
         threads=int(_number(ctx, "threads", 0, 0, 32)),
         repack=bool(ctx.settings.get("fast_arm_layout", False)),
+        idle_unload_seconds=int(_number(ctx, "unload_after_minutes", 5, 0, 1440) * 60),
     )
     question = msg.arg_text.strip()
+    if state in ("downloading", "loading"):
+        # A model unloaded while idle reloads in about a second (a few on a Pi
+        # reading from SD): wait for it and answer in this same run.
+        state = await asyncio.to_thread(llm_runtime.wait_ready, RELOAD_WAIT_SECONDS)
     if state != "ready":
         if state == "error":
             await ctx.reply_split(f"🤖 {llm_runtime.describe()}")
@@ -210,10 +237,21 @@ async def ask(ctx, msg):
             messages,
             max_tokens=int(_number(ctx, "max_tokens", 64, 16, 160)),
             temperature=_number(ctx, "temperature", 0.7, 0.0, 1.5),
-            deadline_seconds=_number(ctx, "time_limit_seconds", 6, 2, 7),
+            # The whole run must end inside the engine's 10 s: time spent
+            # reloading comes out of the answer's budget.
+            deadline_seconds=max(
+                1.5,
+                min(
+                    _number(ctx, "time_limit_seconds", 6, 2, 7),
+                    RUN_BUDGET_SECONDS - (time.monotonic() - started),
+                ),
+            ),
         )
     except LlmBusyError:
         await ctx.reply("🤖 Busy answering someone else, try again shortly.")
+        return
+    except LlmWorkerDiedError as exc:
+        await ctx.reply_split(f"🤖 Sorry, {exc}. Try again, or pick a smaller model.")
         return
     except LlmPromptTooLongError:
         await ctx.reply("🤖 That question is too long for this model, try a shorter one.")
