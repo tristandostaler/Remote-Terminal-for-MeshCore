@@ -19,6 +19,12 @@ from app.bots.runtime import load_bot_code
 from app.models import BotTestRequest
 
 
+@pytest.fixture(autouse=True)
+def _fresh_dm_sessions(monkeypatch):
+    """Each test starts with no remembered DM conversations."""
+    monkeypatch.setattr(llm, "dm_sessions", llm.DmSessions())
+
+
 class TestCatalog:
     def test_keys_are_unique_and_default_exists(self):
         keys = [spec.key for spec in llm.CATALOG]
@@ -705,3 +711,106 @@ class TestPlainErrors:
         _load(runtime, filename="broken.gguf")
         assert runtime.describe().endswith("the model failed to load")
         assert "bad model file" in runtime.describe(detailed=True)
+
+
+class _HistoryAwareRuntime(_FakeRuntime):
+    """Answers with a counter; refuses prompts carrying history if asked to."""
+
+    def __init__(self, refuse_history=False):
+        super().__init__()
+        self.refuse_history = refuse_history
+        self.turn = 0
+
+    def generate(self, messages, **kwargs):
+        self.asked.append((messages, kwargs))
+        if self.refuse_history and len(messages) > 2:
+            raise llm.LlmPromptTooLongError("exceed context window")
+        self.turn += 1
+        return f"Answer {self.turn}."
+
+
+class TestDmMemory:
+    ALICE = "ab" * 32
+    BOB = "cd" * 32
+
+    async def _dm(self, monkeypatch, runtime, text, sender=ALICE, settings=None):
+        return await _run(
+            monkeypatch,
+            runtime,
+            BotTestRequest(text=text, is_dm=True, sender_key=sender),
+            settings=settings,
+        )
+
+    async def test_a_dm_remembers_the_conversation(self, test_db, monkeypatch):
+        runtime = _HistoryAwareRuntime()
+        await self._dm(monkeypatch, runtime, "ask my name is Ada")
+        await self._dm(monkeypatch, runtime, "ask what is my name")
+        sent = runtime.asked[1][0]
+        assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
+        assert sent[1]["content"] == "my name is Ada"
+        assert sent[2]["content"] == "Answer 1."
+        assert sent[3]["content"] == "what is my name"
+
+    async def test_each_sender_has_their_own_memory(self, test_db, monkeypatch):
+        runtime = _HistoryAwareRuntime()
+        await self._dm(monkeypatch, runtime, "ask I am Alice")
+        await self._dm(monkeypatch, runtime, "ask who am I", sender=self.BOB)
+        assert len(runtime.asked[1][0]) == 2  # system + Bob's question only
+
+    async def test_channels_are_never_remembered(self, test_db, monkeypatch):
+        runtime = _HistoryAwareRuntime()
+        for _ in range(2):
+            await _run(monkeypatch, runtime, BotTestRequest(text="ask hi", sender_key=self.ALICE))
+        assert all(len(messages) == 2 for messages, _ in runtime.asked)
+
+    async def test_the_setting_limits_and_disables_it(self, test_db, monkeypatch):
+        runtime = _HistoryAwareRuntime()
+        for n in range(4):
+            await self._dm(monkeypatch, runtime, f"ask q{n}", settings={"history_messages": 2})
+        assert [m["content"] for m in runtime.asked[3][0][1:]] == ["q2", "Answer 3.", "q3"]
+        runtime = _HistoryAwareRuntime()
+        for n in range(2):
+            await self._dm(
+                monkeypatch, runtime, f"ask q{n}", sender=self.BOB, settings={"history_messages": 0}
+            )
+        assert len(runtime.asked[1][0]) == 2
+
+    async def test_too_long_with_history_retries_without_it(self, test_db, monkeypatch):
+        runtime = _HistoryAwareRuntime()
+        await self._dm(monkeypatch, runtime, "ask first")
+        runtime.refuse_history = True
+        replies = await self._dm(monkeypatch, runtime, "ask second")
+        assert replies == ["Answer 2."]
+        assert len(runtime.asked[-1][0]) == 2
+
+    async def test_reset_forgets(self, test_db, monkeypatch):
+        runtime = _HistoryAwareRuntime()
+        await self._dm(monkeypatch, runtime, "ask remember this")
+        assert await self._dm(monkeypatch, runtime, "ask reset") == ["🤖 Conversation forgotten."]
+        assert await self._dm(monkeypatch, runtime, "ask forget") == ["🤖 Nothing to forget."]
+        await self._dm(monkeypatch, runtime, "ask fresh start")
+        assert len(runtime.asked[-1][0]) == 2
+
+
+class TestDmSessions:
+    def test_expires_after_an_idle_hour(self):
+        sessions = llm.DmSessions()
+        sessions.record("a", "q", "r", now=0)
+        assert len(sessions.history("a", 10, now=llm.SESSION_IDLE_SECONDS - 1)) == 2
+        assert sessions.history("a", 10, now=llm.SESSION_IDLE_SECONDS + 1) == []
+
+    def test_history_is_capped_by_length_and_starts_with_the_sender(self):
+        sessions = llm.DmSessions()
+        for n in range(6):
+            sessions.record("a", "q" * 300, f"answer {n}", now=0)
+        history = sessions.history("a", 20, now=0)
+        assert sum(len(m["content"]) for m in history) <= llm.HISTORY_MAX_CHARS
+        assert history[0]["role"] == "user"
+        assert history[-1]["content"] == "answer 5"
+
+    def test_only_the_most_recent_senders_are_kept(self):
+        sessions = llm.DmSessions()
+        for n in range(llm.SESSION_MAX_SENDERS + 5):
+            sessions.record(f"s{n}", "q", "r", now=0)
+        assert sessions.history("s0", 10, now=0) == []
+        assert sessions.history(f"s{llm.SESSION_MAX_SENDERS + 4}", 10, now=0)

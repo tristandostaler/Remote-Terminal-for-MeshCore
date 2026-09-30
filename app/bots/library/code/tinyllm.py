@@ -23,6 +23,7 @@ from app.bots.llm import (
     LlmBusyError,
     LlmPromptTooLongError,
     LlmWorkerDiedError,
+    dm_sessions,
     llm_runtime,
     model_options,
     resolve_spec,
@@ -33,6 +34,8 @@ from remoteterm import bot
 # the time a run may use before the engine's 10 s timeout, leaving room to send.
 RELOAD_WAIT_SECONDS = 4
 RUN_BUDGET_SECONDS = 7.5
+# `ask reset` / `ask forget` in a DM clears that sender's conversation memory.
+RESET_WORDS = frozenset({"reset", "forget"})
 
 # The system prompt is either the selected model's own (llm.CATALOG: each is
 # sized to what that model can follow, and follows it when the model changes)
@@ -157,6 +160,21 @@ BOT_META = {
             ),
         },
         {
+            "key": "history_messages",
+            "label": "DM memory (previous messages included)",
+            "type": "int",
+            "default": 10,
+            "min": 0,
+            "max": 20,
+            "help": (
+                "In a DM the bot remembers the conversation: this many earlier messages "
+                "(questions and answers) go to the model with each new question. 0 turns "
+                "it off. A conversation is forgotten after an hour of silence or on "
+                "`ask reset`; channels and rooms are never remembered. More memory makes a "
+                "Pi slower to answer."
+            ),
+        },
+        {
             "key": "temperature",
             "label": "Temperature",
             "type": "float",
@@ -223,6 +241,7 @@ BOT_META = {
         "system_prompt": "",
         "max_tokens": 40,
         "max_messages": 1,
+        "history_messages": 10,
         "temperature": 0.7,
         "time_limit_seconds": 6,
         "threads": 0,
@@ -293,6 +312,10 @@ async def ask(ctx, msg):
         await ctx.reply(f"🤖 ask: {exc}")
         return
 
+    if msg.is_dm and msg.sender_key and msg.arg_text.strip().lower() in RESET_WORDS:
+        forgot = dm_sessions.forget(msg.sender_key)
+        await ctx.reply("🤖 Conversation forgotten." if forgot else "🤖 Nothing to forget.")
+        return
     started = time.monotonic()
     state = llm_runtime.ensure(
         spec,
@@ -320,14 +343,17 @@ async def ask(ctx, msg):
         await ctx.reply(f"🤖 {spec.name} is ready. Usage: {ctx.command_prefix}ask <question>")
         return
 
-    messages = [
-        {"role": "system", "content": system_prompt_for(ctx.settings, spec)},
-        {"role": "user", "content": question[:500]},
-    ]
-    try:
-        answer = await asyncio.to_thread(
+    question = question[:500]
+    # DM memory: earlier turns with this sender, never in channels or rooms.
+    session = msg.sender_key if (msg.is_dm and msg.sender_key) else None
+    history_limit = int(_number(ctx, "history_messages", 10, 0, 20))
+    history = dm_sessions.history(session, history_limit) if session else []
+    system = {"role": "system", "content": system_prompt_for(ctx.settings, spec)}
+
+    def ask_model(earlier):
+        return asyncio.to_thread(
             llm_runtime.generate,
-            messages,
+            [system, *earlier, {"role": "user", "content": question}],
             max_tokens=int(_number(ctx, "max_tokens", 40, 16, 160)),
             temperature=_number(ctx, "temperature", 0.7, 0.0, 1.5),
             # The whole run must end inside the engine's 10 s: time spent
@@ -340,6 +366,16 @@ async def ask(ctx, msg):
                 ),
             ),
         )
+
+    try:
+        try:
+            answer = await ask_model(history)
+        except LlmPromptTooLongError:
+            if not history:
+                raise
+            # The conversation outgrew the context window: answer this one
+            # question on its own rather than not at all.
+            answer = await ask_model([])
     except LlmBusyError:
         await ctx.reply("🤖 Busy answering someone else, try again shortly.")
         return
@@ -364,3 +400,6 @@ async def ask(ctx, msg):
     budget = await ctx.reply_budget()
     answer = fit_messages(answer, budget, int(_number(ctx, "max_messages", 1, 1, 4)))
     await ctx.reply_split(answer)
+    if session and history_limit:
+        # What was actually sent, so the model sees the conversation as it went.
+        dm_sessions.record(session, question, answer)

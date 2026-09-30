@@ -46,6 +46,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -922,6 +923,73 @@ class LlmRuntime:
 
 
 llm_runtime = LlmRuntime()
+
+
+# -- DM conversation memory --------------------------------------------------
+
+# A DM conversation with the bot is a session: it is forgotten after this long
+# without a message, and only this many senders are remembered at once.
+SESSION_IDLE_SECONDS = 3600
+SESSION_MAX_SENDERS = 100
+# The most messages kept per sender (the setting's maximum), and the most
+# history text sent to the model: the context window is CONTEXT_TOKENS, and on
+# a Pi every token of prompt costs time out of the 10 s run.
+SESSION_MAX_MESSAGES = 20
+HISTORY_MAX_CHARS = 1000
+
+
+class DmSessions:
+    """Recent question/answer turns per DM sender, in memory.
+
+    Held here rather than in the bot's persisted ``state``: bot runs execute
+    concurrently and each saves its own copy of ``state``, so two people asking
+    at once could overwrite each other's turns. Here it survives settings saves
+    (the bot's code is re-exec'd, this module is not); a server restart starts
+    everyone afresh, which is what a session is.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sessions: OrderedDict[str, tuple[float, list[dict[str, str]]]] = OrderedDict()
+
+    def history(self, sender: str, limit: int, now: float | None = None) -> list[dict[str, str]]:
+        """The last ``limit`` messages with ``sender``, oldest first, trimmed to
+        HISTORY_MAX_CHARS and always starting with the sender's own message."""
+        if limit <= 0:
+            return []
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            entry = self._sessions.get(sender)
+            if entry is None:
+                return []
+            if now - entry[0] > SESSION_IDLE_SECONDS:
+                del self._sessions[sender]
+                return []
+            messages = list(entry[1][-limit:])
+        while messages and sum(len(m["content"]) for m in messages) > HISTORY_MAX_CHARS:
+            messages.pop(0)
+        while messages and messages[0]["role"] != "user":
+            messages.pop(0)
+        return messages
+
+    def record(self, sender: str, question: str, answer: str, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            _, messages = self._sessions.pop(sender, (now, []))
+            messages = messages + [
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": answer},
+            ]
+            self._sessions[sender] = (now, messages[-SESSION_MAX_MESSAGES:])
+            while len(self._sessions) > SESSION_MAX_SENDERS:
+                self._sessions.popitem(last=False)
+
+    def forget(self, sender: str) -> bool:
+        with self._lock:
+            return self._sessions.pop(sender, None) is not None
+
+
+dm_sessions = DmSessions()
 
 
 # -- the model process -------------------------------------------------------
