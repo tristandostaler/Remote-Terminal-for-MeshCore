@@ -1669,7 +1669,8 @@ export interface BotSettingsValueField extends BotSettingsSchemaFieldBase {
   type: 'text' | 'password' | 'int' | 'float' | 'number' | 'bool' | 'select' | 'url';
   min?: number;
   max?: number;
-  options?: { value: string; label: string }[];
+  /** `description`, when present, is shown under a select for the chosen option. */
+  options?: { value: string; label: string; description?: string }[];
 }
 
 export interface BotSettingsGeneratedUrlField extends BotSettingsSchemaFieldBase {

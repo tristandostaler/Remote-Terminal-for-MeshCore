@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # database so a Home Assistant add-on's mapped /app/data volume keeps it
     # across restarts.
     aeic_model_dir: str = "data/models/aeic"
+    # Where the `ask` bot keeps the tiny GGUF language models it downloads on
+    # first use (100 MB - 1.1 GB each). Beside the database for the same reason.
+    llm_model_dir: str = "data/models/llm"
     # Switch for the AEIC neural image codec, read at RUNTIME.
     #
     # It governs RECONSTRUCTION, which is the half with a cost: 893 MiB of

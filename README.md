@@ -351,6 +351,42 @@ missing, and `POST /api/aeic/model/download` starts the fetch.
 - Without the dependencies or the model, the AI option is visible but disabled and
   explains which piece is missing. Nothing else changes.
 
+## Optional: Tiny On-Device AI Bot (`ask`)
+
+The built-in **`ask`** bot answers `ask <question>` (or `ai <question>`) on
+`#bot`, `#bots` and in DMs with a small language model that runs **inside this
+server**: no Ollama, no cloud API, no GPU. It ships disabled.
+
+1. Install the optional dependency (clone-and-build installs only; it compiles
+   llama.cpp where no prebuilt wheel exists, a few minutes on a Pi):
+
+   ```bash
+   uv sync --extra llm              # or: uv sync --extra aeic --extra llm
+   ```
+
+   `uv sync` removes extras you don't name, so list every extra you use.
+
+2. Open **Bots → ask → Settings** and pick a model. Each option shows its
+   download size, the RAM it uses while loaded, and rough speed and quality:
+
+   | Model | Download | RAM | Notes |
+   |---|---|---|---|
+   | SmolLM2 135M | 145 MB | ~250 MB | Toy, very fast |
+   | Gemma 3 270M | 292 MB | ~450 MB | Short friendly chat |
+   | SmolLM2 360M | 386 MB | ~550 MB | Decent small talk |
+   | **Qwen2.5 0.5B** (default) | 491 MB | ~650 MB | Best of the tiny tier |
+   | Llama 3.2 1B | 808 MB | ~1.1 GB | Smarter; Pi 5 or better |
+   | Qwen2.5 1.5B | 1.1 GB | ~1.5 GB | Most capable; best on x86 |
+
+   A **Custom** option takes any GGUF chat model from Hugging Face.
+
+3. Enable the bot. The first question downloads the model (once, into
+   `MESHCORE_LLM_MODEL_DIR`, default `data/models/llm`) and loads it in the
+   background; `ask` alone reports progress. Bot runs are limited to 10 s, so
+   answers stop at the configured time limit and whatever was produced is sent.
+
+Tiny models are chatty and often wrong. Treat the answers as entertainment.
+
 ## Virtual Companion Node: Share The Radio With Other MeshCore Apps
 
 A companion radio only talks to one host at a time, and RemoteTerm is that
