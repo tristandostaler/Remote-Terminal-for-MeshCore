@@ -1,4 +1,4 @@
-"""The ``ask`` bot and its tiny-LLM runtime (``app/bots/llm.py``).
+"""The ``tinyllm`` bot and its tiny-LLM runtime (``app/bots/llm.py``).
 
 No test downloads or runs a real model: the runtime singleton is stubbed for
 the bot tests, and the runtime tests feed it a fake llama object.
@@ -49,7 +49,7 @@ class TestCatalog:
 
 class TestBotMeta:
     def test_library_entry(self):
-        entry = get_library_entry("ask")
+        entry = get_library_entry("tinyllm")
         assert entry is not None
         assert not entry.get("enabled_by_default"), "feature bots ship disabled"
         assert "scope" not in entry, "keeps the default #bot / #bots + DMs scope"
@@ -59,8 +59,8 @@ class TestBotMeta:
         assert model_field["options"] == llm.model_options()
 
     def test_keywords(self):
-        entry = get_library_entry("ask")
-        assert set(load_bot_code(entry["code"]).declared_keywords) == {"ask", "ai"}
+        entry = get_library_entry("tinyllm")
+        assert set(load_bot_code(entry["code"]).declared_keywords) == {"ask", "ai", "llm"}
 
 
 class _FakeRuntime:
@@ -84,10 +84,10 @@ async def _run(monkeypatch, runtime, request, settings=None):
     from app.repository.bots import BotRepository
 
     monkeypatch.setattr(llm, "llm_runtime", runtime)
-    entry = get_library_entry("ask")
-    name, suffix = "ask-test", 2
+    entry = get_library_entry("tinyllm")
+    name, suffix = "tinyllm-test", 2
     while await BotRepository.name_exists(name):
-        name, suffix = f"ask-test-{suffix}", suffix + 1
+        name, suffix = f"tinyllm-test-{suffix}", suffix + 1
     bot = await BotRepository.create(name=name, code=entry["code"], settings=settings or {})
     response = await BotEngine().test_run(bot, request)
     assert response.error is None, response.error

@@ -80,7 +80,7 @@ operators).
   `frontend/src/utils/botScope.ts`. `tests/test_bot_default_scope.py` asserts
   they do. The same module holds `no_rooms()`, the empty room pick list every
   layer defaults to.
-- `llm.py` — the `ask` bot's tiny on-device LLM runtime (optional `llm` extra,
+- `llm.py` — the `tinyllm` bot's tiny on-device LLM runtime (optional `llm` extra,
   `llama-cpp-python`). Owns the model catalog the bot's Settings dropdown is
   generated from (label + per-option `description` with download size and RAM;
   the editor shows the chosen option's `description` under any `select`), and

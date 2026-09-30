@@ -351,9 +351,9 @@ missing, and `POST /api/aeic/model/download` starts the fetch.
 - Without the dependencies or the model, the AI option is visible but disabled and
   explains which piece is missing. Nothing else changes.
 
-## Optional: Tiny On-Device AI Bot (`ask`)
+## Optional: Tiny On-Device AI Bot (`tinyllm`)
 
-The built-in **`ask`** bot answers `ask <question>` (or `ai <question>`) on
+The built-in **`tinyllm`** bot answers `ask <question>` (or `ai` / `llm <question>`) on
 `#bot`, `#bots` and in DMs with a small language model that runs **inside this
 server**: no Ollama, no cloud API, no GPU. It ships disabled.
 
@@ -378,7 +378,7 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
 
    `uv sync` removes extras you don't name, so list every extra you use.
 
-2. Open **Bots → ask → Settings** and pick a model. Each option shows its
+2. Open **Bots → tinyllm → Settings** and pick a model. Each option shows its
    download size, the RAM it uses while loaded, and rough speed and quality:
 
    | Model | Download | RAM | Notes |

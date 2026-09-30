@@ -48,7 +48,7 @@ COPY pyproject.toml uv.lock ./
 # also needs ~2.4 GiB of RAM available to the container.
 ARG ENABLE_AEIC=0
 
-# Optional tiny LLM for the built-in `ask` bot (llama-cpp-python). Same story:
+# Optional tiny LLM for the built-in `tinyllm` bot (llama-cpp-python). Same story:
 # the normal way is MESHCORE_ENABLE_LLM=true at runtime, which run.sh installs
 # in the background after the server is up. This arg pre-bakes it:
 #

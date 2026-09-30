@@ -1,6 +1,6 @@
-"""Tiny on-device language models for the ``ask`` bot.
+"""Tiny on-device language models for the ``tinyllm`` bot.
 
-The built-in ``ask`` bot (``library/code/ask.py``) answers questions with a
+The built-in ``tinyllm`` bot (``library/code/tinyllm.py``) answers questions with a
 small GGUF model run in-process by ``llama-cpp-python`` — no Ollama, no server,
 no GPU. This module owns what must outlive a single bot run:
 
@@ -343,9 +343,9 @@ class LlmRuntime:
                 )
                 self._llm = llm
             self._set(state="ready")
-            logger.info("ask bot: %s loaded from %s", spec.name, path)
+            logger.info("tinyllm bot: %s loaded from %s", spec.name, path)
         except Exception as exc:  # noqa: BLE001 - surfaced through status()
-            logger.warning("ask bot: preparing %s failed: %s", spec.name, exc)
+            logger.warning("tinyllm bot: preparing %s failed: %s", spec.name, exc)
             self._set(state="error", error=str(exc)[:200], failed_at=time.monotonic())
 
     def _missing_package_reason(self) -> str:

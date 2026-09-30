@@ -31,7 +31,7 @@ aeic = [
     # never touches Pillow. See app/imaging/aeic/prepare.py.
     "pillow>=10.0",
 ]
-# The `ask` bot's tiny on-device language models (app/bots/llm.py). Builds
+# The `tinyllm` bot's tiny on-device language models (app/bots/llm.py). Builds
 # llama.cpp from source on platforms without a prebuilt wheel, which takes a
 # few minutes on a Pi.
 llm = [

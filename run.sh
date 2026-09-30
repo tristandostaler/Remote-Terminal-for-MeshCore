@@ -97,7 +97,7 @@ if aeic_requested; then
   fi
 fi
 
-# ── optional tiny LLM for the `ask` bot ───────────────────────────────────────
+# ── optional tiny LLM for the `tinyllm` bot ───────────────────────────────────────
 #
 # llama-cpp-python ships as source only, so the first install COMPILES llama.cpp:
 # a minute on a desktop, 10-20 on a Pi. That must never keep the radio offline,
@@ -125,20 +125,20 @@ llm_background_install() {
       >/dev/null 2>&1 && break
     sleep 2
   done
-  echo "LLM (ask bot): installing llama-cpp-python in the background..."
+  echo "LLM (tinyllm bot): installing llama-cpp-python in the background..."
   local built_tools=0
   # --inexact: only ADD packages. The server is already running from this venv,
   # and a plain sync would also strip whatever `uv run` added at launch.
   # shellcheck disable=SC2046
   if ! uv sync --frozen --no-dev --inexact $(extra_args with-llm) >"$log" 2>&1; then
     if ! command -v cmake >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
-      echo "LLM (ask bot): fetching compilers to build llama.cpp (first time only)..."
+      echo "LLM (tinyllm bot): fetching compilers to build llama.cpp (first time only)..."
       if apt-get update >>"$log" 2>&1 \
         && apt-get install -y --no-install-recommends build-essential cmake >>"$log" 2>&1; then
         built_tools=1
       fi
     fi
-    echo "LLM (ask bot): compiling llama.cpp — this takes a few minutes (10-20 on a Pi)..."
+    echo "LLM (tinyllm bot): compiling llama.cpp — this takes a few minutes (10-20 on a Pi)..."
     # shellcheck disable=SC2046
     uv sync --frozen --no-dev --inexact $(extra_args with-llm) >>"$log" 2>&1 || true
   fi
@@ -149,22 +149,22 @@ llm_background_install() {
   rm -f "$LLM_DIR/.installing"
   if llm_installed; then
     rm -f "$LLM_DIR/.install-failed"
-    echo "LLM (ask bot): llama-cpp-python ready. Enable the ask bot under Bots."
+    echo "LLM (tinyllm bot): llama-cpp-python ready. Enable the tinyllm bot under Bots."
   else
     touch "$LLM_DIR/.install-failed"
-    echo "WARNING: LLM (ask bot): llama-cpp-python failed to install; see $log" >&2
+    echo "WARNING: LLM (tinyllm bot): llama-cpp-python failed to install; see $log" >&2
   fi
 }
 
 if llm_requested; then
   if llm_installed; then
-    echo "LLM (ask bot): llama-cpp-python already installed."
+    echo "LLM (tinyllm bot): llama-cpp-python already installed."
   elif mkdir -p "$LLM_DIR" 2>/dev/null; then
     touch "$LLM_DIR/.installing"
     rm -f "$LLM_DIR/.install-failed"
     llm_background_install &
   else
-    echo "WARNING: LLM (ask bot): cannot create $LLM_DIR; skipping install." >&2
+    echo "WARNING: LLM (tinyllm bot): cannot create $LLM_DIR; skipping install." >&2
   fi
 fi
 
