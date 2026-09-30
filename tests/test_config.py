@@ -127,3 +127,27 @@ class TestExperimentalAliases:
         monkeypatch.setenv("__CLOWNTOWN_DO_CLOCK_WRAPAROUND", "true")
         s = Settings(serial_port="", tcp_host="", ble_address="")
         assert s.clowntown_do_clock_wraparound is True
+
+
+class TestModelDirsFollowTheDatabase:
+    """Downloaded models live beside the database unless set explicitly, so
+    moving the database moves them too instead of stranding them outside the
+    data volume (and re-downloading after every container update)."""
+
+    def test_default_database_keeps_the_historical_paths(self, monkeypatch):
+        # conftest points MESHCORE_DATABASE_PATH at a temp folder for the suite.
+        monkeypatch.delenv("MESHCORE_DATABASE_PATH", raising=False)
+        s = Settings()
+        assert s.aeic_model_dir == "data/models/aeic"
+        assert s.llm_model_dir == "data/models/llm"
+
+    def test_custom_database_moves_both(self):
+        s = Settings(database_path="/mnt/radio/meshcore.db")
+        assert s.aeic_model_dir == "/mnt/radio/models/aeic"
+        assert s.llm_model_dir == "/mnt/radio/models/llm"
+
+    def test_explicit_dirs_win(self, monkeypatch):
+        monkeypatch.setenv("MESHCORE_LLM_MODEL_DIR", "/models/llm")
+        s = Settings(database_path="/mnt/radio/meshcore.db", aeic_model_dir="/models/aeic")
+        assert s.aeic_model_dir == "/models/aeic"
+        assert s.llm_model_dir == "/models/llm"
