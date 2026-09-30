@@ -326,6 +326,7 @@ class BotContext:
         loop: asyncio.AbstractEventLoop | None = None,
         command_prefix: str = "",
         author_contact: str = "",
+        sender_is_admin: bool = False,
     ) -> None:
         self.bot_id = bot_id
         self.bot_name = bot_name
@@ -351,6 +352,10 @@ class BotContext:
         self.command_prefix = command_prefix
         # Bots › Engine › Author contact: how to reach whoever runs these bots.
         self.author_contact = author_contact
+        # Whether the message's sender is one of Bots › Engine › Admin users (the
+        # same check `admin_only` bots are gated on), so a bot can keep
+        # diagnostics -- raw errors, paths -- for admins in DMs.
+        self.sender_is_admin = sender_is_admin
 
     # -- persistence -----------------------------------------------------
     def mark_state_dirty(self) -> None:

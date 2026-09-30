@@ -752,6 +752,7 @@ class BotEngine:
             translator=self.translator,
             command_prefix=next(iter(self._prefixes()), ""),
             author_contact=self.settings.author_contact,
+            sender_is_admin=self._is_admin_sender(msg) if msg else False,
             loop=asyncio.get_running_loop(),
         )
 

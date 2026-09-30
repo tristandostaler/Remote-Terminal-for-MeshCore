@@ -127,8 +127,32 @@ fi
 
 LLM_DIR="$(abs_path "${MESHCORE_LLM_MODEL_DIR:-$DATA_DIR/models/llm}")"
 
+# llama.cpp is built with OpenMP, so libllama.so needs libgomp.so.1 at runtime.
+# The Dockerfile installs it; this repairs images built before it did, where
+# the package was only there while the compilers were (and a container
+# reinstalling from the wheel cache never had it at all).
+llm_runtime_libs() {
+  if ldconfig -p 2>/dev/null | grep -q 'libgomp\.so\.1'; then
+    return 0
+  fi
+  echo "LLM (tinyllm bot): installing libgomp1, which llama.cpp needs to run..."
+  { apt-get update && apt-get install -y --no-install-recommends libgomp1; } >>"$1" 2>&1 \
+    || echo "WARNING: LLM (tinyllm bot): could not install libgomp1; see $1" >&2
+  rm -rf /var/lib/apt/lists/*
+}
+
+# The .installing marker is what the bot reads to explain itself: the phase,
+# when it started, and this job's PID (so a job that died is told apart from
+# one still running). Phases: waiting (for the server), installing (usually
+# just unpacking the wheel cached from an earlier build), compiling.
+llm_marker() {
+  printf 'phase=%s\nstarted=%s\npid=%s\njobs=%s\n' \
+    "$1" "$(date +%s)" "${BASHPID:-$$}" "${2:-}" >"$LLM_DIR/.installing"
+}
+
 llm_background_install() {
   local log="$LLM_DIR/.install.log"
+  llm_marker waiting
   # Wait for the server: `uv run` below syncs the venv at launch and takes the
   # same environment lock this sync needs, so racing it would stall startup.
   for _ in $(seq 1 120); do
@@ -137,6 +161,7 @@ llm_background_install() {
     sleep 2
   done
   echo "LLM (tinyllm bot): installing llama-cpp-python in the background..."
+  llm_marker installing
   local built_tools=0
   # Compiling llama.cpp is the heaviest thing this server ever does: measured
   # at up to ~700 MB per compiler process, 1.8 GB with four in parallel, which
@@ -167,13 +192,17 @@ llm_background_install() {
       fi
     fi
     echo "LLM (tinyllm bot): compiling llama.cpp with ${CMAKE_BUILD_PARALLEL_LEVEL} job(s) — a few minutes on a desktop, up to an hour on a small Pi..."
+    llm_marker compiling "$CMAKE_BUILD_PARALLEL_LEVEL"
     # shellcheck disable=SC2046,SC2086
     $lowprio uv sync --frozen --no-dev --inexact $(extra_args with-llm) >>"$log" 2>&1 || true
   fi
   if [ "$built_tools" = 1 ]; then
+    # libgomp1 arrived with the compilers; keep it through the cleanup.
+    apt-mark manual libgomp1 >/dev/null 2>&1 || true
     apt-get purge -y --auto-remove build-essential cmake >/dev/null 2>&1 || true
     rm -rf /var/lib/apt/lists/*
   fi
+  llm_runtime_libs "$log"
   rm -f "$LLM_DIR/.installing"
   if llm_installed; then
     rm -f "$LLM_DIR/.install-failed"
@@ -188,7 +217,6 @@ if llm_requested; then
   if llm_installed; then
     echo "LLM (tinyllm bot): llama-cpp-python already installed."
   elif mkdir -p "$LLM_DIR" 2>/dev/null; then
-    touch "$LLM_DIR/.installing"
     rm -f "$LLM_DIR/.install-failed"
     llm_background_install &
   else

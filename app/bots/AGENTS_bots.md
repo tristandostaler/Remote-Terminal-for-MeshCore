@@ -15,7 +15,9 @@ operators).
   (`reply`/`send`/`send_dm`/`send_room`), image sends
   (`reply_image`/`send_image`/`send_dm_image`/`send_room_image`), `settings`,
   persistent `state`, `http` (httpx), `geocode`, i18n (`t`), `mesh_stats`,
-  `get_enabled_bots`, logging. Test runs capture sends instead of transmitting.
+  `get_enabled_bots`, logging, and `sender_is_admin` (the engine's Admin users
+  check, the same one `admin_only` gates on) so a bot can keep raw diagnostics
+  for admins in DMs. Test runs capture sends instead of transmitting.
   - **Image sends** take encoded bytes (anything Pillow opens — e.g. straight
     from `ctx.http`) or exactly 786,432 bytes of 512×512 packed RGB, and return
     how many messages it took. The image is stretched into a 512px square and
@@ -123,7 +125,16 @@ operators).
   in the background *after* the server is up (`uv sync --inexact`, never
   before `exec`: a Pi takes 10-20 min), leaving `.installing` /
   `.install-failed` / `.install.log` in the model dir; `_missing_package_reason`
-  reads them, and `importlib.invalidate_caches()` lets the next retry import
+  reads them (`.installing` holds `phase` = waiting / installing / compiling,
+  `started`, and the job's `pid`: `_describe_install` reports elapsed time and
+  calls a marker whose PID is gone "stopped", never "still installing"; a
+  missing package is rechecked every question, no retry pause). Errors are
+  two-level: `LlmUserError` messages are written for the mesh; anything else
+  is summarized by `_plain_reason` and its raw text kept in `error_detail`,
+  which the bot shows only to an admin in a DM (`describe(detailed=True)`).
+  llama.cpp is built with OpenMP, so `libgomp1` must be present at runtime:
+  the Dockerfile installs it and `run.sh`'s `llm_runtime_libs` repairs older
+  images. `importlib.invalidate_caches()` lets the next retry import
   the package without a restart. Every `uv sync` in `run.sh` names all extras
   wanted or already present, because a sync removes the ones it isn't told of.
 - `placeholders.py` — `{total_contacts}`-style tokens for scheduled messages.

@@ -91,8 +91,9 @@ class _FakeRuntime:
         self.state = self.state_after_wait
         return self.state
 
-    def describe(self):
-        return "Downloading Qwen2.5 0.5B: 42% of 468 MB"
+    def describe(self, detailed=False):
+        self.detailed = detailed
+        return "RAW DETAIL" if detailed else "Downloading Qwen2.5 0.5B: 42% of 468 MB"
 
     def generate(self, messages, **kwargs):
         self.asked.append((messages, kwargs))
@@ -101,7 +102,7 @@ class _FakeRuntime:
         return self.answer
 
 
-async def _run(monkeypatch, runtime, request, settings=None):
+async def _run(monkeypatch, runtime, request, settings=None, admin_key=None):
     from app.repository.bots import BotRepository
 
     monkeypatch.setattr(llm, "llm_runtime", runtime)
@@ -110,7 +111,12 @@ async def _run(monkeypatch, runtime, request, settings=None):
     while await BotRepository.name_exists(name):
         name, suffix = f"tinyllm-test-{suffix}", suffix + 1
     bot = await BotRepository.create(name=name, code=entry["code"], settings=settings or {})
-    response = await BotEngine().test_run(bot, request)
+    engine = BotEngine()
+    if admin_key:
+        from app.models import BotAdminUser
+
+        engine.settings.admin_users = [BotAdminUser(public_key=admin_key)]
+    response = await engine.test_run(bot, request)
     assert response.error is None, response.error
     return [r["text"] for r in response.replies]
 
@@ -201,6 +207,23 @@ class TestAskBot:
             monkeypatch, _FakeRuntime(answer=died), BotTestRequest(text="ask hi", is_dm=True)
         )
         assert "memory ran out" in replies[0]
+
+    async def test_raw_errors_only_reach_an_admin_in_a_dm(self, test_db, monkeypatch):
+        admin = "ab" * 32
+        cases = [
+            # (request, admin configured, sees raw detail)
+            (BotTestRequest(text="ask hi", is_dm=True, sender_key=admin), True, True),
+            (BotTestRequest(text="ask hi", is_dm=True, sender_key="cd" * 32), True, False),
+            (BotTestRequest(text="ask hi", sender_key=admin), True, False),  # channel
+            (BotTestRequest(text="ask hi", is_dm=True, sender_key=admin), False, False),
+        ]
+        for request, configured, raw in cases:
+            runtime = _FakeRuntime(state="error")
+            replies = await _run(
+                monkeypatch, runtime, request, admin_key=admin if configured else None
+            )
+            assert runtime.detailed is raw, request
+            assert ("RAW DETAIL" in replies[0]) is raw, request
 
     async def test_dm_answer_has_no_mention(self, test_db, monkeypatch):
         replies = await _run(
@@ -369,7 +392,8 @@ class TestModelProcess:
     def test_a_model_that_fails_to_load_is_reported(self, tmp_path, fake_llama):
         runtime = _runtime(tmp_path, fake_llama, filename="broken.gguf")
         assert _load(runtime, filename="broken.gguf") == "error"
-        assert "bad model file" in runtime.status()["error"]
+        assert runtime.status()["error"] == "the model failed to load"
+        assert "bad model file" in runtime.status()["error_detail"]
 
     def test_generate_refuses_while_busy(self, tmp_path, fake_llama):
         runtime = _runtime(tmp_path, fake_llama)
@@ -424,8 +448,9 @@ class TestRuntime:
         assert runtime.ensure(llm.CATALOG[0]) == "downloading"
         assert runtime.wait_ready(5) == "error"
         assert "uv sync --extra llm" in runtime.status()["error"]
-        # Not retried on every message.
-        assert runtime.ensure(llm.CATALOG[0]) == "error"
+        # Rechecked on every question (cheap), so an install is picked up at once.
+        assert runtime.ensure(llm.CATALOG[0]) == "downloading"
+        runtime.wait_ready(5)
 
     def test_cached_file_skips_the_download(self, tmp_path):
         spec = llm.CATALOG[0]
@@ -443,7 +468,7 @@ class TestRuntime:
         (tmp_path / ".install-failed").touch()
         assert "failed" in runtime._missing_package_reason()
         (tmp_path / ".installing").touch()
-        assert "still being installed" in runtime._missing_package_reason()
+        assert runtime._missing_package_reason().startswith("installing llama-cpp-python (")
 
 
 class TestMemory:
@@ -504,3 +529,81 @@ class TestMemory:
         assert low.llama_model_default_params().use_extra_bufts is True
         with llm._weight_repacking(True):
             assert low.llama_model_default_params().use_extra_bufts is True
+
+
+class TestInstallStatus:
+    """What the bot says while run.sh installs llama-cpp-python in Docker."""
+
+    def _marker(self, tmp_path, **fields):
+        marker = tmp_path / ".installing"
+        marker.write_text("".join(f"{k}={v}\n" for k, v in fields.items()))
+        return marker
+
+    def test_phases_and_elapsed_time(self, tmp_path):
+        now = time.time()
+        me = os.getpid()
+        installing = llm._describe_install(
+            self._marker(tmp_path, phase="installing", started=now - 40, pid=me)
+        )
+        assert installing.startswith("installing llama-cpp-python (40 s so far")
+        compiling = llm._describe_install(
+            self._marker(tmp_path, phase="compiling", started=now - 720, pid=me, jobs=1)
+        )
+        assert compiling == "compiling llama.cpp (12 min so far, up to an hour on a Pi)"
+        waiting = llm._describe_install(self._marker(tmp_path, phase="waiting", pid=me))
+        assert "once the server is up" in waiting
+
+    def test_a_dead_install_is_not_reported_as_running(self, tmp_path):
+        import subprocess
+
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        text = llm._describe_install(
+            self._marker(tmp_path, phase="compiling", started=time.time(), pid=dead.pid)
+        )
+        assert "stopped before finishing" in text
+
+    def test_an_old_empty_marker_still_reads(self, tmp_path):
+        marker = tmp_path / ".installing"
+        marker.touch()
+        assert llm._describe_install(marker).startswith("installing llama-cpp-python (")
+
+    def test_every_message_fits_one_mesh_message(self, tmp_path):
+        name = "🤖 SmolLM2 135M (Q4, smallest) unavailable: "
+        for phase in ("waiting", "installing", "compiling"):
+            text = llm._describe_install(
+                self._marker(tmp_path, phase=phase, started=time.time() - 5000, pid=os.getpid())
+            )
+            assert len((name + text).encode()) <= 140, text
+
+    def test_a_missing_package_is_rechecked_on_every_question(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(llm.importlib.util, "find_spec", lambda name: None)
+        runtime = llm.LlmRuntime(model_dir=tmp_path)
+        self._marker(tmp_path, phase="installing", started=time.time(), pid=os.getpid())
+        runtime.ensure(llm.CATALOG[0])
+        assert runtime.wait_ready(5) == "error"
+        # No 60 s retry pause: the next question looks again straight away.
+        assert runtime.ensure(llm.CATALOG[0]) == "downloading"
+        runtime.wait_ready(5)
+
+
+class TestPlainErrors:
+    def test_a_missing_system_library_is_explained_plainly(self):
+        raw = RuntimeError(
+            "Failed to load shared library '/app/.venv/lib/python3.14/site-packages/llama_cpp/"
+            "lib/libllama.so': libgomp.so.1: cannot open shared object file"
+        )
+        plain = llm._plain_reason(raw)
+        assert "system library is missing" in plain
+        assert "/app" not in plain and "libgomp" not in plain
+
+    def test_our_own_messages_pass_through(self):
+        assert llm._plain_reason(llm.LlmUserError("not enough free memory")) == (
+            "not enough free memory"
+        )
+
+    def test_the_raw_error_is_kept_for_admins(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama, filename="broken.gguf")
+        _load(runtime, filename="broken.gguf")
+        assert runtime.describe().endswith("the model failed to load")
+        assert "bad model file" in runtime.describe(detailed=True)

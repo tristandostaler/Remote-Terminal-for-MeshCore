@@ -320,6 +320,54 @@ def resolve_spec(settings: dict[str, Any]) -> ModelSpec:
     )
 
 
+def _plain_reason(exc: BaseException) -> str:
+    """A short, non-technical reason for an unexpected failure, for anyone.
+
+    The raw exception (paths, library names) stays in the server log and is
+    shown only to admins who ask in a DM.
+    """
+    if isinstance(exc, (LlmUserError, LlmWorkerDiedError)):
+        return str(exc)
+    text = str(exc)
+    if "shared object" in text or "Failed to load shared library" in text:
+        return (
+            "llama.cpp can't start on this server (a system library is missing); restart to repair"
+        )
+    if type(exc).__module__.startswith("httpx"):
+        return "the model could not be downloaded (network error)"
+    return "the model failed to load"
+
+
+def _describe_install(marker: Path) -> str:
+    """What the background install (run.sh) is doing, from its marker file.
+
+    Short on purpose: it rides in one mesh message behind the model's name.
+    """
+    fields: dict[str, str] = {}
+    with contextlib.suppress(OSError):
+        for line in marker.read_text().splitlines():
+            key, _, value = line.partition("=")
+            fields[key.strip()] = value.strip()
+    pid = fields.get("pid", "")
+    # A job that died (container stopped mid-install, killed) leaves its marker
+    # behind; without this check the bot would say "installing" forever.
+    if pid.isdigit() and Path("/proc").is_dir() and not Path(f"/proc/{pid}").exists():
+        return "the llama-cpp-python install stopped before finishing; restart to retry"
+    try:
+        started = float(fields["started"])
+    except (KeyError, ValueError):
+        with contextlib.suppress(OSError):
+            started = marker.stat().st_mtime
+    elapsed = max(0.0, time.time() - started) if "started" in locals() else 0.0
+    so_far = f"{int(elapsed)} s" if elapsed < 90 else f"{int(elapsed // 60)} min"
+    phase = fields.get("phase")
+    if phase == "compiling":
+        return f"compiling llama.cpp ({so_far} so far, up to an hour on a Pi)"
+    if phase == "waiting":
+        return "llama-cpp-python installs once the server is up; try again shortly"
+    return f"installing llama-cpp-python ({so_far} so far, usually under a minute)"
+
+
 def available_memory_mb() -> int | None:
     """Memory a new allocation can get, in MB, or ``None`` when unknown.
 
@@ -353,6 +401,18 @@ def available_memory_mb() -> int | None:
             candidates.append(max(0, int(limit) - usage) >> 20)
         break
     return min(candidates) if candidates else None
+
+
+class LlmUserError(RuntimeError):
+    """A failure whose message is already written for the mesh: short, plain,
+    nothing internal in it (not enough memory, model not found, ...). Anything
+    else is summarized by :func:`_plain_reason` and its raw text is kept for
+    admins only."""
+
+
+class _PackageMissingError(LlmUserError):
+    """llama_cpp is not importable (yet). Rechecked on every question -- no
+    retry pause -- so the bot answers the moment a background install ends."""
 
 
 class LlmBusyError(RuntimeError):
@@ -514,6 +574,8 @@ class LlmRuntime:
         # idle | downloading | loading | ready | error
         self._state = "idle"
         self._error = ""
+        # The raw exception behind _error, for admins asking in a DM.
+        self._error_detail = ""
         self._done_bytes = 0
         self._total_bytes = 0
         self._worker: threading.Thread | None = None
@@ -541,14 +603,16 @@ class LlmRuntime:
                 "model": self._spec.key if self._spec else None,
                 "model_name": self._spec.name if self._spec else None,
                 "error": self._error,
+                "error_detail": self._error_detail,
                 "downloaded_bytes": self._done_bytes,
                 "total_bytes": self._total_bytes,
                 "unloaded": self._unloaded,
                 "worker_pid": self._proc.pid if self._proc else None,
             }
 
-    def describe(self) -> str:
-        """One short line for a mesh reply."""
+    def describe(self, detailed: bool = False) -> str:
+        """One short line for a mesh reply. ``detailed`` swaps a plain error
+        for the raw exception: only for admins, only in a DM."""
         s = self.status()
         name = s["model_name"] or "no model"
         if s["state"] == "downloading":
@@ -561,7 +625,7 @@ class LlmRuntime:
         if s["state"] == "ready":
             return f"{name} is ready"
         if s["state"] == "error":
-            return f"{name} unavailable: {s['error']}"
+            return f"{name} unavailable: {s['error_detail'] if detailed else s['error']}"
         if s["unloaded"]:
             return f"{name} is unloaded to save memory; the next question reloads it"
         return "No model loaded"
@@ -597,6 +661,7 @@ class LlmRuntime:
             self._load_key = load_key
             self._state = "downloading"
             self._error = ""
+            self._error_detail = ""
             self._done_bytes = 0
             self._total_bytes = spec.download_mb << 20
             self._worker = threading.Thread(
@@ -630,7 +695,7 @@ class LlmRuntime:
             importlib.invalidate_caches()
             # (A test's worker_env brings its own llama_cpp for the child.)
             if importlib.util.find_spec("llama_cpp") is None and self._worker_env is None:
-                raise RuntimeError(self._missing_package_reason())
+                raise _PackageMissingError(self._missing_package_reason())
             path = self._download(spec)
             self._set(state="loading")
             # Drop the previous model first, so a switch never holds two in RAM.
@@ -654,7 +719,13 @@ class LlmRuntime:
             logger.info("tinyllm bot: %s loaded in process %d", spec.name, proc.pid)
         except Exception as exc:  # noqa: BLE001 - surfaced through status()
             logger.warning("tinyllm bot: preparing %s failed: %s", spec.name, exc)
-            self._set(state="error", error=str(exc)[:200], failed_at=time.monotonic())
+            failed_at = 0.0 if isinstance(exc, _PackageMissingError) else time.monotonic()
+            self._set(
+                state="error",
+                error=_plain_reason(exc)[:200],
+                error_detail=(str(exc) or type(exc).__name__)[:500],
+                failed_at=failed_at,
+            )
 
     def _check_memory(self, spec: ModelSpec, path: Path, repack: bool = False) -> None:
         """Refuse a load that would not leave the system room to breathe.
@@ -667,7 +738,7 @@ class LlmRuntime:
         weights_mb = (path.stat().st_size >> 20) * (2 if repack else 1)
         needed = weights_mb + LOAD_OVERHEAD_MB + MEMORY_RESERVE_MB
         if available < needed:
-            raise RuntimeError(
+            raise LlmUserError(
                 f"not enough free memory for {spec.name}: needs about {needed} MB, "
                 f"{available} MB available. Pick a smaller model"
             )
@@ -679,8 +750,9 @@ class LlmRuntime:
         background after the server starts; the package appears mid-run and is
         picked up by the next retry, so "still installing" is worth saying.
         """
-        if (self.model_dir / ".installing").exists():
-            return "llama-cpp-python is still being installed (compiling once; up to an hour on a small Pi)"
+        marker = self.model_dir / ".installing"
+        if marker.exists():
+            return _describe_install(marker)
         if (self.model_dir / ".install-failed").exists():
             return "installing llama-cpp-python failed; see .install.log in the model folder"
         return INSTALL_HINT
@@ -698,12 +770,12 @@ class LlmRuntime:
         with httpx.Client(follow_redirects=True, timeout=30.0) as client:
             with client.stream("GET", spec.url) as response:
                 if response.status_code == 404:
-                    raise RuntimeError(f"{spec.repo}/{spec.filename} not found on Hugging Face")
+                    raise LlmUserError(f"{spec.repo}/{spec.filename} not found on Hugging Face")
                 response.raise_for_status()
                 total = int(response.headers.get("content-length") or 0)
                 free = shutil.disk_usage(target_dir).free
                 if total and free - total < DISK_HEADROOM_BYTES:
-                    raise RuntimeError(
+                    raise LlmUserError(
                         f"not enough disk: needs {total >> 20} MB plus "
                         f"{DISK_HEADROOM_BYTES >> 20} MB headroom, {free >> 20} MB free"
                     )
@@ -716,7 +788,7 @@ class LlmRuntime:
                         self._set(done_bytes=done)
         if total and done != total:
             partial.unlink(missing_ok=True)
-            raise RuntimeError(f"download incomplete ({done} of {total} bytes)")
+            raise LlmUserError(f"download incomplete ({done} of {total} bytes)")
         os.replace(partial, target)
         return target
 
@@ -797,7 +869,12 @@ class LlmRuntime:
                 )
             except LlmWorkerDiedError as exc:
                 self._proc = None
-                self._set(state="error", error=str(exc)[:200], failed_at=time.monotonic())
+                self._set(
+                    state="error",
+                    error=str(exc)[:200],
+                    error_detail=str(exc)[:500],
+                    failed_at=time.monotonic(),
+                )
                 logger.warning("tinyllm bot: %s", exc)
                 raise
             if reply.get("kind") == "too_long":
