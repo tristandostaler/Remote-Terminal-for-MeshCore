@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+* Change: The **tinyllm** bot's Settings tab is grouped into sections (Model, Prompt, Answers, Memory & reference notes, Performance & memory use) in a sensible order, the custom system prompt is a multi-line box that lists the placeholders it accepts, and **Ask the model whether the notes fit** only appears while reference notes are on. On every bot's Settings tab, on/off switches now show their help text, which was previously never displayed. Bot authors get two new settings field types: `section` (a heading) and `textarea`
+* Bug: When the **tinyllm** model took too long to answer -- a long prompt on a slow Pi, or the optional notes check -- it was stopped and the bot then refused every question for a minute as if the model had crashed. A timeout now just means the model reloads on the next question
+* Change: With reference notes on, **tinyllm** DM history no longer gives up half its room when the search finds no notes, and the `tinyllm-docs` folder is created the first time the bot runs, rather than on its first answered question
+
 * Feature: The Bots › Test tab has a **Clear** button for its transcript, so starting over no longer takes a page reload. Each test message is also labelled with where it was actually sent (#test, DM or room), not wherever the selector points now
 * Bug: A **DM** in the Bots › Test tab did not remember the conversation. Test runs store no messages, and the tinyllm bot reads a DM's history from stored messages, so every test DM started from nothing. The Test tab now sends its earlier DM exchanges with each run and the bot uses those; **Clear** starts the conversation over. Bots can read them as `ctx.test_transcript`
 

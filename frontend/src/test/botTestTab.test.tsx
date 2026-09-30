@@ -5,7 +5,7 @@ import { api } from '../api';
 import { BotEditor } from '../components/bots/BotEditor';
 import type { Bot, BotTestResponse } from '../types';
 
-function makeBot(): Bot {
+function makeBot(overrides: Partial<Bot> = {}): Bot {
   return {
     id: 'bot-1',
     name: 'tinyllm',
@@ -38,6 +38,7 @@ function makeBot(): Bot {
     load_error: null,
     runs_24h: 0,
     deletable: true,
+    ...overrides,
   };
 }
 
@@ -128,5 +129,45 @@ describe('bot Test tab', () => {
     expect(screen.getByText(/\(DM\)/)).toBeInTheDocument();
     // The channel run is not part of the DM conversation.
     expect(testBot.mock.calls[1][1].transcript).toEqual([]);
+  });
+});
+
+describe('bot settings fields', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('renders section headings, a multi-line prompt, and conditional switches', async () => {
+    vi.spyOn(api, 'getBot').mockResolvedValue(
+      makeBot({
+        settings_schema: [
+          { key: '_prompt', label: 'Prompt', type: 'section' },
+          { key: 'system_prompt', label: 'Custom system prompt', type: 'textarea', default: '' },
+          { key: 'use_docs', label: 'Look up reference notes', type: 'bool', default: true },
+          {
+            key: 'check',
+            label: 'Ask the model whether the notes fit',
+            type: 'bool',
+            default: false,
+            show_when: { key: 'use_docs', value: 'true' },
+          },
+        ],
+        settings: {},
+      })
+    );
+    render(
+      <BotEditor botId="bot-1" channels={[]} contacts={[]} onBack={vi.fn()} onDeleted={vi.fn()} />
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+
+    expect(await screen.findByText('Prompt')).toBeInTheDocument();
+    const prompt = screen.getByLabelText('Custom system prompt');
+    expect(prompt.tagName).toBe('TEXTAREA');
+    fireEvent.change(prompt, { target: { value: 'Line one\nLine two' } });
+    expect((prompt as HTMLTextAreaElement).value).toBe('Line one\nLine two');
+
+    expect(screen.getByText('Ask the model whether the notes fit')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Look up reference notes'));
+    expect(screen.queryByText('Ask the model whether the notes fit')).not.toBeInTheDocument();
   });
 });

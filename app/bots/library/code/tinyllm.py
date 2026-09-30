@@ -95,6 +95,11 @@ BOT_META = {
     "per_user_cooldown_seconds": 20,
     "settings_schema": [
         {
+            "key": "_model",
+            "label": "Model",
+            "type": "section",
+        },
+        {
             "key": "model",
             "label": "Model",
             "type": "select",
@@ -122,6 +127,11 @@ BOT_META = {
             "show_when": {"key": "model", "value": CUSTOM_MODEL},
         },
         {
+            "key": "_prompt",
+            "label": "Prompt",
+            "type": "section",
+        },
+        {
             "key": "prompt_mode",
             "label": "System prompt",
             "type": "select",
@@ -132,8 +142,9 @@ BOT_META = {
                     "label": "Match the selected model (changes with it)",
                     "description": (
                         "Each model comes with a prompt sized to what it can follow -- it is "
-                        "shown in the model's details above. Picking another model switches "
-                        "to its prompt."
+                        "shown in the model's details above, with {radio_name} and {sender} "
+                        "filled in when it is used. Picking another model switches to its "
+                        "prompt."
                     ),
                 },
                 {
@@ -149,13 +160,20 @@ BOT_META = {
         {
             "key": "system_prompt",
             "label": "Custom system prompt",
-            "type": "text",
+            "type": "textarea",
             "default": "",
             "help": (
                 "The bot's personality and rules. Keep it short and plain: the smallest "
-                "models repeat what the prompt says about them rather than follow it."
+                "models repeat what the prompt says about them rather than follow it. "
+                "Placeholders filled in for each question: {radio_name} (this radio's "
+                "name), {sender}, {time}, {date}."
             ),
             "show_when": {"key": "prompt_mode", "value": PROMPT_CUSTOM},
+        },
+        {
+            "key": "_answer",
+            "label": "Answers",
+            "type": "section",
         },
         {
             "key": "max_tokens",
@@ -177,6 +195,32 @@ BOT_META = {
                 "A hard cap, whatever the model writes: a longer answer is cut back to "
                 "whole sentences that fit."
             ),
+        },
+        {
+            "key": "temperature",
+            "label": "Temperature",
+            "type": "float",
+            "default": 0.7,
+            "min": 0,
+            "max": 1.5,
+            "help": "Lower is more predictable, higher more creative.",
+        },
+        {
+            "key": "time_limit_seconds",
+            "label": "Answer time limit (seconds)",
+            "type": "float",
+            "default": 6,
+            "min": 2,
+            "max": 7,
+            "help": (
+                "Generation stops here and the text so far is sent. Bot runs end at 10 s, and "
+                "the reply still has to go out, so this stays at 7 or less."
+            ),
+        },
+        {
+            "key": "_memory",
+            "label": "Memory & reference notes",
+            "type": "section",
         },
         {
             "key": "history_messages",
@@ -208,6 +252,7 @@ BOT_META = {
         },
         {
             "key": "check_notes_with_model",
+            "show_when": {"key": "use_docs", "value": "true"},
             "label": "Ask the model whether the notes fit (slower)",
             "type": "bool",
             "default": False,
@@ -253,25 +298,9 @@ BOT_META = {
             "help": "Changing it reloads the model.",
         },
         {
-            "key": "temperature",
-            "label": "Temperature",
-            "type": "float",
-            "default": 0.7,
-            "min": 0,
-            "max": 1.5,
-            "help": "Lower is more predictable, higher more creative.",
-        },
-        {
-            "key": "time_limit_seconds",
-            "label": "Answer time limit (seconds)",
-            "type": "float",
-            "default": 6,
-            "min": 2,
-            "max": 7,
-            "help": (
-                "Generation stops here and the text so far is sent. Bot runs end at 10 s, and "
-                "the reply still has to go out, so this stays at 7 or less."
-            ),
+            "key": "_performance",
+            "label": "Performance & memory use",
+            "type": "section",
         },
         {
             "key": "threads",
@@ -519,6 +548,12 @@ async def ask(ctx, msg):
         await ctx.reply("🤖 Conversation forgotten; starting fresh.")
         return
     started = time.monotonic()
+    if ctx.settings.get("use_docs", True):
+        # Create the notes folder on the bot's first run, not its first real
+        # question, so it is there to edit as soon as the bot has been used.
+        from app.bots.bots_utils.tinyllm.llm_docs import docs_index
+
+        await asyncio.to_thread(docs_index)
     try:
         n_ctx = int(ctx.settings.get("context_tokens") or CONTEXT_TOKENS)
     except (TypeError, ValueError):
@@ -566,8 +601,9 @@ async def ask(ctx, msg):
         - TEMPLATE_OVERHEAD_CHARS
     )
     use_docs = bool(ctx.settings.get("use_docs", True))
-    history_room = free_chars // 2 if use_docs else free_chars
-    history_room = min(max(0, history_room), HISTORY_MAX_CHARS * n_ctx // CONTEXT_TOKENS)
+    # History first, with all the room; notes get whatever it leaves, and at
+    # least half -- the history is trimmed back only if notes are then found.
+    history_room = min(max(0, free_chars), HISTORY_MAX_CHARS * n_ctx // CONTEXT_TOKENS)
     history = []
     if msg.is_dm and history_limit and history_room > 0:
         if ctx.is_test and ctx.test_transcript:
@@ -579,8 +615,11 @@ async def ask(ctx, msg):
         # The previous question too, so a follow-up ("and how do I set it?")
         # still finds the section the conversation is about.
         earlier = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
-        room = free_chars - sum(len(m["content"]) for m in history)
+        history_chars = sum(len(m["content"]) for m in history)
+        room = free_chars - min(history_chars, free_chars // 2)
         notes, titles = await asyncio.to_thread(reference_notes, f"{question} {earlier}", room)
+        if notes:
+            history = _trimmed(history, len(history), free_chars - len(notes))
         # Optional second opinion: the keyword gate matches words, not meaning
         # ("what time is it" matches a Clock section). A quick yes/no from the
         # model itself filters those -- only when there are notes to judge,

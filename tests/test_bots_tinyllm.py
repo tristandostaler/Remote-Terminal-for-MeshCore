@@ -343,6 +343,8 @@ _FAKE_LLAMA = textwrap.dedent(
                 raise ValueError("Requested tokens (900) exceed context window of 512")
             if text == "die":
                 os.kill(os.getpid(), 9)  # what the OOM killer does
+            if text == "hang":
+                time.sleep(60)
             if text == "config":
                 words = [str(self.kwargs["n_ctx"]), " ", str(self.repacking)]
             elif text == "slow":
@@ -1202,3 +1204,54 @@ class TestModelCheck:
             [{"role": "user", "content": "hi"}], max_tokens=4, temperature=0, deadline_seconds=2
         )
         assert runtime.status()["unloaded"]
+
+
+class TestReviewFixes:
+    def test_a_stuck_model_reloads_on_the_next_question(self, tmp_path, fake_llama):
+        """A timeout is not a crash: no 60 s retry pause, just a reload."""
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime)
+        with pytest.raises(llm.LlmWorkerTimeoutError):
+            _ask(runtime, "hang", deadline=0.1)
+        status = runtime.status()
+        assert status["state"] == "idle" and status["unloaded"]
+        assert _load(runtime) == "ready"
+        assert _ask(runtime, "hi") == "Hello"
+
+    async def test_history_keeps_its_room_when_no_notes_match(self, test_db, monkeypatch):
+        long_turns = []
+        for n in range(3):
+            long_turns += [
+                (f"ask question {n} " + "x" * 200, False, 60 - n * 5),
+                (f"answer {n} " + "y" * 60, True, 59 - n * 5),
+            ]
+        await _store(ALICE, long_turns)
+        runtime = _HistoryAwareRuntime()
+        await TestDmMemory()._dm(monkeypatch, runtime, "ask and now")
+        # All three earlier turns fit; before, half the room sat reserved for notes.
+        assert len(runtime.asked[0][0]) == 1 + 6 + 1
+
+    async def test_the_notes_folder_exists_after_the_first_run(
+        self, test_db, monkeypatch, tmp_path
+    ):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        seen = []
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: seen.append(1))
+        await _run(monkeypatch, _FakeRuntime(state="downloading"), BotTestRequest(text="ask"))
+        assert seen, "a bare `ask` creates the notes folder"
+
+    def test_settings_are_grouped_and_ordered(self):
+        schema = get_library_entry("tinyllm")["settings_schema"]
+        sections = [f["label"] for f in schema if f["type"] == "section"]
+        assert sections == [
+            "Model",
+            "Prompt",
+            "Answers",
+            "Memory & reference notes",
+            "Performance & memory use",
+        ]
+        by_key = {f["key"]: f for f in schema}
+        assert by_key["system_prompt"]["type"] == "textarea"
+        assert by_key["check_notes_with_model"]["show_when"] == {"key": "use_docs", "value": "true"}
+        assert schema[0]["type"] == "section"

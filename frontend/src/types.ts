@@ -1666,7 +1666,18 @@ interface BotSettingsSchemaFieldBase {
 }
 
 export interface BotSettingsValueField extends BotSettingsSchemaFieldBase {
-  type: 'text' | 'password' | 'int' | 'float' | 'number' | 'bool' | 'select' | 'url';
+  /** `textarea`: multi-line text. `section`: a heading that groups the fields after it (no value). */
+  type:
+    | 'text'
+    | 'textarea'
+    | 'password'
+    | 'int'
+    | 'float'
+    | 'number'
+    | 'bool'
+    | 'select'
+    | 'url'
+    | 'section';
   min?: number;
   max?: number;
   /** `description`, when present, is shown under a select for the chosen option. */

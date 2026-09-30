@@ -476,6 +476,12 @@ class LlmWorkerDiedError(RuntimeError):
     """The model process stopped mid-answer; the message says why, in plain words."""
 
 
+class LlmWorkerTimeoutError(LlmWorkerDiedError):
+    """The model process did not answer in time and was stopped. Unlike a
+    crash this says nothing about the model being unusable -- a slow CPU or a
+    long prompt -- so the next question simply reloads it, with no retry pause."""
+
+
 # The child process: how long a load may take (a cold read of a 1 GB model from
 # an SD card) and how long past its own deadline an answer may be late before
 # the child is presumed stuck and killed.
@@ -564,7 +570,7 @@ class _ModelProcess:
             line = ""
         if line is None:
             self.close()
-            raise LlmWorkerDiedError(f"the model did not answer within {timeout:.0f} s")
+            raise LlmWorkerTimeoutError(f"the model did not answer within {timeout:.0f} s")
         if not line:
             returncode = self._wait()
             self.close()
@@ -964,6 +970,12 @@ class LlmRuntime:
                 raise RuntimeError("model is not loaded")
             try:
                 reply = send(proc)
+            except LlmWorkerTimeoutError as exc:
+                # Stuck mid-request, so it was stopped; reload on the next question.
+                self._proc = None
+                self._set(state="idle", unloaded=True)
+                logger.warning("tinyllm bot: %s; it reloads on the next question", exc)
+                raise
             except LlmWorkerDiedError as exc:
                 self._proc = None
                 self._set(

@@ -240,17 +240,58 @@ function SchemaField({
     );
   }
 
+  if (field.type === 'section') {
+    return (
+      <div className="pt-2 first:pt-0 border-t border-border first:border-t-0">
+        <div className="text-[0.6875rem] uppercase tracking-wider text-muted-foreground font-medium pt-2">
+          {field.label}
+        </div>
+        {field.help && (
+          <div className="text-[0.6875rem] text-muted-foreground mt-0.5">{field.help}</div>
+        )}
+      </div>
+    );
+  }
+
+  if (field.type === 'textarea') {
+    const inputId = `bot-setting-${field.key}`;
+    return (
+      <div>
+        <label htmlFor={inputId} className="block text-xs text-muted-foreground mb-1">
+          {field.label}
+        </label>
+        <textarea
+          id={inputId}
+          value={String(current)}
+          onChange={(e) => onChange(e.target.value)}
+          rows={4}
+          className="w-full rounded-md border border-input bg-transparent px-2.5 py-1.5 text-[0.8125rem] resize-y"
+        />
+        {field.help && (
+          <div className="text-[0.6875rem] text-muted-foreground mt-1">{field.help}</div>
+        )}
+      </div>
+    );
+  }
+
   if (field.type === 'bool') {
     return (
-      <label className="flex items-center gap-2.5 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={Boolean(current)}
-          onChange={(e) => onChange(e.target.checked)}
-          className="w-4 h-4 rounded border-input accent-primary"
-        />
-        <span className="text-[0.8125rem]">{field.label}</span>
-      </label>
+      <div>
+        <label className="flex items-center gap-2.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={Boolean(current)}
+            onChange={(e) => onChange(e.target.checked)}
+            className="w-4 h-4 rounded border-input accent-primary"
+          />
+          <span className="text-[0.8125rem]">{field.label}</span>
+        </label>
+        {field.help && (
+          <div className="text-[0.6875rem] text-muted-foreground mt-1 ml-[1.625rem]">
+            {field.help}
+          </div>
+        )}
+      </div>
     );
   }
 

@@ -180,7 +180,12 @@ operators).
 - `placeholders.py` — `{total_contacts}`-style tokens for scheduled messages.
 - `library/` — built-in bots as real `.py` files under `library/code/`, each
   self-describing via a module-level `BOT_META` dict (metadata +
-  `settings_schema`). Both descriptions are required: `description` is the one
+  `settings_schema`). Field types the Settings tab renders: `text`,
+  `textarea` (multi-line), `password`, `int`/`float`/`number`, `bool`
+  (its `help` shows under the switch), `select` (options may carry a
+  `description`, shown for the chosen one), `url`, `generated_url`, and
+  `section` -- a heading with no value that groups the fields after it;
+  `show_when: {key, value}` compares the string form (`"true"` for a bool). Both descriptions are required: `description` is the one
   line the bots list shows, `long_description` the 3-5 lines the editor's
   Settings tab shows under it. Seeding backfills an empty `long_description`
   without a version bump (only an empty one — never over an operator's text). Seeded at startup (`ensure_seeded`): inserts are
