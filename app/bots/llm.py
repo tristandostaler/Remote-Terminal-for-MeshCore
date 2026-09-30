@@ -1,8 +1,8 @@
 """Tiny on-device language models for the ``tinyllm`` bot.
 
 The built-in ``tinyllm`` bot (``library/code/tinyllm.py``) answers questions with a
-small GGUF model run in-process by ``llama-cpp-python`` — no Ollama, no server,
-no GPU. This module owns what must outlive a single bot run:
+small GGUF model run by ``llama-cpp-python`` — no Ollama, no server, no GPU.
+This module owns what must outlive a single bot run:
 
 * **The catalog** (:data:`CATALOG`): every model the bot's Settings dropdown
   offers, with its download size, memory footprint, speed and quality notes.
@@ -11,9 +11,17 @@ no GPU. This module owns what must outlive a single bot run:
   that gets downloaded can never disagree.
 * **The loaded model** (:data:`llm_runtime`): a process-wide singleton. Bot code
   is re-exec'd whenever the operator edits or reconfigures it, so a model held in
-  the bot's own namespace would be reloaded — and a few hundred MB re-read —
-  on every settings save. Here it is loaded once and swapped only when the
-  selected model changes.
+  the bot's own namespace would be reloaded on every settings save.
+
+The model itself runs in a **child process** (``python -m app.bots.llm``, see
+:func:`_worker_main`), never in the server: the child raises its own
+``oom_score_adj`` to the maximum, so when memory runs out the kernel kills the
+model and the radio server keeps running. The server never imports llama.cpp.
+
+It is also **unloaded when idle** (the child exits) after a configurable number
+of minutes, so the memory is only taken while someone is actually talking to
+the bot; the next question reloads it, which is quick once the file is in the
+page cache.
 
 Every bot run is killed after ``BOT_EXECUTION_TIMEOUT`` (10 s), while a first
 download is hundreds of MB. So preparation (download, then load) always runs in
@@ -21,17 +29,24 @@ a background thread and a run only *starts* it and reports progress; generation
 streams tokens and stops at a deadline the caller keeps inside the timeout.
 
 ``llama-cpp-python`` is the optional ``llm`` extra (``uv sync --extra llm``).
-Nothing imports it until a model is loaded, so the app runs without it.
+Only the child process imports it, so the app runs without it.
 """
 
 from __future__ import annotations
 
+import contextlib
 import importlib
+import importlib.util
+import json
 import logging
 import os
+import select
 import shutil
+import subprocess
+import sys
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,9 +57,66 @@ DOWNLOAD_CHUNK_BYTES = 1 << 20
 # Headroom kept free after a download, so a model never fills the disk the
 # SQLite database lives on (the same concern as the AEIC bundle on an SD card).
 DISK_HEADROOM_BYTES = 512 * 1024 * 1024
-# Context window. Mesh prompts and replies are a couple hundred characters, so
-# 1024 tokens leaves room for the system prompt and keeps the KV cache small.
-CONTEXT_TOKENS = 1024
+# Memory settings. Measured on a model with SmolLM2 135M Q8_0's exact shape:
+# ~200 MB in total, of which only ~45 MB cannot be reclaimed.
+#
+# Context window: a mesh prompt (system prompt + a question clipped to 500
+# characters) plus a 160-token answer fits in 512 tokens; the KV cache scales
+# with it, and 1024 cost 16 MB more for nothing.
+CONTEXT_TOKENS = 512
+# Prompt batch size: the compute buffer scales with it. Mesh prompts are short,
+# so small batches cost no speed worth noticing.
+BATCH_TOKENS = 64
+# The weights are memory-mapped (llama.cpp's default, kept explicit): they sit
+# in the page cache, which the kernel can drop and re-read under pressure,
+# instead of in process memory. Reading them in instead turned 156 MB of
+# reclaimable cache into 198 MB of memory nothing can take back.
+USE_MMAP = True
+# Free memory a load must leave behind, on top of the model file and its own
+# overhead, so the radio server and the OS never get squeezed. A load that does
+# not fit is refused with a reply rather than risking the OOM killer (which
+# takes the whole server with it) or a Pi thrashing its SD card.
+LOAD_OVERHEAD_MB = 64
+MEMORY_RESERVE_MB = 128
+
+
+@contextlib.contextmanager
+def _weight_repacking(enabled: bool) -> Iterator[None]:
+    """Let llama.cpp repack weights at load time, or keep them as the file has them.
+
+    On ARM CPUs with dot-product instructions (a Pi 5; not a Pi 4), llama.cpp
+    rewrites Q8_0, Q4_0 and Q4_K weights into an interleaved layout that
+    multiplies faster -- in a second, anonymous copy, while the memory-mapped
+    original stays resident too. That doubles the unreclaimable footprint of
+    the very models meant for small boards (x86 does the same for Q4_0: a
+    stand-in SmolLM2 135M Q4_0 measured 102 MB unreclaimable with repacking,
+    45 MB without). Off by default; the bot's "faster ARM layout" setting
+    turns it back on.
+
+    ``Llama()`` takes no argument for it, but builds its model params from
+    ``llama_model_default_params()`` at load, so that one call is wrapped for
+    the duration of the load. Loads are serialized under the generate lock.
+    """
+    import llama_cpp.llama_cpp as low  # type: ignore[import-not-found]
+
+    original = low.llama_model_default_params
+    fields = {name for name, *_ in getattr(low.llama_model_params, "_fields_", ())}
+    if enabled or "use_extra_bufts" not in fields:
+        yield
+        return
+
+    def without_repacking() -> Any:
+        params = original()
+        params.use_extra_bufts = False
+        return params
+
+    low.llama_model_default_params = without_repacking
+    try:
+        yield
+    finally:
+        low.llama_model_default_params = original
+
+
 # A failed download/load is retried on the next question after this long.
 RETRY_AFTER_SECONDS = 60
 
@@ -96,9 +168,26 @@ def _fmt_mb(mb: int) -> str:
 
 
 # Sizes are the published GGUF file sizes; RAM is file + KV cache for
-# CONTEXT_TOKENS + runtime overhead, rounded up. Speeds are rough CPU figures
-# for a Raspberry Pi 5 / an x86 mini-PC; a Pi 4 is about half.
+# CONTEXT_TOKENS + runtime overhead, rounded up (the two SmolLM2 135M rows are
+# measured). Speeds are rough CPU figures for a Raspberry Pi 5 / an x86
+# mini-PC; a Pi 4 is about half.
 CATALOG: tuple[ModelSpec, ...] = (
+    ModelSpec(
+        key="smollm2-135m-q4",
+        name="SmolLM2 135M (Q4, smallest)",
+        repo="bartowski/SmolLM2-135M-Instruct-GGUF",
+        filename="SmolLM2-135M-Instruct-Q4_K_M.gguf",
+        params="135M",
+        quant="Q4_K_M",
+        download_mb=105,
+        ram_mb=180,
+        speed="very fast (~45 tok/s Pi 5, 100+ tok/s x86)",
+        quality="Toy: grammatical but often wrong or off-topic",
+        notes=(
+            "The lightest option, for a Pi with 1 GB or less: the Q8 build's model, "
+            "compressed harder, so answers are slightly rougher."
+        ),
+    ),
     ModelSpec(
         key="smollm2-135m",
         name="SmolLM2 135M",
@@ -107,7 +196,7 @@ CATALOG: tuple[ModelSpec, ...] = (
         params="135M",
         quant="Q8_0",
         download_mb=145,
-        ram_mb=250,
+        ram_mb=210,
         speed="very fast (~40 tok/s Pi 5, 100+ tok/s x86)",
         quality="Toy: grammatical but often wrong or off-topic",
         notes="Smallest option; fine for playful one-liners, not for facts.",
@@ -231,26 +320,210 @@ def resolve_spec(settings: dict[str, Any]) -> ModelSpec:
     )
 
 
+def available_memory_mb() -> int | None:
+    """Memory a new allocation can get, in MB, or ``None`` when unknown.
+
+    The lower of the kernel's ``MemAvailable`` (free + reclaimable cache; swap is
+    deliberately not counted) and what is left under a container memory limit
+    (cgroup v2, then v1): in Docker the host can have plenty free while the
+    container is one allocation away from being OOM-killed.
+    """
+    candidates: list[int] = []
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                candidates.append(int(line.split()[1]) >> 10)
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+    for limit_file, usage_file in (
+        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+        (
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+        ),
+    ):
+        try:
+            limit = Path(limit_file).read_text().strip()
+            usage = int(Path(usage_file).read_text().strip())
+        except (OSError, ValueError):
+            continue
+        # "max" (v2) or a huge sentinel (v1) means no limit.
+        if limit.isdigit() and int(limit) < (1 << 60):
+            candidates.append(max(0, int(limit) - usage) >> 20)
+        break
+    return min(candidates) if candidates else None
+
+
 class LlmBusyError(RuntimeError):
     """Another question is being answered; the model runs one at a time."""
 
 
-class LlmRuntime:
-    """The process-wide model: background preparation, serialized generation."""
+class LlmPromptTooLongError(RuntimeError):
+    """The prompt does not fit the context window (emoji cost several tokens)."""
 
-    def __init__(self, model_dir: str | Path | None = None) -> None:
+
+class LlmWorkerDiedError(RuntimeError):
+    """The model process stopped mid-answer; the message says why, in plain words."""
+
+
+# The child process: how long a load may take (a cold read of a 1 GB model from
+# an SD card) and how long past its own deadline an answer may be late before
+# the child is presumed stuck and killed.
+LOAD_TIMEOUT_SECONDS = 120
+ANSWER_GRACE_SECONDS = 3
+# How often the idle reaper looks for a model to unload.
+IDLE_CHECK_SECONDS = 10
+DEFAULT_IDLE_UNLOAD_SECONDS = 300
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _exit_reason(returncode: int | None) -> str:
+    """Why the model process ended, for a mesh reply."""
+    if returncode == -9:
+        return "the model was stopped by the system, most likely because memory ran out"
+    if returncode == -4:
+        return "the model crashed: this llama.cpp build uses CPU instructions this machine lacks"
+    if returncode is not None and returncode < 0:
+        return f"the model process was killed by signal {-returncode}"
+    return f"the model process exited unexpectedly (code {returncode})"
+
+
+class _ModelProcess:
+    """One loaded model, in a child process spoken to over JSON lines.
+
+    Requests go to the child's stdin, one per line; each gets exactly one reply
+    line. A reply that never comes -- EOF, or silence past the timeout -- means
+    the child is dead or stuck, and it is killed so the next load starts clean.
+    """
+
+    def __init__(
+        self, path: Path, *, threads: int, repack: bool, log_path: Path, env: dict | None
+    ) -> None:
+        child_env = dict(os.environ if env is None else env)
+        child_env["PYTHONPATH"] = os.pathsep.join(
+            p for p in (str(_REPO_ROOT), child_env.get("PYTHONPATH", "")) if p
+        )
+        self._log = log_path.open("w")
+        self._proc = subprocess.Popen(
+            [sys.executable, "-m", "app.bots.llm", "--worker"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self._log,
+            cwd=str(_REPO_ROOT),
+            env=child_env,
+            text=True,
+            bufsize=1,
+        )
+        reply = self._request(
+            {
+                "cmd": "load",
+                "path": str(path),
+                "n_ctx": CONTEXT_TOKENS,
+                "n_batch": BATCH_TOKENS,
+                "threads": threads,
+                "use_mmap": USE_MMAP,
+                "repack": repack,
+            },
+            LOAD_TIMEOUT_SECONDS,
+        )
+        if not reply.get("ok"):
+            self.close()
+            raise RuntimeError(reply.get("error") or "the model failed to load")
+
+    @property
+    def pid(self) -> int:
+        return self._proc.pid
+
+    def _request(self, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        stdin, stdout = self._proc.stdin, self._proc.stdout
+        assert stdin is not None and stdout is not None
+        try:
+            stdin.write(json.dumps(payload) + "\n")
+            stdin.flush()
+            ready, _, _ = select.select([stdout], [], [], timeout)
+            line = stdout.readline() if ready else None
+        except (BrokenPipeError, OSError, ValueError):
+            line = ""
+        if line is None:
+            self.close()
+            raise LlmWorkerDiedError(f"the model did not answer within {timeout:.0f} s")
+        if not line:
+            returncode = self._wait()
+            self.close()
+            raise LlmWorkerDiedError(_exit_reason(returncode))
+        return json.loads(line)
+
+    def _wait(self) -> int | None:
+        try:
+            return self._proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def generate(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        deadline: float,
+    ) -> dict[str, Any]:
+        return self._request(
+            {
+                "cmd": "generate",
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "deadline": deadline,
+            },
+            deadline + ANSWER_GRACE_SECONDS,
+        )
+
+    def close(self) -> None:
+        """Stop the child (closing stdin is enough; kill if it lingers)."""
+        with contextlib.suppress(OSError, ValueError):
+            if self._proc.stdin:
+                self._proc.stdin.close()
+        if self._proc.poll() is None:
+            try:
+                self._proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._wait()
+        with contextlib.suppress(OSError, ValueError):
+            if self._proc.stdout:
+                self._proc.stdout.close()
+        self._log.close()
+
+
+class LlmRuntime:
+    """The process-wide model: background preparation, serialized generation,
+    a child process holding the weights, and unloading when idle."""
+
+    def __init__(self, model_dir: str | Path | None = None, worker_env: dict | None = None) -> None:
         self._model_dir = Path(model_dir) if model_dir is not None else None
+        # Environment for the model process (tests put a fake llama_cpp first).
+        self._worker_env = worker_env
         self._state_lock = threading.Lock()
-        # llama.cpp contexts are not safe to share between threads.
+        self._state_changed = threading.Condition(self._state_lock)
+        # One request at a time to the model process.
         self._generate_lock = threading.Lock()
-        self._llm: Any = None
+        self._proc: _ModelProcess | None = None
         self._spec: ModelSpec | None = None
-        self._state = "idle"  # idle | downloading | loading | ready | error
+        # idle | downloading | loading | ready | error
+        self._state = "idle"
         self._error = ""
         self._done_bytes = 0
         self._total_bytes = 0
         self._worker: threading.Thread | None = None
+        # (spec, threads, repack) of the current/last load: a change reloads.
+        self._load_key: tuple[ModelSpec, int, bool] | None = None
         self._failed_at = 0.0
+        self._last_used = 0.0
+        self._unloaded = False
+        self._idle_unload_seconds = DEFAULT_IDLE_UNLOAD_SECONDS
+        self._reaper: threading.Thread | None = None
 
     # -- inspection ------------------------------------------------------
     @property
@@ -270,6 +543,8 @@ class LlmRuntime:
                 "error": self._error,
                 "downloaded_bytes": self._done_bytes,
                 "total_bytes": self._total_bytes,
+                "unloaded": self._unloaded,
+                "worker_pid": self._proc.pid if self._proc else None,
             }
 
     def describe(self) -> str:
@@ -287,66 +562,115 @@ class LlmRuntime:
             return f"{name} is ready"
         if s["state"] == "error":
             return f"{name} unavailable: {s['error']}"
+        if s["unloaded"]:
+            return f"{name} is unloaded to save memory; the next question reloads it"
         return "No model loaded"
 
     # -- preparation -----------------------------------------------------
-    def ensure(self, spec: ModelSpec, threads: int = 0) -> str:
+    def ensure(
+        self,
+        spec: ModelSpec,
+        threads: int = 0,
+        repack: bool = False,
+        idle_unload_seconds: int = DEFAULT_IDLE_UNLOAD_SECONDS,
+    ) -> str:
         """Make ``spec`` the loaded model, in the background. Returns the state.
 
         ``ready`` means :meth:`generate` can be called now. A preparation that is
         already running is never interrupted: asking for another model meanwhile
         returns the current state, and the switch happens on a later call.
+        Changing ``threads`` or ``repack`` reloads the model with them. An
+        unloaded model is reloaded. ``idle_unload_seconds`` is how long an unused
+        model stays loaded (0: unload right after each answer).
         """
+        load_key = (spec, threads, repack)
         with self._state_lock:
+            self._idle_unload_seconds = max(0, int(idle_unload_seconds))
             busy = self._state in ("downloading", "loading")
-            if busy or (self._state == "ready" and self._spec == spec):
+            if busy or (self._state == "ready" and self._load_key == load_key):
                 return self._state
             # Retry a failed model, but not on every message.
             failed_recently = time.monotonic() - self._failed_at < RETRY_AFTER_SECONDS
-            if self._state == "error" and self._spec == spec and failed_recently:
+            if self._state == "error" and self._load_key == load_key and failed_recently:
                 return self._state
             self._spec = spec
+            self._load_key = load_key
             self._state = "downloading"
             self._error = ""
             self._done_bytes = 0
             self._total_bytes = spec.download_mb << 20
             self._worker = threading.Thread(
-                target=self._prepare, args=(spec, threads), name="llm-prepare", daemon=True
+                target=self._prepare,
+                args=(spec, threads, repack),
+                name="llm-prepare",
+                daemon=True,
             )
             self._worker.start()
             return self._state
 
+    def wait_ready(self, timeout: float) -> str:
+        """Block until a download/load settles or ``timeout`` passes; the state."""
+        with self._state_changed:
+            self._state_changed.wait_for(
+                lambda: self._state not in ("downloading", "loading"), timeout
+            )
+            return self._state
+
     def _set(self, **fields: Any) -> None:
-        with self._state_lock:
+        with self._state_changed:
             for name, value in fields.items():
                 setattr(self, f"_{name}", value)
+            self._state_changed.notify_all()
 
-    def _prepare(self, spec: ModelSpec, threads: int) -> None:
+    def _prepare(self, spec: ModelSpec, threads: int, repack: bool = False) -> None:
         try:
             # The package may have been installed since the server started
             # (run.sh compiles it in the background), so drop stale finder caches.
+            # Only looked up here: the child process is what imports it.
             importlib.invalidate_caches()
-            try:
-                from llama_cpp import Llama  # type: ignore[import-not-found]
-            except ImportError as exc:
-                raise RuntimeError(self._missing_package_reason()) from exc
+            # (A test's worker_env brings its own llama_cpp for the child.)
+            if importlib.util.find_spec("llama_cpp") is None and self._worker_env is None:
+                raise RuntimeError(self._missing_package_reason())
             path = self._download(spec)
             self._set(state="loading")
             # Drop the previous model first, so a switch never holds two in RAM.
             with self._generate_lock:
-                self._llm = None
-                llm = Llama(
-                    model_path=str(path),
-                    n_ctx=CONTEXT_TOKENS,
-                    n_threads=threads or None,
-                    verbose=False,
+                self._stop_process()
+                self._check_memory(spec, path, repack)
+                # One thread count for both phases: llama.cpp otherwise runs the
+                # prompt on every core, and a Pi pinned at 100% on a marginal
+                # power supply browns out and reboots.
+                n_threads = threads or max(1, (os.cpu_count() or 2) // 2)
+                proc = _ModelProcess(
+                    path,
+                    threads=n_threads,
+                    repack=repack,
+                    log_path=self.model_dir / ".worker.log",
+                    env=self._worker_env,
                 )
-                self._llm = llm
-            self._set(state="ready")
-            logger.info("tinyllm bot: %s loaded from %s", spec.name, path)
+                self._proc = proc
+            self._set(state="ready", unloaded=False, last_used=time.monotonic())
+            self._start_reaper()
+            logger.info("tinyllm bot: %s loaded in process %d", spec.name, proc.pid)
         except Exception as exc:  # noqa: BLE001 - surfaced through status()
             logger.warning("tinyllm bot: preparing %s failed: %s", spec.name, exc)
             self._set(state="error", error=str(exc)[:200], failed_at=time.monotonic())
+
+    def _check_memory(self, spec: ModelSpec, path: Path, repack: bool = False) -> None:
+        """Refuse a load that would not leave the system room to breathe.
+
+        With repacking on, the weights may be held twice (see _weight_repacking).
+        """
+        available = available_memory_mb()
+        if available is None:
+            return
+        weights_mb = (path.stat().st_size >> 20) * (2 if repack else 1)
+        needed = weights_mb + LOAD_OVERHEAD_MB + MEMORY_RESERVE_MB
+        if available < needed:
+            raise RuntimeError(
+                f"not enough free memory for {spec.name}: needs about {needed} MB, "
+                f"{available} MB available. Pick a smaller model"
+            )
 
     def _missing_package_reason(self) -> str:
         """Why llama_cpp will not import, using the markers ``run.sh`` leaves.
@@ -356,7 +680,7 @@ class LlmRuntime:
         picked up by the next retry, so "still installing" is worth saying.
         """
         if (self.model_dir / ".installing").exists():
-            return "llama-cpp-python is still being installed (compiling, up to 20 min on a Pi)"
+            return "llama-cpp-python is still being installed (compiling once; up to an hour on a small Pi)"
         if (self.model_dir / ".install-failed").exists():
             return "installing llama-cpp-python failed; see .install.log in the model folder"
         return INSTALL_HINT
@@ -396,6 +720,50 @@ class LlmRuntime:
         os.replace(partial, target)
         return target
 
+    # -- unloading -------------------------------------------------------
+    def _stop_process(self) -> None:
+        """Stop the model process, if any. Caller holds the generate lock."""
+        proc, self._proc = self._proc, None
+        if proc is not None:
+            proc.close()
+
+    def unload_if_idle(self, now: float | None = None) -> bool:
+        """Unload a model unused for the idle timeout. Returns whether it did."""
+        now = time.monotonic() if now is None else now
+        with self._state_lock:
+            idle_for = now - self._last_used
+            due = (
+                self._state == "ready"
+                and self._idle_unload_seconds > 0
+                and idle_for >= self._idle_unload_seconds
+            )
+        # Never wait on an answer in progress: it will be idle again later.
+        if not due or not self._generate_lock.acquire(blocking=False):
+            return False
+        try:
+            # A reload may have started between the check and the lock.
+            if self.status()["state"] != "ready":
+                return False
+            self._stop_process()
+            self._set(state="idle", unloaded=True)
+        finally:
+            self._generate_lock.release()
+        logger.info("tinyllm bot: model unused for %d s, unloaded to free memory", idle_for)
+        return True
+
+    def _start_reaper(self) -> None:
+        with self._state_lock:
+            if self._reaper is not None and self._reaper.is_alive():
+                return
+            self._reaper = threading.Thread(target=self._reap, name="llm-idle", daemon=True)
+            self._reaper.start()
+
+    def _reap(self) -> None:
+        while True:
+            time.sleep(IDLE_CHECK_SECONDS)
+            with contextlib.suppress(Exception):
+                self.unload_if_idle()
+
     # -- generation ------------------------------------------------------
     def generate(
         self,
@@ -407,34 +775,118 @@ class LlmRuntime:
     ) -> str:
         """Answer ``messages`` (blocking). Stops at ``deadline_seconds``.
 
-        Tokens are streamed so a slow host still returns what it produced in
-        time rather than nothing. Raises :class:`LlmBusyError` when another
-        answer is in progress and ``RuntimeError`` when no model is ready.
+        Tokens are streamed in the model process so a slow host still returns
+        what it produced in time rather than nothing. Raises
+        :class:`LlmBusyError` when another answer is in progress,
+        :class:`LlmPromptTooLongError` for a prompt over the context window,
+        :class:`LlmWorkerDiedError` when the model process died (out of memory,
+        typically), and ``RuntimeError`` when no model is ready.
         """
-        started = time.monotonic()
         if not self._generate_lock.acquire(timeout=1.0):
             raise LlmBusyError("busy answering someone else")
         try:
-            llm = self._llm
-            if llm is None or self.status()["state"] != "ready":
+            proc = self._proc
+            if proc is None or self.status()["state"] != "ready":
                 raise RuntimeError("model is not loaded")
-            pieces: list[str] = []
-            stream = llm.create_chat_completion(
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                repeat_penalty=1.1,
-                stream=True,
-            )
-            for chunk in stream:
-                delta = chunk["choices"][0].get("delta", {}).get("content")
-                if delta:
-                    pieces.append(delta)
-                if time.monotonic() - started > deadline_seconds:
-                    break
-            return "".join(pieces).strip()
+            try:
+                reply = proc.generate(
+                    messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    deadline=deadline_seconds,
+                )
+            except LlmWorkerDiedError as exc:
+                self._proc = None
+                self._set(state="error", error=str(exc)[:200], failed_at=time.monotonic())
+                logger.warning("tinyllm bot: %s", exc)
+                raise
+            if reply.get("kind") == "too_long":
+                raise LlmPromptTooLongError(reply.get("error", ""))
+            if not reply.get("ok"):
+                raise RuntimeError(reply.get("error") or "generation failed")
+            return str(reply.get("text", "")).strip()
         finally:
+            self._set(last_used=time.monotonic())
+            if self._idle_unload_seconds == 0 and self._proc is not None:
+                self._stop_process()
+                self._set(state="idle", unloaded=True)
             self._generate_lock.release()
 
 
 llm_runtime = LlmRuntime()
+
+
+# -- the model process -------------------------------------------------------
+
+
+def _stream_answer(llm: Any, request: dict[str, Any]) -> str:
+    started = time.monotonic()
+    pieces: list[str] = []
+    try:
+        # llama-cpp-python checks the prompt length on the first read; other
+        # versions may do it on the call itself, so both sit inside the try.
+        stream = llm.create_chat_completion(
+            messages=request["messages"],
+            max_tokens=request["max_tokens"],
+            temperature=request["temperature"],
+            repeat_penalty=1.1,
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk["choices"][0].get("delta", {}).get("content")
+            if delta:
+                pieces.append(delta)
+            if time.monotonic() - started > request["deadline"]:
+                break
+    except ValueError as exc:
+        if "context window" in str(exc):
+            raise LlmPromptTooLongError(str(exc)) from exc
+        raise
+    return "".join(pieces)
+
+
+def _worker_main() -> int:
+    """Entry point of the model process: ``python -m app.bots.llm --worker``."""
+    # First in line for the OOM killer, so running out of memory costs the model,
+    # not the radio server. Raising one's own score needs no privilege.
+    with contextlib.suppress(OSError):
+        Path("/proc/self/oom_score_adj").write_text("1000")
+    # Replies go to the real stdout; anything a native library prints goes to
+    # stderr (the worker log) instead of corrupting the protocol.
+    replies = os.fdopen(os.dup(1), "w", buffering=1)
+    os.dup2(2, 1)
+    llm: Any = None
+    for line in sys.stdin:
+        request = json.loads(line)
+        try:
+            if request["cmd"] == "load":
+                from llama_cpp import Llama  # type: ignore[import-not-found]
+
+                with _weight_repacking(request["repack"]):
+                    llm = Llama(
+                        model_path=request["path"],
+                        n_ctx=request["n_ctx"],
+                        n_batch=request["n_batch"],
+                        n_threads=request["threads"],
+                        n_threads_batch=request["threads"],
+                        use_mmap=request["use_mmap"],
+                        use_mlock=False,
+                        verbose=False,
+                    )
+                reply: dict[str, Any] = {"ok": True}
+            elif request["cmd"] == "generate":
+                if llm is None:
+                    raise RuntimeError("model is not loaded")
+                reply = {"ok": True, "text": _stream_answer(llm, request)}
+            else:
+                reply = {"ok": False, "error": f"unknown command {request['cmd']!r}"}
+        except LlmPromptTooLongError as exc:
+            reply = {"ok": False, "kind": "too_long", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - reported to the server
+            reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+        replies.write(json.dumps(reply) + "\n")
+    return 0
+
+
+if __name__ == "__main__" and "--worker" in sys.argv:
+    sys.exit(_worker_main())

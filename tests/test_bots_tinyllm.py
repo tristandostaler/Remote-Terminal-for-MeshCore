@@ -1,8 +1,14 @@
 """The ``tinyllm`` bot and its tiny-LLM runtime (``app/bots/llm.py``).
 
 No test downloads or runs a real model: the runtime singleton is stubbed for
-the bot tests, and the runtime tests feed it a fake llama object.
+the bot tests, and the runtime tests start the real model *process* with a fake
+``llama_cpp`` package first on its path (see ``fake_llama``).
 """
+
+import os
+import textwrap
+import time
+from pathlib import Path
 
 import pytest
 
@@ -73,8 +79,16 @@ class _FakeRuntime:
         self.state = state
         self.answer = answer
         self.asked: list = []
+        self.state_after_wait = state
 
-    def ensure(self, spec, threads=0):
+    def ensure(self, spec, threads=0, repack=False, idle_unload_seconds=300):
+        self.ensured = (spec, threads, repack)
+        self.idle_unload_seconds = idle_unload_seconds
+        return self.state
+
+    def wait_ready(self, timeout):
+        self.waited = timeout
+        self.state = self.state_after_wait
         return self.state
 
     def describe(self):
@@ -82,6 +96,8 @@ class _FakeRuntime:
 
     def generate(self, messages, **kwargs):
         self.asked.append((messages, kwargs))
+        if isinstance(self.answer, Exception):
+            raise self.answer
         return self.answer
 
 
@@ -142,6 +158,50 @@ class TestAskBot:
         )
         assert runtime.asked[0][0][0]["content"] == "Talk like a pirate."
 
+    async def test_too_long_question_gets_a_clear_reply(self, test_db, monkeypatch):
+        runtime = _FakeRuntime(answer=llm.LlmPromptTooLongError("exceed context window"))
+        replies = await _run(monkeypatch, runtime, BotTestRequest(text="ask " + "🙂" * 400))
+        assert replies == ["🤖 That question is too long for this model, try a shorter one."]
+
+    async def test_weight_repacking_is_off_unless_asked_for(self, test_db, monkeypatch):
+        runtime = _FakeRuntime()
+        await _run(monkeypatch, runtime, BotTestRequest(text="ask hi"))
+        assert runtime.ensured[2] is False
+        runtime = _FakeRuntime()
+        await _run(
+            monkeypatch, runtime, BotTestRequest(text="ask hi"), settings={"fast_arm_layout": True}
+        )
+        assert runtime.ensured[2] is True
+
+    async def test_a_reload_is_waited_for_and_answered_in_the_same_run(self, test_db, monkeypatch):
+        runtime = _FakeRuntime(state="loading")
+        runtime.state_after_wait = "ready"
+        replies = await _run(monkeypatch, runtime, BotTestRequest(text="ask hi", is_dm=True))
+        assert replies == ["Paris is the capital of France."]
+        assert runtime.waited <= 4
+        # The reload's time came out of the answer's budget, never past the run.
+        assert runtime.asked[0][1]["deadline_seconds"] <= 7.5
+
+    async def test_idle_unload_setting_reaches_the_runtime(self, test_db, monkeypatch):
+        runtime = _FakeRuntime()
+        await _run(monkeypatch, runtime, BotTestRequest(text="ask hi"))
+        assert runtime.idle_unload_seconds == 300
+        runtime = _FakeRuntime()
+        await _run(
+            monkeypatch,
+            runtime,
+            BotTestRequest(text="ask hi"),
+            settings={"unload_after_minutes": 0},
+        )
+        assert runtime.idle_unload_seconds == 0
+
+    async def test_a_killed_model_says_why(self, test_db, monkeypatch):
+        died = llm.LlmWorkerDiedError(llm._exit_reason(-9))
+        replies = await _run(
+            monkeypatch, _FakeRuntime(answer=died), BotTestRequest(text="ask hi", is_dm=True)
+        )
+        assert "memory ran out" in replies[0]
+
     async def test_dm_answer_has_no_mention(self, test_db, monkeypatch):
         replies = await _run(
             monkeypatch,
@@ -178,60 +238,192 @@ class TestAskBot:
         assert all(len(r.encode()) <= 156 for r in replies)
 
 
-class _FakeLlama:
-    def __init__(self, pieces):
-        self.pieces = pieces
+_FAKE_LLAMA = textwrap.dedent(
+    """
+    import os, time
+    from llama_cpp import llama_cpp as low
 
-    def create_chat_completion(self, **kwargs):
-        assert kwargs["stream"] is True
-        for piece in self.pieces:
-            yield {"choices": [{"delta": {"content": piece}}]}
+    class Llama:
+        def __init__(self, model_path, **kwargs):
+            if "broken" in model_path:
+                raise RuntimeError("bad model file")
+            self.kwargs = kwargs
+            self.repacking = low.llama_model_default_params().use_extra_bufts
+
+        def create_chat_completion(self, messages, **kwargs):
+            text = messages[-1]["content"]
+            if text == "too long":
+                raise ValueError("Requested tokens (900) exceed context window of 512")
+            if text == "die":
+                os.kill(os.getpid(), 9)  # what the OOM killer does
+            if text == "config":
+                words = [str(self.kwargs["n_ctx"]), " ", str(self.repacking)]
+            elif text == "slow":
+                words = iter(lambda: time.sleep(0.05) or "a", None)
+            else:
+                words = ["Hel", "lo"]
+            return ({"choices": [{"delta": {"content": w}}]} for w in words)
+    """
+)
+_FAKE_LOW = textwrap.dedent(
+    """
+    class _Params:
+        use_extra_bufts = True
+
+    class llama_model_params:
+        _fields_ = [("use_extra_bufts", bool)]
+
+    def llama_model_default_params():
+        return _Params()
+    """
+)
 
 
-class TestRuntime:
-    def _ready(self, tmp_path, pieces):
-        runtime = llm.LlmRuntime(model_dir=tmp_path)
-        runtime._llm = _FakeLlama(pieces)
-        runtime._spec = llm.CATALOG[0]
-        runtime._state = "ready"
-        return runtime
+@pytest.fixture
+def fake_llama(tmp_path):
+    package = tmp_path / "fake" / "llama_cpp"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(_FAKE_LLAMA)
+    (package / "llama_cpp.py").write_text(_FAKE_LOW)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(package.parent)
+    return env
 
-    def test_generate_joins_the_stream(self, tmp_path):
-        runtime = self._ready(tmp_path, ["Hel", "lo", " mesh"])
-        out = runtime.generate([], max_tokens=10, temperature=0.5, deadline_seconds=5)
-        assert out == "Hello mesh"
 
-    def test_generate_stops_at_the_deadline(self, tmp_path):
-        runtime = self._ready(tmp_path, ["a"] * 1000)
-        out = runtime.generate([], max_tokens=10, temperature=0.5, deadline_seconds=0)
-        assert out == "a"
+def _spec(filename="tiny.gguf"):
+    return llm.resolve_spec(
+        {"model": "custom", "custom_repo": "test/tiny", "custom_file": filename}
+    )
 
-    def test_generate_refuses_while_busy(self, tmp_path):
-        runtime = self._ready(tmp_path, ["a"])
+
+def _runtime(tmp_path, env, filename="tiny.gguf"):
+    """A runtime whose model file is already 'downloaded'."""
+    models = tmp_path / "models"
+    (models / "test__tiny").mkdir(parents=True, exist_ok=True)
+    (models / "test__tiny" / filename).write_bytes(b"gguf")
+    return llm.LlmRuntime(model_dir=models, worker_env=env)
+
+
+def _load(runtime, filename="tiny.gguf", **kwargs):
+    runtime.ensure(_spec(filename), **kwargs)
+    return runtime.wait_ready(30)
+
+
+def _ask(runtime, text, deadline=5.0):
+    return runtime.generate(
+        [{"role": "user", "content": text}],
+        max_tokens=16,
+        temperature=0.5,
+        deadline_seconds=deadline,
+    )
+
+
+class TestModelProcess:
+    """The model runs in a child process, so running out of memory costs the
+    model, never the radio server."""
+
+    def test_answers_through_the_child_process(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        assert _load(runtime) == "ready"
+        pid = runtime.status()["worker_pid"]
+        assert pid and pid != os.getpid()
+        assert _ask(runtime, "hi") == "Hello"
+
+    def test_child_volunteers_for_the_oom_killer(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime)
+        pid = runtime.status()["worker_pid"]
+        assert Path(f"/proc/{pid}/oom_score_adj").read_text().strip() == "1000"
+
+    def test_a_killed_model_is_reported_and_the_server_lives(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime)
+        with pytest.raises(llm.LlmWorkerDiedError, match="memory ran out"):
+            _ask(runtime, "die")
+        status = runtime.status()
+        assert status["state"] == "error" and "memory ran out" in status["error"]
+        assert status["worker_pid"] is None
+
+    def test_settings_reach_the_child(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime)
+        assert _ask(runtime, "config") == f"{llm.CONTEXT_TOKENS} False"
+        _load(runtime, repack=True)
+        assert _ask(runtime, "config") == f"{llm.CONTEXT_TOKENS} True"
+
+    def test_generation_stops_at_the_deadline(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime)
+        started = time.monotonic()
+        answer = _ask(runtime, "slow", deadline=0.3)
+        assert answer and set(answer) == {"a"}
+        assert time.monotonic() - started < 2
+
+    def test_prompt_over_the_context_window_is_its_own_error(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime)
+        with pytest.raises(llm.LlmPromptTooLongError):
+            _ask(runtime, "too long")
+        assert runtime.status()["state"] == "ready"
+
+    def test_a_model_that_fails_to_load_is_reported(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama, filename="broken.gguf")
+        assert _load(runtime, filename="broken.gguf") == "error"
+        assert "bad model file" in runtime.status()["error"]
+
+    def test_generate_refuses_while_busy(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime)
         runtime._generate_lock.acquire()
         try:
             with pytest.raises(llm.LlmBusyError):
-                runtime.generate([], max_tokens=10, temperature=0.5, deadline_seconds=5)
+                _ask(runtime, "hi")
         finally:
             runtime._generate_lock.release()
 
+
+class TestIdleUnload:
+    """The model only holds memory while someone is talking to the bot."""
+
+    def test_unloads_after_the_idle_timeout_and_reloads_on_demand(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime, idle_unload_seconds=300)
+        pid = runtime.status()["worker_pid"]
+        assert not runtime.unload_if_idle(now=time.monotonic() + 100)
+        assert runtime.unload_if_idle(now=time.monotonic() + 301)
+        status = runtime.status()
+        assert status["state"] == "idle" and status["unloaded"]
+        assert status["worker_pid"] is None
+        assert not Path(f"/proc/{pid}").exists(), "the model process is gone"
+        assert "unloaded to save memory" in runtime.describe()
+        assert _load(runtime) == "ready"
+        assert _ask(runtime, "hi") == "Hello"
+
+    def test_zero_unloads_after_every_answer(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime, idle_unload_seconds=0)
+        assert _ask(runtime, "hi") == "Hello"
+        assert runtime.status()["state"] == "idle"
+        assert runtime.status()["unloaded"]
+
+    def test_never_unloads_mid_answer(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime)
+        runtime._generate_lock.acquire()
+        try:
+            assert not runtime.unload_if_idle(now=time.monotonic() + 10_000)
+        finally:
+            runtime._generate_lock.release()
+        assert runtime.status()["state"] == "ready"
+
+
+class TestRuntime:
     def test_missing_llama_cpp_is_reported(self, tmp_path, monkeypatch):
-        import builtins
-
-        real_import = builtins.__import__
-
-        def no_llama(name, *args, **kwargs):
-            if name == "llama_cpp":
-                raise ImportError(name)
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", no_llama)
+        monkeypatch.setattr(llm.importlib.util, "find_spec", lambda name: None)
         runtime = llm.LlmRuntime(model_dir=tmp_path)
         assert runtime.ensure(llm.CATALOG[0]) == "downloading"
-        runtime._worker.join(timeout=5)
-        status = runtime.status()
-        assert status["state"] == "error"
-        assert "uv sync --extra llm" in status["error"]
+        assert runtime.wait_ready(5) == "error"
+        assert "uv sync --extra llm" in runtime.status()["error"]
         # Not retried on every message.
         assert runtime.ensure(llm.CATALOG[0]) == "error"
 
@@ -252,3 +444,63 @@ class TestRuntime:
         assert "failed" in runtime._missing_package_reason()
         (tmp_path / ".installing").touch()
         assert "still being installed" in runtime._missing_package_reason()
+
+
+class TestMemory:
+    """A model that does not fit is refused with a reason, never loaded: the
+    OOM killer would take the whole radio server with it."""
+
+    def _model(self, tmp_path, mb):
+        path = tmp_path / "m.gguf"
+        with path.open("wb") as handle:
+            handle.truncate(mb << 20)
+        return path
+
+    def test_refuses_when_memory_is_short(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(llm, "available_memory_mb", lambda: 250)
+        runtime = llm.LlmRuntime(model_dir=tmp_path)
+        with pytest.raises(RuntimeError, match="not enough free memory.*needs about 292 MB"):
+            runtime._check_memory(llm.CATALOG[0], self._model(tmp_path, 100))
+
+    def test_allows_when_it_fits_or_memory_is_unknown(self, tmp_path, monkeypatch):
+        runtime = llm.LlmRuntime(model_dir=tmp_path)
+        path = self._model(tmp_path, 100)
+        monkeypatch.setattr(llm, "available_memory_mb", lambda: 300)
+        runtime._check_memory(llm.CATALOG[0], path)
+        monkeypatch.setattr(llm, "available_memory_mb", lambda: None)
+        runtime._check_memory(llm.CATALOG[0], path)
+
+    def test_reads_this_machine(self):
+        available = llm.available_memory_mb()
+        assert available is None or available > 0
+
+    def test_the_smallest_model_comes_first(self):
+        assert llm.CATALOG[0].download_mb == min(spec.download_mb for spec in llm.CATALOG)
+        assert llm.CATALOG[0].ram_mb == min(spec.ram_mb for spec in llm.CATALOG)
+
+    def test_repacking_counts_the_weights_twice(self, tmp_path, monkeypatch):
+        runtime = llm.LlmRuntime(model_dir=tmp_path)
+        path = self._model(tmp_path, 100)
+        monkeypatch.setattr(llm, "available_memory_mb", lambda: 300)
+        runtime._check_memory(llm.CATALOG[0], path, repack=False)
+        with pytest.raises(RuntimeError, match="needs about 392 MB"):
+            runtime._check_memory(llm.CATALOG[0], path, repack=True)
+
+    def test_changing_threads_or_repacking_reloads(self, tmp_path, monkeypatch):
+        runtime = llm.LlmRuntime(model_dir=tmp_path)
+        monkeypatch.setattr(runtime, "_prepare", lambda *args: None)
+        spec = llm.CATALOG[0]
+        runtime._state, runtime._load_key = "ready", (spec, 0, False)
+        assert runtime.ensure(spec) == "ready"
+        assert runtime.ensure(spec, repack=True) == "downloading"
+        runtime._state = "ready"
+        assert runtime.ensure(spec, threads=2, repack=True) == "downloading"
+
+    def test_repacking_switch_reaches_llama_cpp(self):
+        low = pytest.importorskip("llama_cpp.llama_cpp")
+        assert low.llama_model_default_params().use_extra_bufts is True
+        with llm._weight_repacking(False):
+            assert low.llama_model_default_params().use_extra_bufts is False
+        assert low.llama_model_default_params().use_extra_bufts is True
+        with llm._weight_repacking(True):
+            assert low.llama_model_default_params().use_extra_bufts is True
