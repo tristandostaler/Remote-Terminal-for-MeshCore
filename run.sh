@@ -64,11 +64,20 @@ extra_args() {
   printf '%s' "$args"
 }
 
-# Cache under the data volume so recreating the container does not re-download
+# The data folder is wherever the database lives -- the same rule the app uses
+# for its model folders (app/config.py) -- so moving the database with
+# MESHCORE_DATABASE_PATH moves the caches below with it. Relative paths resolve
+# against the app folder, as they do for the app.
+abs_path() {
+  case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$APP_DIR/$1" ;; esac
+}
+DATA_DIR="$(dirname "$(abs_path "${MESHCORE_DATABASE_PATH:-data/meshcore.db}")")"
+
+# Cache under the data folder so recreating the container does not re-download
 # wheels -- or, for the LLM, recompile llama.cpp: uv caches the wheel it built.
 # Harmless if that path is not writable: uv falls back to its default cache and
 # only the speed-up is lost.
-export UV_CACHE_DIR="${UV_CACHE_DIR:-$APP_DIR/data/.uv-cache}"
+export UV_CACHE_DIR="$(abs_path "${UV_CACHE_DIR:-$DATA_DIR/.uv-cache}")"
 
 case "$(uname -m)" in
   x86_64 | amd64 | aarch64 | arm64) AEIC_ARCH_OK=1 ;;
@@ -113,8 +122,7 @@ fi
 #
 # Same non-fatal posture: any failure is logged and the server keeps running.
 
-LLM_DIR="$APP_DIR/${MESHCORE_LLM_MODEL_DIR:-data/models/llm}"
-case "${MESHCORE_LLM_MODEL_DIR:-}" in /*) LLM_DIR="$MESHCORE_LLM_MODEL_DIR" ;; esac
+LLM_DIR="$(abs_path "${MESHCORE_LLM_MODEL_DIR:-$DATA_DIR/models/llm}")"
 
 llm_background_install() {
   local log="$LLM_DIR/.install.log"

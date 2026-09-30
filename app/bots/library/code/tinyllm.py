@@ -1,4 +1,4 @@
-"""tinyllm: ask a tiny on-device language model — ``ask``, ``ai`` or ``llm <question>``.
+"""tinyllm: ask a tiny on-device language model — ``ask``, ``ai``, ``llm`` or ``tinyllm``.
 
 Answers with a small GGUF model run inside this server by llama-cpp-python —
 no Ollama, no cloud API, nothing to host. Pick the model in Settings: the
@@ -28,7 +28,17 @@ from remoteterm import bot
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant on a low-bandwidth mesh radio network. "
-    "Answer in one or two short sentences, plain text, no markdown, under 200 characters."
+    "Answer in one or two short sentences, plain text, no markdown, under 140 characters."
+)
+# Earlier shipped defaults. A version refresh updates a built-in's code but never
+# its stored settings, so an install seeded before a prompt change still holds
+# the old default there. Reading those as "not customized" delivers the new one;
+# a prompt the operator actually wrote is never matched and never replaced.
+_PREVIOUS_DEFAULT_PROMPTS = frozenset(
+    {
+        "You are a helpful assistant on a low-bandwidth mesh radio network. "
+        "Answer in one or two short sentences, plain text, no markdown, under 200 characters.",
+    }
 )
 
 BOT_META = {
@@ -37,14 +47,14 @@ BOT_META = {
     "category": "Fun",
     "description": "Ask a tiny on-device AI model a question (no cloud, no Ollama)",
     "long_description": (
-        "`ask <question>` (or `ai` / `llm <question>`) answers with a small language model that runs "
+        "`ask <question>` (or `ai`, `llm` or `tinyllm <question>`) answers with a small language model that runs "
         "inside this server — nothing is sent to a cloud service. Choose the model below; each "
         "option lists its download size and the RAM it uses while loaded. The first question "
         "downloads and loads the model in the background (`ask` alone shows progress). Needs "
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.0.0",
+    "version": "1.0.1",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "settings_schema": [
@@ -144,7 +154,7 @@ def _number(ctx, key, default, low, high):
 
 
 @bot.on_keyword()
-@bot.on_keyword("ask", "ai", "llm")
+@bot.on_keyword("ask", "ai", "llm", "tinyllm")
 async def ask(ctx, msg):
     try:
         spec = resolve_spec(ctx.settings)
@@ -166,11 +176,11 @@ async def ask(ctx, msg):
         await ctx.reply(f"🤖 {spec.name} is ready. Usage: {ctx.command_prefix}ask <question>")
         return
 
+    system_prompt = str(ctx.settings.get("system_prompt") or "").strip()
+    if not system_prompt or system_prompt in _PREVIOUS_DEFAULT_PROMPTS:
+        system_prompt = DEFAULT_SYSTEM_PROMPT
     messages = [
-        {
-            "role": "system",
-            "content": str(ctx.settings.get("system_prompt") or DEFAULT_SYSTEM_PROMPT),
-        },
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": question[:500]},
     ]
     try:

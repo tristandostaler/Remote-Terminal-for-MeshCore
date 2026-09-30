@@ -209,9 +209,11 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_BLE_ADDRESS` | | BLE device address (mutually exclusive with serial/TCP) |
 | `MESHCORE_BLE_PIN` | | BLE PIN (required when BLE address is set) |
 | `MESHCORE_LOG_LEVEL` | INFO | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `MESHCORE_DATABASE_PATH` | `data/meshcore.db` | SQLite database path |
+| `MESHCORE_DATABASE_PATH` | `data/meshcore.db` | SQLite database path. Its folder is the data folder: downloaded models and, in Docker, the build cache (`.uv-cache`) default to living beside it |
 | `MESHCORE_ENABLE_AEIC` | false | Install the optional AI image codec on start (Docker / HA add-on). See [Optional: AI Image Codec](#optional-ai-image-codec-aeic) |
-| `MESHCORE_AEIC_MODEL_DIR` | `data/models/aeic` | Where that codec's ~958 MB model is installed. Defaults inside `data/` so it survives container recreation |
+| `MESHCORE_AEIC_MODEL_DIR` | `data/models/aeic` | Where that codec's ~958 MB model is installed. Defaults to `models/aeic` beside the database so it survives container recreation |
+| `MESHCORE_ENABLE_LLM` | false | Install the `tinyllm` bot's llama-cpp-python on start (Docker / HA add-on). See [Optional: Tiny On-Device AI Bot](#optional-tiny-on-device-ai-bot-tinyllm) |
+| `MESHCORE_LLM_MODEL_DIR` | `data/models/llm` | Where the `tinyllm` bot's models are downloaded. Defaults to `models/llm` beside the database |
 | `MESHCORE_DISABLE_BOTS` | false | Disable bot system entirely (blocks execution and config; an intermediate security precaution, but not as good as basic auth) |
 | `MESHCORE_BASIC_AUTH_USERNAME` | | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
 | `MESHCORE_BASIC_AUTH_PASSWORD` | | Optional app-wide HTTP Basic auth password; must be set together with `MESHCORE_BASIC_AUTH_USERNAME` |
@@ -327,7 +329,7 @@ progress bar; it is fetched from
 and every file is SHA-256 verified. The download is resumable, so a dropped
 connection continues rather than restarting.
 
-The model lands in `MESHCORE_AEIC_MODEL_DIR` (default `data/models/aeic`), which
+The model lands in `MESHCORE_AEIC_MODEL_DIR` (default `models/aeic` beside the database, i.e. `data/models/aeic`), which
 is inside the mounted `data/` volume for both Docker and the Home Assistant
 add-on — so it survives container recreation and is downloaded once, not per
 restart.
@@ -353,7 +355,7 @@ missing, and `POST /api/aeic/model/download` starts the fetch.
 
 ## Optional: Tiny On-Device AI Bot (`tinyllm`)
 
-The built-in **`tinyllm`** bot answers `ask <question>` (or `ai` / `llm <question>`) on
+The built-in **`tinyllm`** bot answers `ask <question>` (or `ai`, `llm` or `tinyllm <question>`) on
 `#bot`, `#bots` and in DMs with a small language model that runs **inside this
 server**: no Ollama, no cloud API, no GPU. It ships disabled.
 
@@ -393,7 +395,7 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    A **Custom** option takes any GGUF chat model from Hugging Face.
 
 3. Enable the bot. The first question downloads the model (once, into
-   `MESHCORE_LLM_MODEL_DIR`, default `data/models/llm`) and loads it in the
+   `MESHCORE_LLM_MODEL_DIR`, default `models/llm` beside the database) and loads it in the
    background; `ask` alone reports progress. Bot runs are limited to 10 s, so
    answers stop at the configured time limit and whatever was produced is sent.
 

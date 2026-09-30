@@ -60,7 +60,12 @@ class TestBotMeta:
 
     def test_keywords(self):
         entry = get_library_entry("tinyllm")
-        assert set(load_bot_code(entry["code"]).declared_keywords) == {"ask", "ai", "llm"}
+        assert set(load_bot_code(entry["code"]).declared_keywords) == {
+            "ask",
+            "ai",
+            "llm",
+            "tinyllm",
+        }
 
 
 class _FakeRuntime:
@@ -106,6 +111,36 @@ class TestAskBot:
         messages, kwargs = runtime.asked[0]
         assert messages[-1] == {"role": "user", "content": "capital of France?"}
         assert kwargs["deadline_seconds"] <= 7
+
+    async def test_system_prompt_asks_for_under_140_characters(self, test_db, monkeypatch):
+        runtime = _FakeRuntime()
+        await _run(monkeypatch, runtime, BotTestRequest(text="ask hi"))
+        assert "under 140 characters" in runtime.asked[0][0][0]["content"]
+
+    async def test_old_default_prompt_is_upgraded_but_a_custom_one_is_kept(
+        self, test_db, monkeypatch
+    ):
+        """A version refresh never rewrites stored settings, so an install seeded
+        with the old 200-character default must still get the new prompt."""
+        old = (
+            "You are a helpful assistant on a low-bandwidth mesh radio network. "
+            "Answer in one or two short sentences, plain text, no markdown, "
+            "under 200 characters."
+        )
+        runtime = _FakeRuntime()
+        await _run(
+            monkeypatch, runtime, BotTestRequest(text="ask hi"), settings={"system_prompt": old}
+        )
+        assert "under 140 characters" in runtime.asked[0][0][0]["content"]
+
+        runtime = _FakeRuntime()
+        await _run(
+            monkeypatch,
+            runtime,
+            BotTestRequest(text="ask hi"),
+            settings={"system_prompt": "Talk like a pirate."},
+        )
+        assert runtime.asked[0][0][0]["content"] == "Talk like a pirate."
 
     async def test_dm_answer_has_no_mention(self, test_db, monkeypatch):
         replies = await _run(

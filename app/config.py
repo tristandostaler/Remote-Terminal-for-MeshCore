@@ -2,6 +2,7 @@ import logging
 import logging.config
 import re
 from collections import deque
+from pathlib import Path
 from threading import Lock
 from typing import Literal
 
@@ -21,12 +22,12 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     database_path: str = "data/meshcore.db"
     # Where the optional AEIC neural image-codec bundle is installed. ~958 MiB,
-    # downloaded on demand, never shipped with the app. Defaults beside the
-    # database so a Home Assistant add-on's mapped /app/data volume keeps it
-    # across restarts.
+    # downloaded on demand, never shipped with the app. Unless set, it follows
+    # the database: `<database folder>/models/aeic` (see _models_beside_database),
+    # so a Home Assistant add-on's mapped /app/data volume keeps it across restarts.
     aeic_model_dir: str = "data/models/aeic"
     # Where the `tinyllm` bot keeps the tiny GGUF language models it downloads on
-    # first use (100 MB - 1.1 GB each). Beside the database for the same reason.
+    # first use (100 MB - 1.1 GB each). Follows the database the same way.
     llm_model_dir: str = "data/models/llm"
     # Switch for the AEIC neural image codec, read at RUNTIME.
     #
@@ -106,6 +107,24 @@ class Settings(BaseSettings):
     # told apart by the name they send in APP_START plus their address; 0
     # disables replay entirely (apps only see what arrives while connected).
     virtual_node_replay_limit: int = 1000
+
+    @model_validator(mode="after")
+    def _models_beside_database(self) -> "Settings":
+        """Downloaded models live in the database's folder unless set explicitly.
+
+        Moving the database (MESHCORE_DATABASE_PATH) is how an operator moves the
+        data volume; models left at a fixed `data/models/...` would then land
+        outside it and be re-downloaded after every container update. With the
+        default database path this yields exactly the defaults above.
+        """
+        if self.database_path == ":memory:":
+            return self
+        data_dir = Path(self.database_path).parent
+        if "aeic_model_dir" not in self.model_fields_set:
+            self.aeic_model_dir = str(data_dir / "models" / "aeic")
+        if "llm_model_dir" not in self.model_fields_set:
+            self.llm_model_dir = str(data_dir / "models" / "llm")
+        return self
 
     @model_validator(mode="after")
     def validate_transport_exclusivity(self) -> "Settings":
