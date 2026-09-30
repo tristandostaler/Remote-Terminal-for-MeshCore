@@ -1,6 +1,6 @@
 name: "RemoteTerm for MeshCore Advanced"
 description: "RemoteTerm for MeshCore Advanced - MeshCore web client with bots, compression and images"
-version: "1.30.1"
+version: "1.30.2"
 slug: "remoteterm"
 init: false
 arch:
@@ -24,10 +24,10 @@ options:
   # the add-on logs a warning and runs normally if it cannot be installed.
   MESHCORE_ENABLE_AEIC: false
   # Optional tiny on-device AI for the built-in `tinyllm` bot. Compiles
-  # llama-cpp-python in the background after being switched on (10-20 minutes
+  # llama-cpp-python in the background after being switched on (up to an hour
   # on a Pi; the add-on keeps running meanwhile), then enable the `tinyllm` bot
-  # under Bots and pick a model there: 100 MB - 1.1 GB download and
-  # 250 MB - 1.5 GB of RAM while loaded.
+  # under Bots and pick a model there: 105 MB - 1.1 GB download and
+  # 180 MB - 1.5 GB of RAM while loaded (the bot refuses a model that won't fit).
   MESHCORE_ENABLE_LLM: false
   # Virtual companion node: lets the MeshCore app (TCP/WiFi), meshcore-cli or
   # the Home Assistant MeshCore integration use this radio through RemoteTerm.

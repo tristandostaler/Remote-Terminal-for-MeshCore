@@ -26,6 +26,7 @@ Nothing imports it until a model is loaded, so the app runs without it.
 
 from __future__ import annotations
 
+import gc
 import importlib
 import logging
 import os
@@ -42,9 +43,27 @@ DOWNLOAD_CHUNK_BYTES = 1 << 20
 # Headroom kept free after a download, so a model never fills the disk the
 # SQLite database lives on (the same concern as the AEIC bundle on an SD card).
 DISK_HEADROOM_BYTES = 512 * 1024 * 1024
-# Context window. Mesh prompts and replies are a couple hundred characters, so
-# 1024 tokens leaves room for the system prompt and keeps the KV cache small.
-CONTEXT_TOKENS = 1024
+# Memory settings. Measured on a model with SmolLM2 135M Q8_0's exact shape:
+# ~200 MB in total, of which only ~45 MB cannot be reclaimed.
+#
+# Context window: a mesh prompt (system prompt + a question clipped to 500
+# characters) plus a 160-token answer fits in 512 tokens; the KV cache scales
+# with it, and 1024 cost 16 MB more for nothing.
+CONTEXT_TOKENS = 512
+# Prompt batch size: the compute buffer scales with it. Mesh prompts are short,
+# so small batches cost no speed worth noticing.
+BATCH_TOKENS = 64
+# The weights are memory-mapped (llama.cpp's default, kept explicit): they sit
+# in the page cache, which the kernel can drop and re-read under pressure,
+# instead of in process memory. Reading them in instead turned 156 MB of
+# reclaimable cache into 198 MB of memory nothing can take back.
+USE_MMAP = True
+# Free memory a load must leave behind, on top of the model file and its own
+# overhead, so the radio server and the OS never get squeezed. A load that does
+# not fit is refused with a reply rather than risking the OOM killer (which
+# takes the whole server with it) or a Pi thrashing its SD card.
+LOAD_OVERHEAD_MB = 64
+MEMORY_RESERVE_MB = 128
 # A failed download/load is retried on the next question after this long.
 RETRY_AFTER_SECONDS = 60
 
@@ -96,9 +115,26 @@ def _fmt_mb(mb: int) -> str:
 
 
 # Sizes are the published GGUF file sizes; RAM is file + KV cache for
-# CONTEXT_TOKENS + runtime overhead, rounded up. Speeds are rough CPU figures
-# for a Raspberry Pi 5 / an x86 mini-PC; a Pi 4 is about half.
+# CONTEXT_TOKENS + runtime overhead, rounded up (the two SmolLM2 135M rows are
+# measured). Speeds are rough CPU figures for a Raspberry Pi 5 / an x86
+# mini-PC; a Pi 4 is about half.
 CATALOG: tuple[ModelSpec, ...] = (
+    ModelSpec(
+        key="smollm2-135m-q4",
+        name="SmolLM2 135M (Q4, smallest)",
+        repo="bartowski/SmolLM2-135M-Instruct-GGUF",
+        filename="SmolLM2-135M-Instruct-Q4_K_M.gguf",
+        params="135M",
+        quant="Q4_K_M",
+        download_mb=105,
+        ram_mb=180,
+        speed="very fast (~45 tok/s Pi 5, 100+ tok/s x86)",
+        quality="Toy: grammatical but often wrong or off-topic",
+        notes=(
+            "The lightest option, for a Pi with 1 GB or less: the Q8 build's model, "
+            "compressed harder, so answers are slightly rougher."
+        ),
+    ),
     ModelSpec(
         key="smollm2-135m",
         name="SmolLM2 135M",
@@ -107,7 +143,7 @@ CATALOG: tuple[ModelSpec, ...] = (
         params="135M",
         quant="Q8_0",
         download_mb=145,
-        ram_mb=250,
+        ram_mb=210,
         speed="very fast (~40 tok/s Pi 5, 100+ tok/s x86)",
         quality="Toy: grammatical but often wrong or off-topic",
         notes="Smallest option; fine for playful one-liners, not for facts.",
@@ -231,8 +267,47 @@ def resolve_spec(settings: dict[str, Any]) -> ModelSpec:
     )
 
 
+def available_memory_mb() -> int | None:
+    """Memory a new allocation can get, in MB, or ``None`` when unknown.
+
+    The lower of the kernel's ``MemAvailable`` (free + reclaimable cache; swap is
+    deliberately not counted) and what is left under a container memory limit
+    (cgroup v2, then v1): in Docker the host can have plenty free while the
+    container is one allocation away from being OOM-killed.
+    """
+    candidates: list[int] = []
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                candidates.append(int(line.split()[1]) >> 10)
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+    for limit_file, usage_file in (
+        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+        (
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+        ),
+    ):
+        try:
+            limit = Path(limit_file).read_text().strip()
+            usage = int(Path(usage_file).read_text().strip())
+        except (OSError, ValueError):
+            continue
+        # "max" (v2) or a huge sentinel (v1) means no limit.
+        if limit.isdigit() and int(limit) < (1 << 60):
+            candidates.append(max(0, int(limit) - usage) >> 20)
+        break
+    return min(candidates) if candidates else None
+
+
 class LlmBusyError(RuntimeError):
     """Another question is being answered; the model runs one at a time."""
+
+
+class LlmPromptTooLongError(RuntimeError):
+    """The prompt does not fit the context window (emoji cost several tokens)."""
 
 
 class LlmRuntime:
@@ -335,10 +410,20 @@ class LlmRuntime:
             # Drop the previous model first, so a switch never holds two in RAM.
             with self._generate_lock:
                 self._llm = None
+                gc.collect()
+                self._check_memory(spec, path)
+                # One thread count for both phases: llama.cpp otherwise runs the
+                # prompt on every core, and a Pi pinned at 100% on a marginal
+                # power supply browns out and reboots.
+                n_threads = threads or max(1, (os.cpu_count() or 2) // 2)
                 llm = Llama(
                     model_path=str(path),
                     n_ctx=CONTEXT_TOKENS,
-                    n_threads=threads or None,
+                    n_batch=BATCH_TOKENS,
+                    n_threads=n_threads,
+                    n_threads_batch=n_threads,
+                    use_mmap=USE_MMAP,
+                    use_mlock=False,
                     verbose=False,
                 )
                 self._llm = llm
@@ -348,6 +433,18 @@ class LlmRuntime:
             logger.warning("tinyllm bot: preparing %s failed: %s", spec.name, exc)
             self._set(state="error", error=str(exc)[:200], failed_at=time.monotonic())
 
+    def _check_memory(self, spec: ModelSpec, path: Path) -> None:
+        """Refuse a load that would not leave the system room to breathe."""
+        available = available_memory_mb()
+        if available is None:
+            return
+        needed = (path.stat().st_size >> 20) + LOAD_OVERHEAD_MB + MEMORY_RESERVE_MB
+        if available < needed:
+            raise RuntimeError(
+                f"not enough free memory for {spec.name}: needs about {needed} MB, "
+                f"{available} MB available. Pick a smaller model"
+            )
+
     def _missing_package_reason(self) -> str:
         """Why llama_cpp will not import, using the markers ``run.sh`` leaves.
 
@@ -356,7 +453,7 @@ class LlmRuntime:
         picked up by the next retry, so "still installing" is worth saying.
         """
         if (self.model_dir / ".installing").exists():
-            return "llama-cpp-python is still being installed (compiling, up to 20 min on a Pi)"
+            return "llama-cpp-python is still being installed (compiling once; up to an hour on a small Pi)"
         if (self.model_dir / ".install-failed").exists():
             return "installing llama-cpp-python failed; see .install.log in the model folder"
         return INSTALL_HINT
@@ -426,12 +523,17 @@ class LlmRuntime:
                 repeat_penalty=1.1,
                 stream=True,
             )
-            for chunk in stream:
-                delta = chunk["choices"][0].get("delta", {}).get("content")
-                if delta:
-                    pieces.append(delta)
-                if time.monotonic() - started > deadline_seconds:
-                    break
+            try:
+                for chunk in stream:
+                    delta = chunk["choices"][0].get("delta", {}).get("content")
+                    if delta:
+                        pieces.append(delta)
+                    if time.monotonic() - started > deadline_seconds:
+                        break
+            except ValueError as exc:
+                if "context window" in str(exc):
+                    raise LlmPromptTooLongError(str(exc)) from exc
+                raise
             return "".join(pieces).strip()
         finally:
             self._generate_lock.release()

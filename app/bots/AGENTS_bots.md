@@ -90,6 +90,14 @@ operators).
   dwarfs the 10 s `BOT_EXECUTION_TIMEOUT`); a run only starts it and reports
   progress. Generation streams tokens and stops at a deadline (≤ 7 s) so the
   reply still goes out inside the timeout; one answer at a time.
+  **Memory** (measured, SmolLM2 135M Q8: ~200 MB, ~45 MB unreclaimable): weights
+  stay memory-mapped (reclaimable page cache), `n_ctx` 512 / `n_batch` 64, and
+  `_check_memory` refuses a load when `available_memory_mb()` (min of
+  `MemAvailable` and the cgroup limit headroom) is below file + 64 + 128 MB —
+  the model runs in the server's own process, so an OOM kill takes the radio
+  server with it. `n_threads_batch = n_threads` (default half the cores).
+  `run.sh` caps the llama.cpp compile at one job per ~800 MB free (measured
+  ~700 MB per compiler process), niced.
   Docker: `MESHCORE_ENABLE_LLM=true` makes `run.sh` compile llama-cpp-python
   in the background *after* the server is up (`uv sync --inexact`, never
   before `exec`: a Pi takes 10-20 min), leaving `.installing` /

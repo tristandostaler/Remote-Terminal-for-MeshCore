@@ -109,7 +109,8 @@ fi
 # ── optional tiny LLM for the `tinyllm` bot ───────────────────────────────────────
 #
 # llama-cpp-python ships as source only, so the first install COMPILES llama.cpp:
-# a minute on a desktop, 10-20 on a Pi. That must never keep the radio offline,
+# a few minutes on a desktop, up to an hour on a small Pi (memory limits it to
+# one compile job there). That must never keep the radio offline,
 # so unlike the codec above it runs in the BACKGROUND, after the server is up.
 # The app imports llama_cpp lazily, the first time the bot loads a model, so it
 # picks the package up without a restart; until then the bot answers that it is
@@ -135,10 +136,27 @@ llm_background_install() {
   done
   echo "LLM (tinyllm bot): installing llama-cpp-python in the background..."
   local built_tools=0
+  # Compiling llama.cpp is the heaviest thing this server ever does: measured
+  # at up to ~700 MB per compiler process, 1.8 GB with four in parallel, which
+  # is enough to take a 1-2 GB Pi down with the radio server on it. Allow one
+  # parallel job per ~800 MB currently available (at least 1, at most one per
+  # core), and run the build at the lowest CPU and I/O priority.
+  local avail_mb jobs
+  avail_mb=$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null)
+  jobs=$(( ${avail_mb:-0} / 800 ))
+  [ "$jobs" -lt 1 ] && jobs=1
+  [ "$jobs" -gt "$(nproc)" ] && jobs=$(nproc)
+  export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$jobs}"
+  if [ "${avail_mb:-0}" -gt 0 ] && [ "$avail_mb" -lt 900 ]; then
+    echo "WARNING: LLM (tinyllm bot): only ${avail_mb} MB free; compiling llama.cpp may" >&2
+    echo "         need ~700 MB and will be slow, or be killed by the OOM killer." >&2
+  fi
+  local lowprio="nice -n 19"
+  command -v ionice >/dev/null 2>&1 && lowprio="$lowprio ionice -c 3"
   # --inexact: only ADD packages. The server is already running from this venv,
   # and a plain sync would also strip whatever `uv run` added at launch.
-  # shellcheck disable=SC2046
-  if ! uv sync --frozen --no-dev --inexact $(extra_args with-llm) >"$log" 2>&1; then
+  # shellcheck disable=SC2046,SC2086
+  if ! $lowprio uv sync --frozen --no-dev --inexact $(extra_args with-llm) >"$log" 2>&1; then
     if ! command -v cmake >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
       echo "LLM (tinyllm bot): fetching compilers to build llama.cpp (first time only)..."
       if apt-get update >>"$log" 2>&1 \
@@ -146,9 +164,9 @@ llm_background_install() {
         built_tools=1
       fi
     fi
-    echo "LLM (tinyllm bot): compiling llama.cpp — this takes a few minutes (10-20 on a Pi)..."
-    # shellcheck disable=SC2046
-    uv sync --frozen --no-dev --inexact $(extra_args with-llm) >>"$log" 2>&1 || true
+    echo "LLM (tinyllm bot): compiling llama.cpp with ${CMAKE_BUILD_PARALLEL_LEVEL} job(s) — a few minutes on a desktop, up to an hour on a small Pi..."
+    # shellcheck disable=SC2046,SC2086
+    $lowprio uv sync --frozen --no-dev --inexact $(extra_args with-llm) >>"$log" 2>&1 || true
   fi
   if [ "$built_tools" = 1 ]; then
     apt-get purge -y --auto-remove build-essential cmake >/dev/null 2>&1 || true

@@ -82,6 +82,8 @@ class _FakeRuntime:
 
     def generate(self, messages, **kwargs):
         self.asked.append((messages, kwargs))
+        if isinstance(self.answer, Exception):
+            raise self.answer
         return self.answer
 
 
@@ -142,6 +144,11 @@ class TestAskBot:
         )
         assert runtime.asked[0][0][0]["content"] == "Talk like a pirate."
 
+    async def test_too_long_question_gets_a_clear_reply(self, test_db, monkeypatch):
+        runtime = _FakeRuntime(answer=llm.LlmPromptTooLongError("exceed context window"))
+        replies = await _run(monkeypatch, runtime, BotTestRequest(text="ask " + "🙂" * 400))
+        assert replies == ["🤖 That question is too long for this model, try a shorter one."]
+
     async def test_dm_answer_has_no_mention(self, test_db, monkeypatch):
         replies = await _run(
             monkeypatch,
@@ -179,11 +186,15 @@ class TestAskBot:
 
 
 class _FakeLlama:
-    def __init__(self, pieces):
+    def __init__(self, pieces, error=None):
         self.pieces = pieces
+        self.error = error
 
     def create_chat_completion(self, **kwargs):
         assert kwargs["stream"] is True
+        # Like llama-cpp-python: the prompt is checked on the first next().
+        if self.error is not None:
+            raise self.error
         for piece in self.pieces:
             yield {"choices": [{"delta": {"content": piece}}]}
 
@@ -252,3 +263,44 @@ class TestRuntime:
         assert "failed" in runtime._missing_package_reason()
         (tmp_path / ".installing").touch()
         assert "still being installed" in runtime._missing_package_reason()
+
+    def test_prompt_over_the_context_window_is_its_own_error(self, tmp_path):
+        runtime = self._ready(tmp_path, [])
+        runtime._llm = _FakeLlama(
+            [], error=ValueError("Requested tokens (900) exceed context window of 512")
+        )
+        with pytest.raises(llm.LlmPromptTooLongError):
+            runtime.generate([], max_tokens=10, temperature=0.5, deadline_seconds=5)
+
+
+class TestMemory:
+    """A model that does not fit is refused with a reason, never loaded: the
+    OOM killer would take the whole radio server with it."""
+
+    def _model(self, tmp_path, mb):
+        path = tmp_path / "m.gguf"
+        with path.open("wb") as handle:
+            handle.truncate(mb << 20)
+        return path
+
+    def test_refuses_when_memory_is_short(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(llm, "available_memory_mb", lambda: 250)
+        runtime = llm.LlmRuntime(model_dir=tmp_path)
+        with pytest.raises(RuntimeError, match="not enough free memory.*needs about 292 MB"):
+            runtime._check_memory(llm.CATALOG[0], self._model(tmp_path, 100))
+
+    def test_allows_when_it_fits_or_memory_is_unknown(self, tmp_path, monkeypatch):
+        runtime = llm.LlmRuntime(model_dir=tmp_path)
+        path = self._model(tmp_path, 100)
+        monkeypatch.setattr(llm, "available_memory_mb", lambda: 300)
+        runtime._check_memory(llm.CATALOG[0], path)
+        monkeypatch.setattr(llm, "available_memory_mb", lambda: None)
+        runtime._check_memory(llm.CATALOG[0], path)
+
+    def test_reads_this_machine(self):
+        available = llm.available_memory_mb()
+        assert available is None or available > 0
+
+    def test_the_smallest_model_comes_first(self):
+        assert llm.CATALOG[0].download_mb == min(spec.download_mb for spec in llm.CATALOG)
+        assert llm.CATALOG[0].ram_mb == min(spec.ram_mb for spec in llm.CATALOG)

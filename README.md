@@ -360,7 +360,8 @@ The built-in **`tinyllm`** bot answers `ask <question>` (or `ai`, `llm` or `tiny
 server**: no Ollama, no cloud API, no GPU. It ships disabled.
 
 1. Install the optional dependency. llama-cpp-python is published as source,
-   so this compiles llama.cpp: a few minutes on a desktop, 10-20 on a Pi.
+   so this compiles llama.cpp once: a few minutes on a desktop, up to an hour on
+   a small Pi (where memory limits it to one compile job).
 
    **Docker / docker-compose** — set `MESHCORE_ENABLE_LLM=true`. The server
    starts normally and the compile runs **in the background** (the radio stays
@@ -385,7 +386,8 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
 
    | Model | Download | RAM | Notes |
    |---|---|---|---|
-   | SmolLM2 135M | 145 MB | ~250 MB | Toy, very fast |
+   | SmolLM2 135M (Q4, smallest) | 105 MB | ~180 MB | Toy, lightest; for 1 GB Pis |
+   | SmolLM2 135M | 145 MB | ~210 MB | Toy, very fast |
    | Gemma 3 270M | 292 MB | ~450 MB | Short friendly chat |
    | SmolLM2 360M | 386 MB | ~550 MB | Decent small talk |
    | **Qwen2.5 0.5B** (default) | 491 MB | ~650 MB | Best of the tiny tier |
@@ -400,6 +402,26 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    answers stop at the configured time limit and whatever was produced is sent.
 
 Tiny models are chatty and often wrong. Treat the answers as entertainment.
+
+### Low-memory hardware (Pi 3, Pi Zero 2 W, 1-2 GB Pi 4)
+
+- **The compile is the heavy part, not the model.** Building llama.cpp peaks at
+  ~700 MB per compiler process. `run.sh` runs one compile job per ~800 MB free
+  (at least one), at the lowest CPU and disk priority, and warns when less than
+  900 MB is free. Set `CMAKE_BUILD_PARALLEL_LEVEL=1` to force a single job. It
+  happens once: the result is cached beside the database (see above). On a 512 MB
+  board, pre-bake instead: `docker build --build-arg ENABLE_LLM=1` on a bigger
+  machine.
+- **A model that won't fit is refused, not loaded.** Before loading, the bot
+  checks free memory (and the container's memory limit) for the model file plus
+  ~190 MB of headroom, and answers "not enough free memory… pick a smaller
+  model" instead of letting the OOM killer take the whole server down.
+- **The smallest model needs ~180 MB**, and most of that is the model file
+  memory-mapped from disk, which Linux can drop under pressure. Only ~50 MB is
+  memory nothing else can reclaim.
+- **CPU threads default to half the cores**, so a Pi on a marginal power supply
+  isn't pinned at 100% (a common cause of brown-out reboots that look like
+  crashes).
 
 ## Virtual Companion Node: Share The Radio With Other MeshCore Apps
 

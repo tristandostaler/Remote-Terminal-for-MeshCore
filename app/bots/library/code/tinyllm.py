@@ -20,6 +20,7 @@ from app.bots.llm import (
     CUSTOM_MODEL,
     DEFAULT_MODEL,
     LlmBusyError,
+    LlmPromptTooLongError,
     llm_runtime,
     model_options,
     resolve_spec,
@@ -54,7 +55,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.0.1",
+    "version": "1.1.0",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "settings_schema": [
@@ -129,7 +130,10 @@ BOT_META = {
             "default": 0,
             "min": 0,
             "max": 32,
-            "help": "0 lets llama.cpp choose. Takes effect the next time a model is loaded.",
+            "help": (
+                "0 uses half the cores, which keeps a Pi responsive and off the edge of its "
+                "power supply. Takes effect the next time a model is loaded."
+            ),
         },
     ],
     "settings": {
@@ -193,6 +197,9 @@ async def ask(ctx, msg):
         )
     except LlmBusyError:
         await ctx.reply("🤖 Busy answering someone else, try again shortly.")
+        return
+    except LlmPromptTooLongError:
+        await ctx.reply("🤖 That question is too long for this model, try a shorter one.")
         return
     except Exception as exc:  # noqa: BLE001 - the mesh gets a line, the log gets the rest
         ctx.log(f"generation failed: {exc}", "WARNING")
