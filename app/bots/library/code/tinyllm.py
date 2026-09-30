@@ -245,8 +245,9 @@ BOT_META = {
             "default": True,
             "help": (
                 "Search the markdown files in the tinyllm-docs folder (beside the database; "
-                "seeded with MeshCore basics and every repeater setting) and give the best "
-                "matches to the model with each question. Edit or add .md files there; "
+                "seeded with MeshCore basics, a regions guide and MeshCore's CLI reference "
+                "and FAQ) and give the best matches to the model with each question. "
+                "Edit or add .md files there; "
                 "each heading starts a searchable section."
             ),
         },

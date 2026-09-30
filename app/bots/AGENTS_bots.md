@@ -135,16 +135,20 @@ operators).
   the index rebuilds when a file's size/mtime changes. Relevance gate
   (`_relevant` + `RELATIVE_FLOOR`): a section needs >= half the question's
   words and >= 2 of them (one-word questions: in its heading, or a rare word),
-  plus half the best score; plurals are folded. Optional model check
+  plus half the best score; plurals and -ing/-ed are folded, and small talk
+  ("hello", "thanks") is stopwords. Optional model check
   (`check_notes_with_model`): `LlmRuntime.choose` asks a generic yes/no ("do
   these notes help?", with the section headings) and the model process forces
   the reply to exactly "yes"/"no" with a llama.cpp grammar at temperature 0;
   only when there are notes and >= 4 s left; a failed check keeps the notes;
   it never triggers the unload-after-every-answer unload. The folder is seeded
-  once from `library/docs/` and never restored (a deleted file stays
-  deleted). `library/docs/meshcore.md`'s repeater-settings half is generated
-  from `app/services/repeater_settings.py` -- regenerate it when that catalog
-  changes. The bot budgets the context by characters (~3/token, no tokenizer
+  from `library/docs/`: a `.shipped` manifest in it lists the files already
+  offered, so a file shipped later is added once while edited files are never
+  overwritten and deleted ones stay deleted. `meshcore.md` (basics, regions
+  quick guide) is hand-written; `meshcore-cli.md` and `meshcore-faq.md` are
+  MeshCore's own docs (MIT, license in their header comments) converted by
+  `scripts/build/update_tinyllm_docs.py <MeshCore checkout>` -- rerun it when
+  MeshCore updates them. The bot budgets the context by characters (~3/token, no tokenizer
   in the server): what is left after prompt, question and answer goes to
   history (up to half) and notes (the rest), searched with the question plus
   the previous one; overflow retries drop history, then notes. `context_tokens`

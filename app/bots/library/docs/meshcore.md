@@ -4,7 +4,8 @@ folder (data/tinyllm-docs by default) and never overwritten there, so edit that
 copy freely, add your own .md files next to it, or delete what you don't want.
 Every heading starts a section; the bot searches all sections and hands the
 best matches to the model.
-The repeater settings part is generated from app/services/repeater_settings.py.
+The regions guide is written from MeshCore's CLI documentation; the full
+command reference and FAQ are in meshcore-cli.md and meshcore-faq.md.
 -->
 
 # MeshCore basics
@@ -65,253 +66,70 @@ Repeaters and room servers take a login. The admin password gives full control,
 including the text CLI (get/set settings, reboot). The guest password allows
 read-only access such as status.
 
-# Repeater console commands
+# Regions (quick guide)
 
-## Firmware version (ver)
+## What regions are
 
-`ver` answers with the repeater's firmware version.
+A region is a named area, such as #Europe or #UK, that flood messages can be
+scoped to. Each repeater keeps a tree of regions (parents and children) and,
+for each region, whether it floods messages scoped to that region. The
+wildcard region `*` stands for messages that carry no region at all. Region
+commands are repeater CLI commands: they need an admin login and firmware 1.10
+or later.
 
-## Clock (clock, time, clkreboot)
+## Save region changes (region save)
 
-`clock` shows the repeater's clock. `time <unix seconds>` sets it, but only
-forward: a repeater whose clock is ahead answers "clock cannot go backwards".
-`clkreboot` resets the clock to a fixed date in May 2024 and reboots, after
-which `time` can move it forward to the right time.
+`region save` saves the region changes made since the last reboot. Run it
+after adding, removing, allowing or blocking regions, or the changes are not
+kept.
 
-## Neighbours (neighbors)
+## Add a region (region put)
 
-`neighbors` lists the nodes the repeater hears directly (zero hops away).
+`region put <name> [parent_name]` creates a region. Without a parent it goes
+under the wildcard `*`. A new region is allowed to flood. For example,
+`region put #UK #Europe` adds #UK under #Europe. Then `region save`.
 
-## Advertise now (advert)
+## Add several regions at once (region def, region load)
 
-`advert` makes the repeater send an advert now.
+`region def a b c` creates a chain in one line: each name becomes a child of
+the one before. `name|jump` creates `name` and then moves back to `jump` to
+start another branch; `region def a|* b|* c` creates a flat list under `*`.
+One line holds at most 160 characters. `region load` is the interactive way:
+type one region per line, indent children under their parent (up to 8 levels),
+add `F` after a name to allow flooding, and end with a blank line. The
+firmware notes `region load` with no name does not work remotely. Finish with
+`region save`.
 
-## Admin password (password)
+## Remove (delete) a region (region remove)
 
-`password <new password>` replaces the admin password. It cannot be read back.
-Setting it wrong locks everyone out of admin until a physical reset.
+`region remove <name>` deletes a region. Its child regions must be removed
+first. Then `region save`.
 
-# Repeater settings (CLI get / set)
+## Allow flooding for a region (region allowf)
 
-A repeater is configured over its text CLI after an admin login: `get <key>` reads a value, `set <key> <value>` writes it. Guests cannot read or change settings.
+`region allowf <name>` lets the repeater flood (repeat) messages scoped to that
+region. `region allowf *` allows messages that carry no region. Then `region
+save`.
 
-## Identity & Location
+## Block flooding for a region (region denyf)
 
-How the repeater names and places itself
+`region denyf <name>` stops the repeater flooding messages scoped to that
+region. `region denyf *` drops messages that carry no region. Then `region
+save`.
 
-### Name (`get name` / `set name <value>`)
+## Set the home region (region home)
 
-Advertised node name. The firmware refuses [ ] \ : , ? and *. Changing this re-advertises the repeater under the new name.
+`region home <name>` sets this node's home region; `region home` alone shows
+it.
 
-### Latitude (`get lat` / `set lat <value>`)
+## Set the default scope region (region default)
 
-Advertised latitude in decimal degrees. Range -90 to 90 °.
+`region default <name>` sets this node's default scope region; `region
+default` alone shows it, and `region default <null>` clears it.
 
-### Longitude (`get lon` / `set lon <value>`)
+## List and inspect regions (region, region get, region list)
 
-Advertised longitude in decimal degrees. Range -180 to 180 °.
-
-### Owner Info (`get owner.info` / `set owner.info <value>`)
-
-Free-text owner/contact note other clients can read. A | becomes a line break.
-
-## Radio
-
-LoRa parameters, receiver gain and repeating behaviour
-
-### Radio (freq, BW, SF, CR) (`get radio` / `set radio <value>`)
-
-Frequency in MHz, bandwidth in kHz, spreading factor, coding rate. Takes effect after a reboot. The repeater answers on these parameters only: getting them wrong takes it off the air until someone reaches it physically.
-
-### TX Power (`get tx` / `set tx <value>`)
-
-Transmit power. The hardware clamps values it cannot reach. Range -9 to 30 dBm.
-
-### RX Boosted Gain (`get radio.rxgain` / `set radio.rxgain <value>`)
-
-Runs the LoRa receiver in its high-sensitivity mode for a little more current. Radios without that mode answer unsupported. On or off.
-
-### Front-End RX Gain (LNA) (`get radio.fem.rxgain` / `set radio.fem.rxgain <value>`)
-
-Enables the external low-noise amplifier on boards fitted with a front-end module. On or off.
-
-### Front-End TX Gain (PA) (`get radio.fem.txgain` / `set radio.fem.txgain <value>`)
-
-Enables the external power amplifier on boards fitted with a front-end module. On or off.
-
-### Channel Activity Detection (`get cad` / `set cad <value>`)
-
-Listen for another transmission before sending, to avoid talking over it. On or off.
-
-### Airtime Factor (`get af` / `set af <value>`)
-
-Airtime budget divisor; higher means the repeater transmits less. Range 0 to 100.
-
-### Duty Cycle Limit (`get dutycycle` / `set dutycycle <value>`)
-
-Share of airtime the repeater may use (firmware 1.15 and newer). The same budget as Airtime Factor, expressed the other way round. Range 1 to 100 %.
-
-### Repeat Mode (`get repeat` / `set repeat <value>`)
-
-Whether the node relays other nodes' packets at all. On or off. Turning this off leaves the node reachable but stops it repeating.
-
-### Max Flood Hops (`get flood.max` / `set flood.max <value>`)
-
-Flood packets with more hops than this are not repeated. Range 0 to 64 hops.
-
-### Max Flood Hops (adverts) (`get flood.max.advert` / `set flood.max.advert <value>`)
-
-Hop limit applied to flooded adverts specifically. Range 0 to 64 hops.
-
-### Max Flood Hops (unscoped) (`get flood.max.unscoped` / `set flood.max.unscoped <value>`)
-
-Hop limit applied to flood packets that carry no region scope. Range 0 to 64 hops.
-
-## Advertising
-
-How often the repeater announces itself
-
-### Local Advert Interval (`get advert.interval` / `set advert.interval <value>`)
-
-Zero-hop advert period in minutes; 0 disables it. Stored in two-minute steps, and the firmware refuses anything under its minimum (an hour on current builds). Range 0 to 240 minutes.
-
-### Flood Advert Interval (`get flood.advert.interval` / `set flood.advert.interval <value>`)
-
-Flood advert period in hours: 0 disables it, otherwise 3 to 168. Floods cost the whole mesh airtime. Range 0 to 168 hours.
-
-## Access
-
-Passwords and what a non-admin client may do
-
-### Admin Password (`password <new password>`)
-
-Password for admin logins. Cannot be read back, only replaced. Setting this wrong locks everyone out of admin until a physical reset.
-
-### Guest Password (`get guest.password` / `set guest.password <value>`)
-
-Password for guest logins.
-
-### Allow Read-Only Access (`get allow.read.only` / `set allow.read.only <value>`)
-
-Whether clients without admin rights may read status and telemetry. On or off.
-
-## Telemetry
-
-Who may read each class of telemetry
-
-### Base Telemetry (`get telemetry.mode.base` / `set telemetry.mode.base <value>`)
-
-Who may read battery/uptime telemetry. Values: always, admin, never.
-
-### Location Telemetry (`get telemetry.mode.loc` / `set telemetry.mode.loc <value>`)
-
-Who may read GPS/location telemetry. Values: always, admin, never.
-
-### Environment Telemetry (`get telemetry.mode.env` / `set telemetry.mode.env <value>`)
-
-Who may read attached environment sensors. Values: always, admin, never.
-
-## Bridge
-
-RS232 / ESP-NOW packet bridge; only on firmware built with a bridge
-
-### Bridge Type (`get bridge.type`)
-
-Which bridge this firmware was built with: rs232, espnow or none. Read-only.
-
-### Bridge Enabled (`get bridge.enabled` / `set bridge.enabled <value>`)
-
-Whether packets are passed to and from the bridge link. On or off.
-
-### Bridge Source (`get bridge.source` / `set bridge.source <value>`)
-
-Which packets cross the bridge: those received over the air (rx) or those this node transmits (tx). Values: rx, tx.
-
-### Bridge Delay (`get bridge.delay` / `set bridge.delay <value>`)
-
-Delay before a bridged packet is re-sent over the air. Range 0 to 10000 ms.
-
-### Bridge Baud Rate (RS232) (`get bridge.baud` / `set bridge.baud <value>`)
-
-Serial speed of the RS232 bridge link. Changing it restarts the bridge. Range 9600 to 115200 baud.
-
-### Bridge Wi-Fi Channel (ESP-NOW) (`get bridge.channel` / `set bridge.channel <value>`)
-
-Wi-Fi channel the ESP-NOW bridge uses; both ends must match. Range 1 to 14.
-
-### Bridge Secret (ESP-NOW) (`get bridge.secret` / `set bridge.secret <value>`)
-
-Shared key that scrambles ESP-NOW bridge packets; both ends must match.
-
-## Advanced
-
-Timing, airtime and routing tuning; leave alone unless needed
-
-### RX Delay Base (`get rxdelay` / `set rxdelay <value>`)
-
-Base of the SNR-weighted delay before a heard packet is repeated, so the repeater that heard it best goes first; 0 disables it. The firmware accepts 0 to 20. Range 0 to 20.
-
-### TX Delay Factor (`get txdelay` / `set txdelay <value>`)
-
-Spread of the random pre-transmit delay that keeps repeaters from colliding (0 to 2). Range 0 to 2.
-
-### Direct TX Delay Factor (`get direct.txdelay` / `set direct.txdelay <value>`)
-
-Same, for directly-routed packets (0 to 2). Range 0 to 2.
-
-### Interference Threshold (`get int.thresh` / `set int.thresh <value>`)
-
-Noise-floor margin the radio must see clear before it transmits; 0 leaves the check off. Range 0 to 255.
-
-### AGC Reset Interval (`get agc.reset.interval` / `set agc.reset.interval <value>`)
-
-How often the radio's automatic gain control is reset; 0 disables it. Rounded down to a multiple of four. Range 0 to 1020 seconds.
-
-### Multi ACKs (`get multi.acks` / `set multi.acks <value>`)
-
-Whether the repeater sends multiple acknowledgements for a delivery. On or off.
-
-### Path Hash Mode (`get path.hash.mode` / `set path.hash.mode <value>`)
-
-How many bytes of each hop's identity a path records: 0 is the default one-byte hash; 1 and 2 record more to tell similar repeaters apart. Values: 0, 1, 2.
-
-### Loop Detection (`get loop.detect` / `set loop.detect <value>`)
-
-How aggressively a packet that has already passed through this node is dropped. Values: off, minimal, moderate, strict.
-
-### Battery ADC Multiplier (`get adc.multiplier` / `set adc.multiplier <value>`)
-
-Correction applied to the battery voltage reading; 0 restores the board's default. Boards without a battery divider answer unsupported. Range 0 to 10.
-
-### Extra Spreading Factors (`get extra.sf` / `set extra.sf <value>`)
-
-Up to three additional spreading factors the radio also listens on (LR2021 radios only), comma-separated. Range 5 to 12.
-
-## Device Info
-
-Read-only facts the firmware reports about itself
-
-### Role (`get role`)
-
-What this firmware is: repeater, room server, and so on. Read-only.
-
-### Public Key (`get public.key`)
-
-The node's identity, as it appears in adverts. Read-only.
-
-### Bootloader Version (`get bootloader.ver`)
-
-Bootloader the board runs (nRF52 boards only). Read-only.
-
-### Power Source (`get pwrmgt.source`)
-
-Whether the board is running from external power or its battery (nRF52 power management only). Read-only.
-
-### Last Boot Reason (`get pwrmgt.bootreason`)
-
-Why the board last reset and how it last shut down. Read-only.
-
-### Voltage At Boot (`get pwrmgt.bootmv`)
-
-Battery voltage measured when the board last started (nRF52 power management only). Read-only.
-
+`region` alone shows the whole region tree with each region's flood
+permission. `region get <name>` shows one region. `region list allowed` or
+`region list denied` lists regions by permission (firmware 1.12 or later, over
+the serial port only).

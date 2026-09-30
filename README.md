@@ -214,7 +214,7 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_AEIC_MODEL_DIR` | `data/models/aeic` | Where that codec's ~958 MB model is installed. Defaults to `models/aeic` beside the database so it survives container recreation |
 | `MESHCORE_ENABLE_LLM` | false | Install the `tinyllm` bot's llama-cpp-python on start (Docker / HA add-on). See [Optional: Tiny On-Device AI Bot](#optional-tiny-on-device-ai-bot-tinyllm) |
 | `MESHCORE_LLM_MODEL_DIR` | `data/models/llm` | Where the `tinyllm` bot's models are downloaded. Defaults to `models/llm` beside the database |
-| `MESHCORE_LLM_DOCS_DIR` | `data/tinyllm-docs` | Markdown reference notes the `tinyllm` bot searches. Seeded once with MeshCore basics and every repeater setting; edit or add `.md` files. Defaults to `tinyllm-docs` beside the database |
+| `MESHCORE_LLM_DOCS_DIR` | `data/tinyllm-docs` | Markdown reference notes the `tinyllm` bot searches. Seeded with MeshCore basics, a regions guide and MeshCore's CLI reference and FAQ; edit or add `.md` files. Defaults to `tinyllm-docs` beside the database |
 | `UV_CACHE_DIR` | `data/.uv-cache` | Docker / HA add-on: where downloaded Python packages and the compiled llama.cpp are cached, so a container update reinstalls in seconds instead of recompiling. Defaults to `.uv-cache` beside the database |
 | `MESHCORE_DISABLE_BOTS` | false | Disable bot system entirely (blocks execution and config; an intermediate security precaution, but not as good as basic auth) |
 | `MESHCORE_BASIC_AUTH_USERNAME` | | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
@@ -419,9 +419,11 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    **Reference notes.** For knowledge questions the bot searches a folder of
    markdown files, `tinyllm-docs` beside the database (in the add-on's config
    folder on Home Assistant), and gives the best-matching sections to the
-   model. It starts with MeshCore basics and every repeater setting with its
-   `get`/`set` command; edit it, delete what you don't want, or add your own
-   `.md` files -- every heading starts a searchable section. The search is
+   model. It starts with MeshCore basics, a regions guide (add, remove, allow
+   or block flooding, home region) and MeshCore's own CLI command reference and
+   FAQ; edit it, delete what you don't want, or add your own `.md` files --
+   every heading starts a searchable section. New starter files in a later
+   release are added to the folder; your edits and deletions are kept. The search is
    plain keyword matching (no second model, no extra RAM), which is what
    "what's the command for X" questions need. A section is only used when it
    matches enough of the question's words -- one shared word such as "power"

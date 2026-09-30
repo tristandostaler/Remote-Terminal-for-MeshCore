@@ -1034,24 +1034,93 @@ class TestDocsIndex:
 
         folder = tmp_path / "docs"
         llm_docs.seed_docs(folder)
+        shipped = {p.name for p in llm_docs.SHIPPED_DOCS_DIR.glob("*.md")}
+        assert {p.name for p in folder.glob("*.md")} == shipped
         seeded = folder / "meshcore.md"
-        assert seeded.exists()
         seeded.unlink()
         llm_docs.seed_docs(folder)
         assert not seeded.exists(), "a deleted starter file must stay deleted"
+
+    def test_a_new_shipped_file_reaches_an_existing_folder(self, tmp_path, monkeypatch):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        shipped_dir = tmp_path / "shipped"
+        shipped_dir.mkdir()
+        (shipped_dir / "old.md").write_text("# Old\nshipped\n")
+        monkeypatch.setattr(llm_docs, "SHIPPED_DOCS_DIR", shipped_dir)
+        folder = tmp_path / "docs"
+        llm_docs.seed_docs(folder)
+        (folder / "old.md").write_text("# Old\nmy edit\n")
+
+        (shipped_dir / "old.md").write_text("# Old\nshipped, updated\n")
+        (shipped_dir / "new.md").write_text("# New\nshipped later\n")
+        llm_docs.seed_docs(folder)
+        assert (folder / "new.md").read_text() == "# New\nshipped later\n"
+        assert (folder / "old.md").read_text() == "# Old\nmy edit\n", "edits are never overwritten"
+        assert (folder / llm_docs.SHIPPED_MANIFEST).read_text() == "new.md\nold.md\n"
 
     def test_the_starter_notes_answer_common_questions(self):
         from app.bots.bots_utils.tinyllm import llm_docs
 
         index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
         cases = {
-            "how do I change the tx power of my repeater": "TX Power",
+            "how do I change the tx power of my repeater": "transmit power",
             "what is a hashtag channel": "Channels",
-            "repeater clock is ahead": "Clock",
-            "command for the firmware version": "Firmware version",
+            "repeater clock is ahead": "clock",
+            "command for the firmware version": "firmware version",
+            "how do I add a region": "Add a region",
+            "how to remove a region": "Remove (delete) a region",
+            "how to allow floods": "Allow flooding",
+            "block flooding for a region": "Block flooding",
+            "set home region": "home region",
+            "how do I save regions": "Save region changes",
+            "reboot the repeater": "Reboot",
         }
         for question, expected in cases.items():
             assert expected in index.search(question, 700)[0].title, question
+
+    def test_small_talk_finds_no_notes(self):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
+        for chat in ("hello", "hi there", "thanks!", "good morning", "what is the power of love?"):
+            assert index.search(chat, 700) == [], chat
+
+    def test_word_forms_meet(self):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        assert llm_docs._fold("flooding") == llm_docs._fold("floods") == llm_docs._fold("flooded")
+        assert llm_docs._fold("regions") == llm_docs._fold("region")
+        assert llm_docs._fold("address") == "address"
+
+
+class TestUpdateTinyllmDocs:
+    """scripts/build/update_tinyllm_docs.py turns MeshCore's docs into notes."""
+
+    def _convert(self, markdown):
+        import importlib.util
+
+        path = Path(__file__).resolve().parents[1] / "scripts" / "build" / "update_tinyllm_docs.py"
+        spec = importlib.util.spec_from_file_location("update_tinyllm_docs", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.convert(markdown, "Title")
+
+    def test_keeps_placeholders_and_drops_markup(self):
+        out = self._convert(
+            "# Doc\n## Navigation\n- [Regions](#regions)\n---\n"
+            "### 3.1. **Add** a [region](#x)\n**Usage:** `region put <name> [parent]`<br>\n"
+        )
+        assert "Navigation" not in out and "---" not in out
+        assert "### Add a region" in out
+        assert "region put <name> [parent]" in out
+
+    def test_code_lines_never_become_headings(self):
+        out = self._convert("# Doc\n## Load\n```\n#Europe F\n```\n")
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        assert "    #Europe F" in out
+        assert [s.title for s in llm_docs.parse_markdown(out)] == ["Title > Load"]
 
 
 class TestPanelMemory:

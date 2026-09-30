@@ -11,9 +11,10 @@ Keyword search rather than embeddings on purpose: it needs no second model
 command for X", "how do I set the TX power" -- hinge on exact words like
 command and setting names, which is what keyword scoring matches best.
 
-The folder is seeded once with the starter notes shipped in
-``library/docs/`` and is the operator's from then on: files are never
-overwritten or restored, so edits and deletions stick. The index is rebuilt
+The folder is seeded with the starter notes shipped in ``library/docs/``
+and is the operator's from then on: each shipped file is copied once (a
+manifest remembers which), never overwritten or restored, so edits and
+deletions stick while files added in later releases still arrive. The index is rebuilt
 whenever a file's size or modification time changes.
 """
 
@@ -54,6 +55,9 @@ RARE_WORD_SHARE = 0.05
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _WORD = re.compile(r"[a-z0-9]+(?:\.[a-z0-9]+)*")
+# Words that say nothing about what is being asked. The second group is
+# small talk: a greeting is never a lookup, even when "hello" happens to be in
+# the notes (it is the default room guest password).
 _STOPWORDS = frozenset(
     [
         "a",
@@ -101,6 +105,29 @@ _STOPWORDS = frozenset(
         "there",
         "get",
         "set",
+        # Small talk: "hello" alone must not pull in the one note that happens
+        # to mention it.
+        "hello",
+        "hi",
+        "hey",
+        "hiya",
+        "thanks",
+        "thank",
+        "thx",
+        "ok",
+        "okay",
+        "yes",
+        "yeah",
+        "no",
+        "nope",
+        "bye",
+        "cheers",
+        "good",
+        "morning",
+        "afternoon",
+        "evening",
+        "night",
+        "lol",
     ]
 )
 
@@ -116,9 +143,15 @@ class Section:
 
 
 def _fold(word: str) -> str:
-    """Crude plural folding, so "lists" matches "list" and "adverts" "advert"."""
+    """Crude suffix folding so word forms meet: "lists"/"list",
+    "flooding"/"flooded"/"floods"/"flood". Applied to the notes and the question
+    alike, so the stems only have to agree, not be real words."""
+    if len(word) > 5 and word.endswith("ing"):
+        word = word[:-3]
+    elif len(word) > 4 and word.endswith("ed") and not word.endswith("eed"):
+        word = word[:-2]
     if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
-        return word[:-1]
+        word = word[:-1]
     return word
 
 
@@ -266,20 +299,31 @@ class DocsIndex:
             return picked
 
 
-def seed_docs(folder: Path) -> None:
-    """Create the docs folder with the shipped starter notes, once.
+# Remembers which shipped files a docs folder was already given, one name per
+# line, so a later release can add new ones without restoring deleted ones.
+SHIPPED_MANIFEST = ".shipped"
 
-    Only when the folder does not exist yet: after that it is the operator's,
-    and a file they deleted must stay deleted.
+
+def seed_docs(folder: Path) -> None:
+    """Give the docs folder any shipped starter notes it has not had yet.
+
+    Each shipped file is copied once: a file the operator edited is never
+    overwritten, and one they deleted stays deleted.
     """
-    if folder.exists():
-        return
+    manifest = folder / SHIPPED_MANIFEST
     try:
-        folder.mkdir(parents=True)
-        for shipped in SHIPPED_DOCS_DIR.glob("*.md"):
-            shutil.copyfile(shipped, folder / shipped.name)
+        offered = set(manifest.read_text().split()) if manifest.exists() else set()
+        new = [p for p in sorted(SHIPPED_DOCS_DIR.glob("*.md")) if p.name not in offered]
+        if not new and manifest.exists():
+            return
+        folder.mkdir(parents=True, exist_ok=True)
+        for shipped in new:
+            if not (folder / shipped.name).exists():
+                shutil.copyfile(shipped, folder / shipped.name)
+            offered.add(shipped.name)
+        manifest.write_text("".join(f"{name}\n" for name in sorted(offered)))
     except OSError as exc:
-        logger.warning("tinyllm docs: cannot create %s: %s", folder, exc)
+        logger.warning("tinyllm docs: cannot seed %s: %s", folder, exc)
 
 
 _indexes: dict[Path, DocsIndex] = {}
