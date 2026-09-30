@@ -30,7 +30,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SHIPPED_DOCS_DIR = Path(__file__).parent / "library" / "docs"
+SHIPPED_DOCS_DIR = Path(__file__).resolve().parents[2] / "library" / "docs"
 # A section longer than this is split at paragraph breaks, so one match does
 # not use the whole budget on text that was not the answer.
 SECTION_MAX_CHARS = 800
@@ -40,6 +40,16 @@ _B = 0.75
 # Title words count this many times: a section headed "TX Power" is about TX
 # power even if its body says "transmit".
 _TITLE_WEIGHT = 3
+# Relevance gate. BM25 alone scores any shared word, so "what is the power of
+# love?" would pull in the TX Power section. A section only counts when it
+# matches at least half of the question's meaningful words and at least two of
+# them -- or, for a one-word question, when that word is in its heading or rare
+# across the notes -- and
+# scores at least half as well as the best match.
+MIN_COVERAGE = 0.5
+MIN_MATCHED_TERMS = 2
+RELATIVE_FLOOR = 0.5
+RARE_WORD_SHARE = 0.05
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
@@ -105,15 +115,22 @@ class Section:
         return f"[{self.title}] {self.text}"
 
 
+def _fold(word: str) -> str:
+    """Crude plural folding, so "lists" matches "list" and "adverts" "advert"."""
+    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
+
+
 def _tokens(text: str) -> list[str]:
-    """Lowercase words; dotted names (``flood.advert.interval``) also count as
-    their parts, so either form of a setting name matches."""
+    """Lowercase words, plurals folded; dotted names (``flood.advert.interval``)
+    also count as their parts, so either form of a setting name matches."""
     out: list[str] = []
     for word in _WORD.findall(text.lower()):
         if "." in word:
-            out.extend(part for part in word.split(".") if part not in _STOPWORDS)
+            out.extend(_fold(part) for part in word.split(".") if part not in _STOPWORDS)
         if word not in _STOPWORDS:
-            out.append(word)
+            out.append(word if "." in word else _fold(word))
     return out
 
 
@@ -121,7 +138,8 @@ def parse_markdown(text: str, source: str = "") -> list[Section]:
     """Split a markdown file into sections at headings, then at paragraphs."""
     text = _COMMENT.sub("", text)
     sections: list[Section] = []
-    path: list[str] = []
+    # The open headings, (level, title), outermost first.
+    path: list[tuple[int, str]] = []
     body: list[str] = []
 
     def flush() -> None:
@@ -129,7 +147,7 @@ def parse_markdown(text: str, source: str = "") -> list[Section]:
         body.clear()
         if not content:
             return
-        title = " > ".join(path) or Path(source).stem
+        title = " > ".join(t for _, t in path) or Path(source).stem
         chunk = ""
         for paragraph in re.split(r"\n\s*\n", content):
             paragraph = " ".join(paragraph.split())
@@ -145,7 +163,11 @@ def parse_markdown(text: str, source: str = "") -> list[Section]:
         if match:
             flush()
             level = len(match.group(1))
-            path[:] = path[: level - 1] + [match.group(2)]
+            # A heading closes every open heading at its level or deeper, so
+            # siblings never nest -- whatever level a file starts at.
+            while path and path[-1][0] >= level:
+                path.pop()
+            path.append((level, match.group(2)))
         else:
             body.append(line)
     flush()
@@ -161,6 +183,7 @@ class DocsIndex:
         self._signature: tuple = ()
         self._sections: list[Section] = []
         self._docs: list[Counter[str]] = []
+        self._titles: list[set[str]] = []
         self._lengths: list[int] = []
         self._df: Counter[str] = Counter()
 
@@ -183,13 +206,28 @@ class DocsIndex:
         docs = [Counter(_tokens(s.title) * _TITLE_WEIGHT + _tokens(s.text)) for s in sections]
         self._sections = sections
         self._docs = docs
+        self._titles = [set(_tokens(s.title)) for s in sections]
         self._lengths = [sum(d.values()) for d in docs]
         self._df = Counter(term for d in docs for term in d)
         self._signature = signature
 
+    def _relevant(self, i: int, terms: set[str]) -> bool:
+        """The coverage part of the relevance gate (see MIN_COVERAGE)."""
+        # Words are what the asker typed: a dotted name also contributes its
+        # parts, which must not count as extra words matched.
+        words = {t for t in terms if "." not in t} or terms
+        matched = {t for t in words if t in self._docs[i]}
+        if len(words) == 1:
+            # One word: in the heading, or rare enough to be what the section
+            # is about (a distinctive name, not a word every section uses).
+            (word,) = words
+            rare = self._df[word] <= max(2, len(self._docs) * RARE_WORD_SHARE)
+            return bool(matched) and (word in self._titles[i] or rare)
+        return len(matched) >= MIN_MATCHED_TERMS and len(matched) >= MIN_COVERAGE * len(words)
+
     def search(self, query: str, max_chars: int) -> list[Section]:
-        """The best-matching sections, best first, together at most
-        ``max_chars`` when rendered. Empty when nothing matches."""
+        """The relevant sections, best first, together at most ``max_chars``
+        when rendered. Empty when nothing is relevant enough."""
         terms = set(_tokens(query))
         if not terms or max_chars <= 0:
             return []
@@ -210,12 +248,15 @@ class DocsIndex:
                     idf = math.log(1 + (count - df + 0.5) / (df + 0.5))
                     norm = _K1 * (1 - _B + _B * self._lengths[i] / average)
                     score += idf * tf * (_K1 + 1) / (tf + norm)
-                if score > 0:
+                if score > 0 and self._relevant(i, terms):
                     scored.append((score, i))
             scored.sort(reverse=True)
             picked: list[Section] = []
             used = 0
-            for _, i in scored:
+            floor = scored[0][0] * RELATIVE_FLOOR if scored else 0.0
+            for score, i in scored:
+                if score < floor:
+                    break
                 section = self._sections[i]
                 size = len(section.render()) + 1
                 if used + size > max_chars:

@@ -423,7 +423,13 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    `get`/`set` command; edit it, delete what you don't want, or add your own
    `.md` files -- every heading starts a searchable section. The search is
    plain keyword matching (no second model, no extra RAM), which is what
-   "what's the command for X" questions need.
+   "what's the command for X" questions need. A section is only used when it
+   matches enough of the question's words -- one shared word such as "power"
+   in "what is the power of love?" is not enough -- so notes stay out of
+   unrelated questions. The notes can be about anything, not just MeshCore.
+   **Ask the model whether the notes fit** adds a quick yes/no from the model
+   before using them, to filter matches that share words but not meaning; it
+   costs a short extra model pass and suits Qwen2.5 1.5B / Llama 3.2 1B best.
 
    **Context size** (512 / 1024 / 2048 tokens) is how much the model reads at
    once: the prompt, the question, DM history and reference notes share it.

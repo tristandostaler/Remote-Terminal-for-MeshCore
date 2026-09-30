@@ -102,7 +102,7 @@ operators).
   `MemAvailable` and the cgroup limit headroom) is below file + 64 + 128 MB.
   `n_threads_batch = n_threads` (default half the cores).
   **The model runs in a child process** (`_ModelProcess` →
-  `python -m app.bots.llm --worker`, JSON lines over stdin/stdout, one reply per
+  `python -m app.bots.bots_utils.tinyllm.llm --worker`, JSON lines over stdin/stdout, one reply per
   request; `_worker_main` moves fd 1 to stderr so native prints can't corrupt
   the protocol). The child sets its own `oom_score_adj` to 1000, so the kernel
   kills the model rather than the radio server; EOF/silence past
@@ -128,11 +128,19 @@ operators).
   out. `history_messages` (default 10) of them, trimmed to
   `HISTORY_MAX_CHARS`, starting with a user turn. A prompt over the context
   window with history is retried once without it.
-  **Reference notes** (`app/bots/llm_docs.py`): BM25 keyword search (no
+  **Reference notes** (`app/bots/bots_utils/tinyllm/llm_docs.py`): BM25 keyword search (no
   second model, no RAM) over the `.md` files in `settings.llm_docs_dir`
   (`tinyllm-docs` beside the database), split into sections at headings and
   at paragraphs past 800 chars; dotted setting names match whole or in parts;
-  the index rebuilds when a file's size/mtime changes. The folder is seeded
+  the index rebuilds when a file's size/mtime changes. Relevance gate
+  (`_relevant` + `RELATIVE_FLOOR`): a section needs >= half the question's
+  words and >= 2 of them (one-word questions: in its heading, or a rare word),
+  plus half the best score; plurals are folded. Optional model check
+  (`check_notes_with_model`): `LlmRuntime.choose` asks a generic yes/no ("do
+  these notes help?", with the section headings) and the model process forces
+  the reply to exactly "yes"/"no" with a llama.cpp grammar at temperature 0;
+  only when there are notes and >= 4 s left; a failed check keeps the notes;
+  it never triggers the unload-after-every-answer unload. The folder is seeded
   once from `library/docs/` and never restored (a deleted file stays
   deleted). `library/docs/meshcore.md`'s repeater-settings half is generated
   from `app/services/repeater_settings.py` -- regenerate it when that catalog

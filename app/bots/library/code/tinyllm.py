@@ -3,7 +3,7 @@
 Answers with a small GGUF model run on this server by llama-cpp-python —
 no Ollama, no cloud API, nothing to host. Pick the model in Settings: the
 dropdown shows each one's download size, RAM use, speed and quality, from the
-catalog in ``app/bots/llm.py``.
+catalog in ``app/bots/bots_utils/tinyllm/llm.py``.
 
 The first question after enabling (or after switching models) starts a one-time
 download plus load in the background and says so; ``ask`` on its own reports
@@ -18,7 +18,7 @@ import asyncio
 import re
 import time
 
-from app.bots.llm import (
+from app.bots.bots_utils.tinyllm.llm import (
     CONTEXT_CHOICES,
     CONTEXT_TOKENS,
     CUSTOM_MODEL,
@@ -58,6 +58,10 @@ ANSWER_WINDOW_SECONDS = 30
 # then without notes.
 CHARS_PER_TOKEN = 3
 TEMPLATE_OVERHEAD_CHARS = 200
+# The optional model check of the notes: its own time cap, and the least time
+# that must be left in the run to try it at all (the answer still follows).
+NOTES_CHECK_SECONDS = 2
+NOTES_CHECK_MIN_SECONDS = 4
 NOTES_HEADER = "\n\nReference notes (use them only if they answer the question):\n"
 _PLACEHOLDER_RE = re.compile(r"\{(radio_name|sender|time|date)\}")
 # A leading command prefix (!, ?, ...) or @[mention], then a trigger word.
@@ -203,6 +207,19 @@ BOT_META = {
             ),
         },
         {
+            "key": "check_notes_with_model",
+            "label": "Ask the model whether the notes fit (slower)",
+            "type": "bool",
+            "default": False,
+            "help": (
+                "When the keyword search finds notes, first ask the model a quick yes/no: do "
+                "they help answer this question? Filters matches that share words but not "
+                "meaning. Costs one short extra model pass (under a second on a Pi 5 with a "
+                "tiny model, more with bigger ones), skipped when time is short. Worth it with "
+                "Qwen2.5 1.5B or Llama 3.2 1B; the tiny models judge this poorly."
+            ),
+        },
+        {
             "key": "context_tokens",
             "label": "Context size",
             "type": "select",
@@ -304,6 +321,7 @@ BOT_META = {
         "max_messages": 1,
         "history_messages": 10,
         "use_docs": True,
+        "check_notes_with_model": False,
         "context_tokens": str(CONTEXT_TOKENS),
         "temperature": 0.7,
         "time_limit_seconds": 6,
@@ -346,12 +364,35 @@ def prompt_values(sender_name):
 
 
 def reference_notes(query, max_chars):
-    """Rendered reference notes for ``query`` within ``max_chars``, or ""."""
-    from app.bots.llm_docs import docs_index
+    """Reference notes for ``query`` within ``max_chars``: (rendered text,
+    section headings), or ("", []) when nothing is relevant enough."""
+    from app.bots.bots_utils.tinyllm.llm_docs import docs_index
 
     budget = max_chars - len(NOTES_HEADER)
     sections = docs_index().search(query, budget) if budget > 0 else []
-    return NOTES_HEADER + "\n".join(s.render() for s in sections) if sections else ""
+    if not sections:
+        return "", []
+    text = NOTES_HEADER + "\n".join(s.render() for s in sections)
+    return text, [s.title for s in sections]
+
+
+def notes_check_messages(question, titles):
+    """The yes/no question put to the model before using the notes. Generic on
+    purpose: the notes can be about anything the operator documents."""
+    return [
+        {
+            "role": "system",
+            "content": "You decide if reference notes are useful. Answer yes or no.",
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Notes about: {'; '.join(titles)}\n"
+                f"Question: {question}\n"
+                "Do these notes help answer the question?"
+            ),
+        },
+    ]
 
 
 def fit_messages(text, budget_bytes, max_messages):
@@ -539,7 +580,31 @@ async def ask(ctx, msg):
         # still finds the section the conversation is about.
         earlier = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
         room = free_chars - sum(len(m["content"]) for m in history)
-        notes = await asyncio.to_thread(reference_notes, f"{question} {earlier}", room)
+        notes, titles = await asyncio.to_thread(reference_notes, f"{question} {earlier}", room)
+        # Optional second opinion: the keyword gate matches words, not meaning
+        # ("what time is it" matches a Clock section). A quick yes/no from the
+        # model itself filters those -- only when there are notes to judge,
+        # and only with time to spare.
+        time_left = RUN_BUDGET_SECONDS - (time.monotonic() - started)
+        if (
+            notes
+            and ctx.settings.get("check_notes_with_model")
+            and time_left >= NOTES_CHECK_MIN_SECONDS
+        ):
+            try:
+                verdict = await asyncio.to_thread(
+                    llm_runtime.choose,
+                    notes_check_messages(question, titles),
+                    ("yes", "no"),
+                    NOTES_CHECK_SECONDS,
+                )
+                if verdict != "yes":
+                    notes = ""
+            except LlmWorkerDiedError as exc:
+                await ctx.reply_split(f"🤖 Sorry, {exc}. Try again, or pick a smaller model.")
+                return
+            except Exception as exc:  # noqa: BLE001 - a failed check keeps the notes
+                ctx.log(f"notes check skipped: {exc}", "WARNING")
 
     def ask_model(earlier, with_notes):
         system = {"role": "system", "content": prompt + (notes if with_notes else "")}

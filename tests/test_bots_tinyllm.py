@@ -1,4 +1,4 @@
-"""The ``tinyllm`` bot and its tiny-LLM runtime (``app/bots/llm.py``).
+"""The ``tinyllm`` bot and its tiny-LLM runtime (``app/bots/bots_utils/tinyllm/llm.py``).
 
 No test downloads or runs a real model: the runtime singleton is stubbed for
 the bot tests, and the runtime tests start the real model *process* with a fake
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.bots import llm
+from app.bots.bots_utils.tinyllm import llm
 from app.bots.engine import BotEngine
 from app.bots.library import get_library_entry
 from app.bots.runtime import load_bot_code
@@ -24,7 +24,7 @@ from app.models import BotTestRequest
 def _no_reference_notes(tmp_path, monkeypatch):
     """An empty docs folder unless a test brings its own, so the starter notes
     never leak into prompts other tests compare exactly."""
-    from app.bots import llm_docs
+    from app.bots.bots_utils.tinyllm import llm_docs
 
     empty = llm_docs.DocsIndex(tmp_path / "no-docs")
     monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: empty)
@@ -92,6 +92,14 @@ class _FakeRuntime:
         self.answer = answer
         self.asked: list = []
         self.state_after_wait = state
+        self.verdict = "yes"
+        self.checked = None
+
+    def choose(self, messages, choices, deadline_seconds):
+        self.checked = messages
+        if isinstance(self.verdict, Exception):
+            raise self.verdict
+        return self.verdict
 
     def ensure(self, spec, threads=0, repack=False, idle_unload_seconds=300, n_ctx=512):
         self.ensured = (spec, threads, repack)
@@ -325,8 +333,12 @@ _FAKE_LLAMA = textwrap.dedent(
             self.kwargs = kwargs
             self.repacking = low.llama_model_default_params().use_extra_bufts
 
-        def create_chat_completion(self, messages, **kwargs):
+        def create_chat_completion(self, messages, grammar=None, **kwargs):
             text = messages[-1]["content"]
+            if grammar is not None:
+                # The grammar's first alternative, as a deterministic pick.
+                pick = grammar.choices[0] if "pick-first" in text else grammar.choices[-1]
+                return {"choices": [{"message": {"content": pick}}]}
             if text == "too long":
                 raise ValueError("Requested tokens (900) exceed context window of 512")
             if text == "die":
@@ -338,6 +350,14 @@ _FAKE_LLAMA = textwrap.dedent(
             else:
                 words = ["Hel", "lo"]
             return ({"choices": [{"delta": {"content": w}}]} for w in words)
+
+    class LlamaGrammar:
+        @classmethod
+        def from_string(cls, text, verbose=True):
+            import json, re
+            grammar = cls()
+            grammar.choices = [json.loads(c) for c in re.findall(r'"[^"]*"', text)]
+            return grammar
     """
 )
 _FAKE_LOW = textwrap.dedent(
@@ -905,7 +925,7 @@ Yellow.
 class TestReferenceNotes:
     @pytest.fixture
     def notes(self, tmp_path, monkeypatch):
-        from app.bots import llm_docs
+        from app.bots.bots_utils.tinyllm import llm_docs
 
         folder = tmp_path / "docs"
         folder.mkdir()
@@ -977,7 +997,7 @@ class TestReferenceNotes:
 
 class TestDocsIndex:
     def test_sections_split_at_headings_and_long_paragraphs(self):
-        from app.bots import llm_docs
+        from app.bots.bots_utils.tinyllm import llm_docs
 
         text = "<!-- hidden -->\n# A\n## B\n" + "\n\n".join(["word " * 100] * 3)
         sections = llm_docs.parse_markdown(text, "x.md")
@@ -988,7 +1008,7 @@ class TestDocsIndex:
         assert "hidden" not in " ".join(s.text for s in sections)
 
     def test_dotted_setting_names_match_either_way(self, tmp_path):
-        from app.bots import llm_docs
+        from app.bots.bots_utils.tinyllm import llm_docs
 
         (tmp_path / "a.md").write_text(
             "## Flood advert\nUse flood.advert.interval hours.\n## Other\nx"
@@ -998,7 +1018,7 @@ class TestDocsIndex:
         assert index.search("advert interval", 500)[0].title == "Flood advert"
 
     def test_edits_are_picked_up(self, tmp_path):
-        from app.bots import llm_docs
+        from app.bots.bots_utils.tinyllm import llm_docs
 
         doc = tmp_path / "a.md"
         doc.write_text("## One\napples\n")
@@ -1008,7 +1028,7 @@ class TestDocsIndex:
         assert index.search("pears", 500)[0].title == "One"
 
     def test_seeded_once_and_never_restored(self, tmp_path):
-        from app.bots import llm_docs
+        from app.bots.bots_utils.tinyllm import llm_docs
 
         folder = tmp_path / "docs"
         llm_docs.seed_docs(folder)
@@ -1019,7 +1039,7 @@ class TestDocsIndex:
         assert not seeded.exists(), "a deleted starter file must stay deleted"
 
     def test_the_starter_notes_answer_common_questions(self):
-        from app.bots import llm_docs
+        from app.bots.bots_utils.tinyllm import llm_docs
 
         index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
         cases = {
@@ -1076,3 +1096,109 @@ class TestPanelMemory:
         runtime = _HistoryAwareRuntime()
         await _run(monkeypatch, runtime, channel)
         assert len(runtime.asked[0][0]) == 2
+
+
+class TestRelevanceGate:
+    def _index(self, tmp_path, text):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        (tmp_path / "notes.md").write_text(text)
+        return llm_docs.DocsIndex(tmp_path)
+
+    def test_one_shared_word_is_not_enough(self, tmp_path):
+        index = self._index(tmp_path, _NOTES)
+        assert index.search("what is the power of love", 800) == []
+        assert index.search("tx power", 800)[0].title == "Radio > TX Power (get tx / set tx)"
+
+    def test_one_word_questions_need_a_heading_or_a_rare_word(self, tmp_path):
+        text = "".join(f"## Topic {n}\nThe common word is here.\n" for n in range(40))
+        text += "## Apples\nRed fruit.\n## Misc\nA zeppelin is an airship.\n"
+        index = self._index(tmp_path, text)
+        assert index.search("apples", 800)[0].title == "Apples"
+        assert index.search("zeppelin", 800)[0].title == "Misc"
+        assert index.search("common", 800) == []
+
+    def test_weak_matches_trail_off(self, tmp_path):
+        text = (
+            "## Solar panel wiring\nSolar panel wiring for a solar repeater site.\n"
+            "## Garden\nA panel of wood and some wiring.\n"
+        )
+        titles = [s.title for s in self._index(tmp_path, text).search("solar panel wiring", 800)]
+        assert titles == ["Solar panel wiring"]
+
+    def test_notes_about_anything_work(self, tmp_path):
+        """The notes are not MeshCore-only: any topic an operator documents."""
+        index = self._index(
+            tmp_path,
+            "# Local trails\n## Mount Royal loop\nA 5 km loop, about 90 minutes, "
+            "open dawn to dusk.\n## Lachine canal path\nFlat, 14 km, paved; bikes welcome.\n",
+        )
+        hit = index.search("how long is the mount royal loop", 800)
+        assert hit and hit[0].title.endswith("Mount Royal loop")
+        assert index.search("can I bike on the canal path", 800)[0].title.endswith("canal path")
+        assert index.search("what is the capital of France", 800) == []
+
+
+class TestModelCheck:
+    @pytest.fixture
+    def notes(self, tmp_path, monkeypatch):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        folder = tmp_path / "docs"
+        folder.mkdir()
+        (folder / "radio.md").write_text(_NOTES)
+        index = llm_docs.DocsIndex(folder)
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: index)
+
+    async def _ask(self, monkeypatch, runtime, text="ask how do I change tx power", **settings):
+        await _run(monkeypatch, runtime, BotTestRequest(text=text), settings=settings)
+        return runtime.asked[0][0][0]["content"]
+
+    async def test_off_by_default(self, test_db, monkeypatch, notes):
+        runtime = _FakeRuntime()
+        runtime.verdict = "no"
+        assert "Reference notes" in await self._ask(monkeypatch, runtime)
+        assert runtime.checked is None
+
+    async def test_no_drops_the_notes_and_yes_keeps_them(self, test_db, monkeypatch, notes):
+        runtime = _FakeRuntime()
+        runtime.verdict = "no"
+        system = await self._ask(monkeypatch, runtime, check_notes_with_model=True)
+        assert "Reference notes" not in system
+        runtime = _FakeRuntime()
+        system = await self._ask(monkeypatch, runtime, check_notes_with_model=True)
+        assert "Reference notes" in system
+
+    async def test_the_check_is_generic_and_shows_the_headings(self, test_db, monkeypatch, notes):
+        runtime = _FakeRuntime()
+        await self._ask(monkeypatch, runtime, check_notes_with_model=True)
+        check = " ".join(m["content"] for m in runtime.checked)
+        assert "TX Power" in check and "how do I change tx power" in check
+        assert "MeshCore" not in check
+
+    async def test_no_notes_no_check(self, test_db, monkeypatch, notes):
+        runtime = _FakeRuntime()
+        await self._ask(
+            monkeypatch, runtime, text="ask tell me a joke", check_notes_with_model=True
+        )
+        assert runtime.checked is None
+
+    async def test_a_failed_check_keeps_the_notes(self, test_db, monkeypatch, notes):
+        runtime = _FakeRuntime()
+        runtime.verdict = llm.LlmBusyError("busy")
+        assert "Reference notes" in await self._ask(
+            monkeypatch, runtime, check_notes_with_model=True
+        )
+
+    def test_choose_through_the_model_process(self, tmp_path, fake_llama):
+        runtime = _runtime(tmp_path, fake_llama)
+        _load(runtime, idle_unload_seconds=0)
+        ask = [{"role": "user", "content": "pick-first please"}]
+        assert runtime.choose(ask, ("yes", "no"), 2) == "yes"
+        assert runtime.choose([{"role": "user", "content": "x"}], ("yes", "no"), 2) == "no"
+        # A check never unloads an unload-after-every-answer model: the answer follows.
+        assert runtime.status()["state"] == "ready"
+        runtime.generate(
+            [{"role": "user", "content": "hi"}], max_tokens=4, temperature=0, deadline_seconds=2
+        )
+        assert runtime.status()["unloaded"]
