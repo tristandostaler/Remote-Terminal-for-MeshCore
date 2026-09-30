@@ -356,6 +356,10 @@ class BotContext:
         # same check `admin_only` bots are gated on), so a bot can keep
         # diagnostics -- raw errors, paths -- for admins in DMs.
         self.sender_is_admin = sender_is_admin
+        # Test runs only: the Test tab's earlier messages in this conversation
+        # ({"text", "outgoing"}, oldest first). Test runs store nothing, so a
+        # bot reading a conversation's history uses this in their place.
+        self.test_transcript: list[dict[str, Any]] = []
 
     # -- persistence -----------------------------------------------------
     def mark_state_dirty(self) -> None:

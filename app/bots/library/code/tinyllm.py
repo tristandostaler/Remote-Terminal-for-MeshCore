@@ -3,7 +3,7 @@
 Answers with a small GGUF model run on this server by llama-cpp-python —
 no Ollama, no cloud API, nothing to host. Pick the model in Settings: the
 dropdown shows each one's download size, RAM use, speed and quality, from the
-catalog in ``app/bots/llm.py``.
+catalog in ``app/bots/bots_utils/tinyllm/llm.py``.
 
 The first question after enabling (or after switching models) starts a one-time
 download plus load in the background and says so; ``ask`` on its own reports
@@ -18,7 +18,9 @@ import asyncio
 import re
 import time
 
-from app.bots.llm import (
+from app.bots.bots_utils.tinyllm.llm import (
+    CONTEXT_CHOICES,
+    CONTEXT_TOKENS,
     CUSTOM_MODEL,
     DEFAULT_MODEL,
     LlmBusyError,
@@ -48,6 +50,20 @@ HISTORY_MAX_CHARS = 1000
 # so only what was sent this soon after a question can be its answer -- not
 # something the operator typed into the same DM later.
 ANSWER_WINDOW_SECONDS = 30
+# Rough prompt budgeting without a tokenizer in the server (only the model
+# process has one): ~3 characters per token is conservative for English, and
+# the chat template adds a little. What is left of the context after the
+# prompt, question and answer goes to DM history (up to half) and reference
+# notes (the rest); a prompt that still overflows is retried without history,
+# then without notes.
+CHARS_PER_TOKEN = 3
+TEMPLATE_OVERHEAD_CHARS = 200
+# The optional model check of the notes: its own time cap, and the least time
+# that must be left in the run to try it at all (the answer still follows).
+NOTES_CHECK_SECONDS = 2
+NOTES_CHECK_MIN_SECONDS = 4
+NOTES_HEADER = "\n\nReference notes (use them only if they answer the question):\n"
+_PLACEHOLDER_RE = re.compile(r"\{(radio_name|sender|time|date)\}")
 # A leading command prefix (!, ?, ...) or @[mention], then a trigger word.
 _COMMAND_RE = re.compile(
     r"^\W*(?:@\[[^\]]*\]\s*)?(" + "|".join(KEYWORDS) + r")\b\s*(.*)$",
@@ -74,10 +90,15 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.3.0",
+    "version": "1.4.0",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "settings_schema": [
+        {
+            "key": "_model",
+            "label": "Model",
+            "type": "section",
+        },
         {
             "key": "model",
             "label": "Model",
@@ -106,6 +127,11 @@ BOT_META = {
             "show_when": {"key": "model", "value": CUSTOM_MODEL},
         },
         {
+            "key": "_prompt",
+            "label": "Prompt",
+            "type": "section",
+        },
+        {
             "key": "prompt_mode",
             "label": "System prompt",
             "type": "select",
@@ -116,8 +142,9 @@ BOT_META = {
                     "label": "Match the selected model (changes with it)",
                     "description": (
                         "Each model comes with a prompt sized to what it can follow -- it is "
-                        "shown in the model's details above. Picking another model switches "
-                        "to its prompt."
+                        "shown in the model's details above, with {radio_name} and {sender} "
+                        "filled in when it is used. Picking another model switches to its "
+                        "prompt."
                     ),
                 },
                 {
@@ -133,13 +160,20 @@ BOT_META = {
         {
             "key": "system_prompt",
             "label": "Custom system prompt",
-            "type": "text",
+            "type": "textarea",
             "default": "",
             "help": (
                 "The bot's personality and rules. Keep it short and plain: the smallest "
-                "models repeat what the prompt says about them rather than follow it."
+                "models repeat what the prompt says about them rather than follow it. "
+                "Placeholders filled in for each question: {radio_name} (this radio's "
+                "name), {sender}, {time}, {date}."
             ),
             "show_when": {"key": "prompt_mode", "value": PROMPT_CUSTOM},
+        },
+        {
+            "key": "_answer",
+            "label": "Answers",
+            "type": "section",
         },
         {
             "key": "max_tokens",
@@ -163,22 +197,6 @@ BOT_META = {
             ),
         },
         {
-            "key": "history_messages",
-            "label": "DM memory (previous messages included)",
-            "type": "int",
-            "default": 10,
-            "min": 0,
-            "max": 20,
-            "help": (
-                "In a DM the bot remembers the conversation: this many earlier messages "
-                "(questions and answers) go to the model with each new question. 0 turns "
-                "it off. Read back from the DM conversation itself, so it survives "
-                "restarts; it starts over after an hour of silence or on `ask reset`. "
-                "Channels and rooms are never remembered. More memory makes a Pi slower "
-                "to answer."
-            ),
-        },
-        {
             "key": "temperature",
             "label": "Temperature",
             "type": "float",
@@ -198,6 +216,91 @@ BOT_META = {
                 "Generation stops here and the text so far is sent. Bot runs end at 10 s, and "
                 "the reply still has to go out, so this stays at 7 or less."
             ),
+        },
+        {
+            "key": "_memory",
+            "label": "Memory & reference notes",
+            "type": "section",
+        },
+        {
+            "key": "history_messages",
+            "label": "DM memory (previous messages included)",
+            "type": "int",
+            "default": 10,
+            "min": 0,
+            "max": 20,
+            "help": (
+                "In a DM the bot remembers the conversation: this many earlier messages "
+                "(questions and answers) go to the model with each new question. 0 turns "
+                "it off. Read back from the DM conversation itself, so it survives "
+                "restarts; it starts over after an hour of silence or on `ask reset`. "
+                "Channels and rooms are never remembered. More memory makes a Pi slower "
+                "to answer."
+            ),
+        },
+        {
+            "key": "use_docs",
+            "label": "Look up reference notes",
+            "type": "bool",
+            "default": True,
+            "help": (
+                "Search the markdown files in the tinyllm-docs folder (beside the database; "
+                "seeded with MeshCore basics and every repeater setting) and give the best "
+                "matches to the model with each question. Edit or add .md files there; "
+                "each heading starts a searchable section."
+            ),
+        },
+        {
+            "key": "check_notes_with_model",
+            "show_when": {"key": "use_docs", "value": "true"},
+            "label": "Ask the model whether the notes fit (slower)",
+            "type": "bool",
+            "default": False,
+            "help": (
+                "When the keyword search finds notes, first ask the model a quick yes/no: do "
+                "they help answer this question? Filters matches that share words but not "
+                "meaning. Costs one short extra model pass (under a second on a Pi 5 with a "
+                "tiny model, more with bigger ones), skipped when time is short. Worth it with "
+                "Qwen2.5 1.5B or Llama 3.2 1B; the tiny models judge this poorly."
+            ),
+        },
+        {
+            "key": "context_tokens",
+            "label": "Context size",
+            "type": "select",
+            "default": str(CONTEXT_TOKENS),
+            "options": [
+                {
+                    "value": "512",
+                    "label": "512 tokens (smallest, fastest)",
+                    "description": (
+                        "Room for the question plus a little DM history and a few reference "
+                        "notes. Best on a Pi."
+                    ),
+                },
+                {
+                    "value": "1024",
+                    "label": "1024 tokens (~16 MB more memory)",
+                    "description": (
+                        "About twice the history and notes. Slower to answer on a Pi, where "
+                        "every prompt token takes time."
+                    ),
+                },
+                {
+                    "value": "2048",
+                    "label": "2048 tokens (~48 MB more memory)",
+                    "description": (
+                        "Plenty of room for notes and history; for a desktop-class CPU. On a "
+                        "Pi a long prompt may not finish inside the 10 s bot limit."
+                    ),
+                },
+            ],
+            "help": "Changing it reloads the model.",
+        },
+        {
+            "key": "_performance",
+            "label": "Performance & memory use",
+            "type": "section",
         },
         {
             "key": "threads",
@@ -246,6 +349,9 @@ BOT_META = {
         "max_tokens": 40,
         "max_messages": 1,
         "history_messages": 10,
+        "use_docs": True,
+        "check_notes_with_model": False,
+        "context_tokens": str(CONTEXT_TOKENS),
         "temperature": 0.7,
         "time_limit_seconds": 6,
         "threads": 0,
@@ -255,12 +361,67 @@ BOT_META = {
 }
 
 
-def system_prompt_for(settings, spec):
-    """The prompt in effect: the operator's custom text, or the model's own."""
+def system_prompt_for(settings, spec, values=None):
+    """The prompt in effect -- the operator's custom text, or the model's own --
+    with its placeholders ({radio_name}, {sender}, {time}, {date}) filled in.
+    A plain substitution, so any other braces in a custom prompt are left be."""
     custom = str(settings.get("system_prompt") or "").strip()
-    if settings.get("prompt_mode") == PROMPT_CUSTOM and custom:
-        return custom
-    return spec.system_prompt
+    text = custom if settings.get("prompt_mode") == PROMPT_CUSTOM and custom else spec.system_prompt
+    values = values or {}
+    return _PLACEHOLDER_RE.sub(lambda m: str(values.get(m.group(1)) or m.group(0)), text)
+
+
+def _radio_name():
+    """This radio's advertised name, read without taking the radio lock."""
+    try:
+        from app.radio import radio_manager
+
+        mc = radio_manager.meshcore
+        return str((mc.self_info or {}).get("name") or "") if mc else ""
+    except Exception:  # noqa: BLE001 - a name is a nicety, never a failure
+        return ""
+
+
+def prompt_values(sender_name):
+    now = time.localtime()
+    return {
+        "radio_name": _radio_name() or "tinyllm",
+        "sender": sender_name or "someone",
+        "time": time.strftime("%H:%M", now),
+        "date": time.strftime("%Y-%m-%d", now),
+    }
+
+
+def reference_notes(query, max_chars):
+    """Reference notes for ``query`` within ``max_chars``: (rendered text,
+    section headings), or ("", []) when nothing is relevant enough."""
+    from app.bots.bots_utils.tinyllm.llm_docs import docs_index
+
+    budget = max_chars - len(NOTES_HEADER)
+    sections = docs_index().search(query, budget) if budget > 0 else []
+    if not sections:
+        return "", []
+    text = NOTES_HEADER + "\n".join(s.render() for s in sections)
+    return text, [s.title for s in sections]
+
+
+def notes_check_messages(question, titles):
+    """The yes/no question put to the model before using the notes. Generic on
+    purpose: the notes can be about anything the operator documents."""
+    return [
+        {
+            "role": "system",
+            "content": "You decide if reference notes are useful. Answer yes or no.",
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Notes about: {'; '.join(titles)}\n"
+                f"Question: {question}\n"
+                "Do these notes help answer the question?"
+            ),
+        },
+    ]
 
 
 def fit_messages(text, budget_bytes, max_messages):
@@ -329,20 +490,40 @@ def conversation_turns(messages, now):
     return history
 
 
-async def dm_history(sender_key, limit):
-    """The last ``limit`` messages of this DM conversation with the bot, trimmed
-    to HISTORY_MAX_CHARS and always starting with the sender's question."""
+def _trimmed(history, limit, max_chars):
+    """The last ``limit`` messages, within ``max_chars``, starting with a question."""
+    history = history[-limit:]
+    while history and sum(len(m["content"]) for m in history) > max_chars:
+        history.pop(0)
+    while history and history[0]["role"] != "user":
+        history.pop(0)
+    return history
+
+
+async def dm_history(sender_key, limit, max_chars=HISTORY_MAX_CHARS):
+    """The last ``limit`` messages of this DM conversation with the bot, read
+    back from the stored messages."""
     from app.repository import MessageRepository
 
     rows = await MessageRepository.get_all(
         limit=min(200, limit * 4 + 10), msg_type="PRIV", conversation_key=sender_key
     )
-    history = conversation_turns(rows, time.time())[-limit:]
-    while history and sum(len(m["content"]) for m in history) > HISTORY_MAX_CHARS:
-        history.pop(0)
-    while history and history[0]["role"] != "user":
-        history.pop(0)
-    return history
+    return _trimmed(conversation_turns(rows, time.time()), limit, max_chars)
+
+
+def panel_history(transcript, limit, max_chars=HISTORY_MAX_CHARS):
+    """The same, from the Bots › Test tab's own transcript: test runs store no
+    messages, so the panel sends its earlier exchanges with each run."""
+    from types import SimpleNamespace
+
+    now = time.time()
+    rows = [
+        SimpleNamespace(
+            text=m.get("text", ""), outgoing=bool(m.get("outgoing")), received_at=now, id=n
+        )
+        for n, m in enumerate(transcript)
+    ]
+    return _trimmed(conversation_turns(rows, now), limit, max_chars)
 
 
 def _number(ctx, key, default, low, high):
@@ -367,11 +548,23 @@ async def ask(ctx, msg):
         await ctx.reply("🤖 Conversation forgotten; starting fresh.")
         return
     started = time.monotonic()
+    if ctx.settings.get("use_docs", True):
+        # Create the notes folder on the bot's first run, not its first real
+        # question, so it is there to edit as soon as the bot has been used.
+        from app.bots.bots_utils.tinyllm.llm_docs import docs_index
+
+        await asyncio.to_thread(docs_index)
+    try:
+        n_ctx = int(ctx.settings.get("context_tokens") or CONTEXT_TOKENS)
+    except (TypeError, ValueError):
+        n_ctx = CONTEXT_TOKENS
+    n_ctx = n_ctx if n_ctx in CONTEXT_CHOICES else CONTEXT_TOKENS
     state = llm_runtime.ensure(
         spec,
         threads=int(_number(ctx, "threads", 0, 0, 32)),
         repack=bool(ctx.settings.get("fast_arm_layout", False)),
         idle_unload_seconds=int(_number(ctx, "unload_after_minutes", 5, 0, 1440) * 60),
+        n_ctx=n_ctx,
     )
     question = msg.arg_text.strip()
     if state in ("downloading", "loading"):
@@ -397,14 +590,67 @@ async def ask(ctx, msg):
     # DM memory: earlier turns with this sender, never in channels or rooms.
     session = msg.sender_key if (msg.is_dm and msg.sender_key) else None
     history_limit = int(_number(ctx, "history_messages", 10, 0, 20))
-    history = await dm_history(session, history_limit) if session and history_limit else []
-    system = {"role": "system", "content": system_prompt_for(ctx.settings, spec)}
+    max_tokens = int(_number(ctx, "max_tokens", 40, 16, 160))
+    prompt = system_prompt_for(ctx.settings, spec, prompt_values(msg.sender_name))
+    # What the context has room for once the prompt, question and answer are in.
+    free_chars = (
+        n_ctx * CHARS_PER_TOKEN
+        - len(prompt)
+        - len(question)
+        - max_tokens * CHARS_PER_TOKEN
+        - TEMPLATE_OVERHEAD_CHARS
+    )
+    use_docs = bool(ctx.settings.get("use_docs", True))
+    # History first, with all the room; notes get whatever it leaves, and at
+    # least half -- the history is trimmed back only if notes are then found.
+    history_room = min(max(0, free_chars), HISTORY_MAX_CHARS * n_ctx // CONTEXT_TOKENS)
+    history = []
+    if msg.is_dm and history_limit and history_room > 0:
+        if ctx.is_test and ctx.test_transcript:
+            history = panel_history(ctx.test_transcript, history_limit, history_room)
+        elif session:
+            history = await dm_history(session, history_limit, history_room)
+    notes = ""
+    if use_docs:
+        # The previous question too, so a follow-up ("and how do I set it?")
+        # still finds the section the conversation is about.
+        earlier = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
+        history_chars = sum(len(m["content"]) for m in history)
+        room = free_chars - min(history_chars, free_chars // 2)
+        notes, titles = await asyncio.to_thread(reference_notes, f"{question} {earlier}", room)
+        if notes:
+            history = _trimmed(history, len(history), free_chars - len(notes))
+        # Optional second opinion: the keyword gate matches words, not meaning
+        # ("what time is it" matches a Clock section). A quick yes/no from the
+        # model itself filters those -- only when there are notes to judge,
+        # and only with time to spare.
+        time_left = RUN_BUDGET_SECONDS - (time.monotonic() - started)
+        if (
+            notes
+            and ctx.settings.get("check_notes_with_model")
+            and time_left >= NOTES_CHECK_MIN_SECONDS
+        ):
+            try:
+                verdict = await asyncio.to_thread(
+                    llm_runtime.choose,
+                    notes_check_messages(question, titles),
+                    ("yes", "no"),
+                    NOTES_CHECK_SECONDS,
+                )
+                if verdict != "yes":
+                    notes = ""
+            except LlmWorkerDiedError as exc:
+                await ctx.reply_split(f"🤖 Sorry, {exc}. Try again, or pick a smaller model.")
+                return
+            except Exception as exc:  # noqa: BLE001 - a failed check keeps the notes
+                ctx.log(f"notes check skipped: {exc}", "WARNING")
 
-    def ask_model(earlier):
+    def ask_model(earlier, with_notes):
+        system = {"role": "system", "content": prompt + (notes if with_notes else "")}
         return asyncio.to_thread(
             llm_runtime.generate,
             [system, *earlier, {"role": "user", "content": question}],
-            max_tokens=int(_number(ctx, "max_tokens", 40, 16, 160)),
+            max_tokens=max_tokens,
             temperature=_number(ctx, "temperature", 0.7, 0.0, 1.5),
             # The whole run must end inside the engine's 10 s: time spent
             # reloading comes out of the answer's budget.
@@ -417,15 +663,20 @@ async def ask(ctx, msg):
             ),
         )
 
+    # Budgeting is an estimate; if the prompt still overflows the context, drop
+    # the history, then the notes, rather than not answering at all.
+    attempts = []
+    for attempt in ((history, bool(notes)), ([], bool(notes)), ([], False)):
+        if attempt not in attempts:
+            attempts.append(attempt)
     try:
-        try:
-            answer = await ask_model(history)
-        except LlmPromptTooLongError:
-            if not history:
-                raise
-            # The conversation outgrew the context window: answer this one
-            # question on its own rather than not at all.
-            answer = await ask_model([])
+        for n, (earlier, with_notes) in enumerate(attempts):
+            try:
+                answer = await ask_model(earlier, with_notes)
+                break
+            except LlmPromptTooLongError:
+                if n == len(attempts) - 1:
+                    raise
     except LlmBusyError:
         await ctx.reply("🤖 Busy answering someone else, try again shortly.")
         return

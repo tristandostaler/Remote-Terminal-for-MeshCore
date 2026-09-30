@@ -145,6 +145,7 @@ class TestModelDirsFollowTheDatabase:
         s = Settings(database_path="/mnt/radio/meshcore.db")
         assert s.aeic_model_dir == "/mnt/radio/models/aeic"
         assert s.llm_model_dir == "/mnt/radio/models/llm"
+        assert s.llm_docs_dir == "/mnt/radio/tinyllm-docs"
 
     def test_explicit_dirs_win(self, monkeypatch):
         monkeypatch.setenv("MESHCORE_LLM_MODEL_DIR", "/models/llm")

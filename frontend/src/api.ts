@@ -996,6 +996,8 @@ export const api = {
       channel_name?: string | null;
       room_key?: string | null;
       room_name?: string | null;
+      /** Earlier exchanges in this test conversation, oldest first. */
+      transcript?: { text: string; outgoing: boolean }[];
     }
   ) =>
     fetchJson<BotTestResponse>(`/bots/${id}/test`, { method: 'POST', body: JSON.stringify(body) }),

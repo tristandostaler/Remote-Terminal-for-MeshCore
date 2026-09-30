@@ -1088,6 +1088,7 @@ class BotEngine:
 
         logs: list[str] = []
         ctx = await self._make_context(loaded, msg=msg, is_test=True)
+        ctx.test_transcript = [m.model_dump() for m in request.transcript]
         original_log = ctx._log_fn
 
         def capture_log(level: str, message: str) -> None:

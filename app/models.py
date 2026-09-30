@@ -2555,6 +2555,11 @@ class BotUpdateRequest(BaseModel):
     ui_triggers: list[dict] | None = None
 
 
+class BotTestTranscriptMessage(BaseModel):
+    text: str
+    outgoing: bool = False
+
+
 class BotTestRequest(BaseModel):
     text: str
     is_dm: bool = False
@@ -2565,6 +2570,10 @@ class BotTestRequest(BaseModel):
     channel_name: str | None = None
     room_key: str | None = None
     room_name: str | None = None
+    # The Test tab's earlier exchanges in this conversation, oldest first (the
+    # panel's own messages; test runs store nothing). Bots that read a
+    # conversation's history use it in place of the stored messages.
+    transcript: list[BotTestTranscriptMessage] = Field(default_factory=list, max_length=200)
 
 
 class BotTestResponse(BaseModel):

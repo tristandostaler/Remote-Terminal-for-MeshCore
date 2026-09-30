@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # Where the `tinyllm` bot keeps the tiny GGUF language models it downloads on
     # first use (100 MB - 1.1 GB each). Follows the database the same way.
     llm_model_dir: str = "data/models/llm"
+    # Markdown reference notes the `tinyllm` bot searches for knowledge
+    # questions. Seeded once with a MeshCore starter file, then the operator's
+    # to edit. Follows the database the same way.
+    llm_docs_dir: str = "data/tinyllm-docs"
     # Switch for the AEIC neural image codec, read at RUNTIME.
     #
     # It governs RECONSTRUCTION, which is the half with a cost: 893 MiB of
@@ -124,6 +128,8 @@ class Settings(BaseSettings):
             self.aeic_model_dir = str(data_dir / "models" / "aeic")
         if "llm_model_dir" not in self.model_fields_set:
             self.llm_model_dir = str(data_dir / "models" / "llm")
+        if "llm_docs_dir" not in self.model_fields_set:
+            self.llm_docs_dir = str(data_dir / "tinyllm-docs")
         return self
 
     @model_validator(mode="after")

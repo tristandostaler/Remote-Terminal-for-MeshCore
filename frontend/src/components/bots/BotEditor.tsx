@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Copy, Play, Plus, X } from 'lucide-react';
+import { ArrowLeft, Copy, Play, Plus, Trash2, X } from 'lucide-react';
 
 import { api } from '../../api';
 import type {
@@ -240,17 +240,58 @@ function SchemaField({
     );
   }
 
+  if (field.type === 'section') {
+    return (
+      <div className="pt-2 first:pt-0 border-t border-border first:border-t-0">
+        <div className="text-[0.6875rem] uppercase tracking-wider text-muted-foreground font-medium pt-2">
+          {field.label}
+        </div>
+        {field.help && (
+          <div className="text-[0.6875rem] text-muted-foreground mt-0.5">{field.help}</div>
+        )}
+      </div>
+    );
+  }
+
+  if (field.type === 'textarea') {
+    const inputId = `bot-setting-${field.key}`;
+    return (
+      <div>
+        <label htmlFor={inputId} className="block text-xs text-muted-foreground mb-1">
+          {field.label}
+        </label>
+        <textarea
+          id={inputId}
+          value={String(current)}
+          onChange={(e) => onChange(e.target.value)}
+          rows={4}
+          className="w-full rounded-md border border-input bg-transparent px-2.5 py-1.5 text-[0.8125rem] resize-y"
+        />
+        {field.help && (
+          <div className="text-[0.6875rem] text-muted-foreground mt-1">{field.help}</div>
+        )}
+      </div>
+    );
+  }
+
   if (field.type === 'bool') {
     return (
-      <label className="flex items-center gap-2.5 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={Boolean(current)}
-          onChange={(e) => onChange(e.target.checked)}
-          className="w-4 h-4 rounded border-input accent-primary"
-        />
-        <span className="text-[0.8125rem]">{field.label}</span>
-      </label>
+      <div>
+        <label className="flex items-center gap-2.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={Boolean(current)}
+            onChange={(e) => onChange(e.target.checked)}
+            className="w-4 h-4 rounded border-input accent-primary"
+          />
+          <span className="text-[0.8125rem]">{field.label}</span>
+        </label>
+        {field.help && (
+          <div className="text-[0.6875rem] text-muted-foreground mt-1 ml-[1.625rem]">
+            {field.help}
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -374,7 +415,9 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
   const [testWhere, setTestWhere] = useState<'channel' | 'dm' | 'room'>('channel');
   const [testSender, setTestSender] = useState('TestUser');
   const [testRunning, setTestRunning] = useState(false);
-  const [transcript, setTranscript] = useState<{ input: string; response: BotTestResponse }[]>([]);
+  const [transcript, setTranscript] = useState<
+    { input: string; where: 'channel' | 'dm' | 'room'; response: BotTestResponse }[]
+  >([]);
 
   // Activity tab state
   const [runs, setRuns] = useState<BotRun[]>([]);
@@ -502,14 +545,28 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
   const handleRunTest = async () => {
     if (!bot || !testText.trim()) return;
     setTestRunning(true);
+    // Test runs store no messages, so a bot that reads a DM's history (tinyllm)
+    // gets the panel's earlier DM exchanges instead. Clearing the transcript
+    // starts that conversation over.
+    const dmTranscript =
+      testWhere === 'dm'
+        ? transcript
+            .filter((entry) => entry.where === 'dm')
+            .flatMap((entry) => [
+              { text: entry.input, outgoing: false },
+              ...entry.response.replies.map((reply) => ({ text: reply.text, outgoing: true })),
+            ])
+            .slice(-200)
+        : [];
     try {
       const response = await api.testBot(bot.id, {
         text: testText,
         is_dm: testWhere === 'dm',
         is_room: testWhere === 'room',
         sender_name: testSender || 'TestUser',
+        transcript: dmTranscript,
       });
-      setTranscript((prev) => [...prev, { input: testText, response }]);
+      setTranscript((prev) => [...prev, { input: testText, where: testWhere, response }]);
     } catch (err) {
       toast.error('Test run failed', {
         description: err instanceof Error ? err.message : undefined,
@@ -1373,8 +1430,22 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
             </p>
           </div>
           <div className="flex-1 min-w-0 p-4 overflow-y-auto flex flex-col gap-2.5">
-            <div className="text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium">
-              Transcript
+            <div className="flex items-center justify-between">
+              <div className="text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium">
+                Transcript
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[0.6875rem]"
+                onClick={() => setTranscript([])}
+                disabled={transcript.length === 0}
+                title="Clear the transcript; a DM test conversation starts over"
+              >
+                <Trash2 className="h-3 w-3 mr-1" aria-hidden="true" />
+                Clear
+              </Button>
             </div>
             {transcript.length === 0 && (
               <div className="border border-dashed border-input rounded-lg px-4 py-6 text-center text-xs text-muted-foreground">
@@ -1387,7 +1458,11 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
                   <span className="font-mono">{entry.input}</span>
                   <span className="text-[0.625rem] text-muted-foreground ml-2">
                     as {testSender || 'TestUser'}{' '}
-                    {testWhere === 'dm' ? '(DM)' : testWhere === 'room' ? 'in a room' : 'in #test'}
+                    {entry.where === 'dm'
+                      ? '(DM)'
+                      : entry.where === 'room'
+                        ? 'in a room'
+                        : 'in #test'}
                   </span>
                 </div>
                 {entry.response.error ? (

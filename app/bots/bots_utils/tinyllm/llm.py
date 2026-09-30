@@ -13,7 +13,7 @@ This module owns what must outlive a single bot run:
   is re-exec'd whenever the operator edits or reconfigures it, so a model held in
   the bot's own namespace would be reloaded on every settings save.
 
-The model itself runs in a **child process** (``python -m app.bots.llm``, see
+The model itself runs in a **child process** (``python -m app.bots.bots_utils.tinyllm.llm``, see
 :func:`_worker_main`), never in the server: the child raises its own
 ``oom_score_adj`` to the maximum, so when memory runs out the kernel kills the
 model and the radio server keeps running. The server never imports llama.cpp.
@@ -60,10 +60,15 @@ DISK_HEADROOM_BYTES = 512 * 1024 * 1024
 # Memory settings. Measured on a model with SmolLM2 135M Q8_0's exact shape:
 # ~200 MB in total, of which only ~45 MB cannot be reclaimed.
 #
-# Context window: a mesh prompt (system prompt + a question clipped to 500
-# characters) plus a 160-token answer fits in 512 tokens; the KV cache scales
-# with it, and 1024 cost 16 MB more for nothing.
+# Context window: the default. A mesh prompt (system prompt + a question
+# clipped to 500 characters) plus a short answer fits in 512 tokens; DM history
+# and reference notes fill what is left. The bot's "Context size" setting can
+# raise it (1024 / 2048) for more notes and history, at the cost of memory for
+# the KV cache (CONTEXT_MB_PER_1K_TOKENS, a generous per-model average) and of
+# prompt time on a slow CPU.
 CONTEXT_TOKENS = 512
+CONTEXT_CHOICES = (512, 1024, 2048)
+CONTEXT_MB_PER_1K_TOKENS = 32
 # Prompt batch size: the compute buffer scales with it. Mesh prompts are short,
 # so small batches cost no speed worth noticing.
 BATCH_TOKENS = 64
@@ -181,18 +186,31 @@ def _fmt_mb(mb: int) -> str:
 # low-bandwidth mesh radio network", it answers "hello" by describing itself as
 # one (seen on a real node). So the tiny ones get one plain instruction, and
 # nothing about their setting; a character limit is meaningless to them, and
-# answer length is capped in code anyway. Larger models can use a little more.
+# answer length is capped in code anyway. The 0.5B+ models can use context:
+# who they are, where they run, and to admit what they don't know rather than
+# make up MeshCore facts. Placeholders ({radio_name}, {sender}, {time},
+# {date}) are filled in by the bot; see PROMPT_PLACEHOLDERS.
 TINY_PROMPT = "You are a friendly chatbot. Reply with one short sentence."
 GEMMA_PROMPT = "Reply with one short, friendly sentence."
 SMALL_PROMPT = (
-    "You are a helpful assistant in a radio chat. "
-    "Answer in one or two short sentences of plain text."
+    "You are {radio_name}, a helpful bot on a MeshCore mesh radio network. People "
+    "message you from small radios, so answer in one or two short sentences of "
+    "plain text. If you don't know, say so."
 )
 LARGE_PROMPT = (
-    "You are a helpful assistant in a radio chat. Answer in one or two short "
-    "sentences of plain text, under 140 characters."
+    "You are {radio_name}, a helpful bot on a MeshCore mesh radio network, talking "
+    "with {sender}. People message you from small radios over LoRa, so answer in one "
+    "or two short sentences of plain text, under 140 characters. If you don't know "
+    "something, say so instead of guessing."
 )
 CUSTOM_MODEL_PROMPT = "You are a friendly chatbot. Reply with one or two short sentences."
+# What a prompt (default or custom) may contain; the bot fills them in.
+PROMPT_PLACEHOLDERS = {
+    "radio_name": "this radio's name",
+    "sender": "the name of the person asking",
+    "time": "the current time (HH:MM)",
+    "date": "today's date (YYYY-MM-DD)",
+}
 
 CATALOG: tuple[ModelSpec, ...] = (
     ModelSpec(
@@ -458,6 +476,12 @@ class LlmWorkerDiedError(RuntimeError):
     """The model process stopped mid-answer; the message says why, in plain words."""
 
 
+class LlmWorkerTimeoutError(LlmWorkerDiedError):
+    """The model process did not answer in time and was stopped. Unlike a
+    crash this says nothing about the model being unusable -- a slow CPU or a
+    long prompt -- so the next question simply reloads it, with no retry pause."""
+
+
 # The child process: how long a load may take (a cold read of a 1 GB model from
 # an SD card) and how long past its own deadline an answer may be late before
 # the child is presumed stuck and killed.
@@ -467,7 +491,7 @@ ANSWER_GRACE_SECONDS = 3
 IDLE_CHECK_SECONDS = 10
 DEFAULT_IDLE_UNLOAD_SECONDS = 300
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 def _exit_reason(returncode: int | None) -> str:
@@ -490,7 +514,14 @@ class _ModelProcess:
     """
 
     def __init__(
-        self, path: Path, *, threads: int, repack: bool, log_path: Path, env: dict | None
+        self,
+        path: Path,
+        *,
+        threads: int,
+        repack: bool,
+        n_ctx: int = CONTEXT_TOKENS,
+        log_path: Path,
+        env: dict | None,
     ) -> None:
         child_env = dict(os.environ if env is None else env)
         child_env["PYTHONPATH"] = os.pathsep.join(
@@ -498,7 +529,7 @@ class _ModelProcess:
         )
         self._log = log_path.open("w")
         self._proc = subprocess.Popen(
-            [sys.executable, "-m", "app.bots.llm", "--worker"],
+            [sys.executable, "-m", "app.bots.bots_utils.tinyllm.llm", "--worker"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self._log,
@@ -511,7 +542,7 @@ class _ModelProcess:
             {
                 "cmd": "load",
                 "path": str(path),
-                "n_ctx": CONTEXT_TOKENS,
+                "n_ctx": n_ctx,
                 "n_batch": BATCH_TOKENS,
                 "threads": threads,
                 "use_mmap": USE_MMAP,
@@ -539,7 +570,7 @@ class _ModelProcess:
             line = ""
         if line is None:
             self.close()
-            raise LlmWorkerDiedError(f"the model did not answer within {timeout:.0f} s")
+            raise LlmWorkerTimeoutError(f"the model did not answer within {timeout:.0f} s")
         if not line:
             returncode = self._wait()
             self.close()
@@ -568,6 +599,14 @@ class _ModelProcess:
                 "temperature": temperature,
                 "deadline": deadline,
             },
+            deadline + ANSWER_GRACE_SECONDS,
+        )
+
+    def choose(
+        self, messages: list[dict[str, str]], choices: tuple[str, ...], *, deadline: float
+    ) -> dict[str, Any]:
+        return self._request(
+            {"cmd": "choose", "messages": messages, "choices": list(choices)},
             deadline + ANSWER_GRACE_SECONDS,
         )
 
@@ -611,7 +650,8 @@ class LlmRuntime:
         self._total_bytes = 0
         self._worker: threading.Thread | None = None
         # (spec, threads, repack) of the current/last load: a change reloads.
-        self._load_key: tuple[ModelSpec, int, bool] | None = None
+        # (spec, threads, repack, n_ctx) of the current/last load: a change reloads.
+        self._load_key: tuple[ModelSpec, int, bool, int] | None = None
         self._failed_at = 0.0
         self._last_used = 0.0
         self._unloaded = False
@@ -668,17 +708,19 @@ class LlmRuntime:
         threads: int = 0,
         repack: bool = False,
         idle_unload_seconds: int = DEFAULT_IDLE_UNLOAD_SECONDS,
+        n_ctx: int = CONTEXT_TOKENS,
     ) -> str:
         """Make ``spec`` the loaded model, in the background. Returns the state.
 
         ``ready`` means :meth:`generate` can be called now. A preparation that is
         already running is never interrupted: asking for another model meanwhile
         returns the current state, and the switch happens on a later call.
-        Changing ``threads`` or ``repack`` reloads the model with them. An
+        Changing ``threads``, ``repack`` or ``n_ctx`` reloads the model with them. An
         unloaded model is reloaded. ``idle_unload_seconds`` is how long an unused
         model stays loaded (0: unload right after each answer).
         """
-        load_key = (spec, threads, repack)
+        n_ctx = n_ctx if n_ctx in CONTEXT_CHOICES else CONTEXT_TOKENS
+        load_key = (spec, threads, repack, n_ctx)
         with self._state_lock:
             self._idle_unload_seconds = max(0, int(idle_unload_seconds))
             busy = self._state in ("downloading", "loading")
@@ -697,7 +739,7 @@ class LlmRuntime:
             self._total_bytes = spec.download_mb << 20
             self._worker = threading.Thread(
                 target=self._prepare,
-                args=(spec, threads, repack),
+                args=(spec, threads, repack, n_ctx),
                 name="llm-prepare",
                 daemon=True,
             )
@@ -718,7 +760,9 @@ class LlmRuntime:
                 setattr(self, f"_{name}", value)
             self._state_changed.notify_all()
 
-    def _prepare(self, spec: ModelSpec, threads: int, repack: bool = False) -> None:
+    def _prepare(
+        self, spec: ModelSpec, threads: int, repack: bool = False, n_ctx: int = CONTEXT_TOKENS
+    ) -> None:
         try:
             # The package may have been installed since the server started
             # (run.sh compiles it in the background), so drop stale finder caches.
@@ -732,7 +776,7 @@ class LlmRuntime:
             # Drop the previous model first, so a switch never holds two in RAM.
             with self._generate_lock:
                 self._stop_process()
-                self._check_memory(spec, path, repack)
+                self._check_memory(spec, path, repack, n_ctx)
                 # One thread count for both phases: llama.cpp otherwise runs the
                 # prompt on every core, and a Pi pinned at 100% on a marginal
                 # power supply browns out and reboots.
@@ -741,6 +785,7 @@ class LlmRuntime:
                     path,
                     threads=n_threads,
                     repack=repack,
+                    n_ctx=n_ctx,
                     log_path=self.model_dir / ".worker.log",
                     env=self._worker_env,
                 )
@@ -758,7 +803,9 @@ class LlmRuntime:
                 failed_at=failed_at,
             )
 
-    def _check_memory(self, spec: ModelSpec, path: Path, repack: bool = False) -> None:
+    def _check_memory(
+        self, spec: ModelSpec, path: Path, repack: bool = False, n_ctx: int = CONTEXT_TOKENS
+    ) -> None:
         """Refuse a load that would not leave the system room to breathe.
 
         With repacking on, the weights may be held twice (see _weight_repacking).
@@ -767,7 +814,9 @@ class LlmRuntime:
         if available is None:
             return
         weights_mb = (path.stat().st_size >> 20) * (2 if repack else 1)
-        needed = weights_mb + LOAD_OVERHEAD_MB + MEMORY_RESERVE_MB
+        # The default context is part of LOAD_OVERHEAD_MB; a larger one costs more.
+        extra_ctx_mb = max(0, n_ctx - CONTEXT_TOKENS) * CONTEXT_MB_PER_1K_TOKENS // 1024
+        needed = weights_mb + extra_ctx_mb + LOAD_OVERHEAD_MB + MEMORY_RESERVE_MB
         if available < needed:
             raise LlmUserError(
                 f"not enough free memory for {spec.name}: needs about {needed} MB, "
@@ -885,6 +934,34 @@ class LlmRuntime:
         :class:`LlmWorkerDiedError` when the model process died (out of memory,
         typically), and ``RuntimeError`` when no model is ready.
         """
+        reply = self._call(
+            lambda proc: proc.generate(
+                messages, max_tokens=max_tokens, temperature=temperature, deadline=deadline_seconds
+            ),
+            final=True,
+        )
+        return str(reply.get("text", "")).strip()
+
+    def choose(
+        self, messages: list[dict[str, str]], choices: tuple[str, ...], deadline_seconds: float
+    ) -> str:
+        """Which of ``choices`` the model picks as its next word (blocking).
+
+        The model process constrains the output to exactly one of them with a
+        llama.cpp grammar at temperature 0, so a small model cannot ramble or
+        answer off-script: the result is simply the choice it rates likelier.
+        Used for quick yes/no checks before an answer, so it never unloads an
+        idle-0 model (the answer that follows needs it). Raises like
+        :meth:`generate`.
+        """
+        reply = self._call(
+            lambda proc: proc.choose(messages, choices, deadline=deadline_seconds), final=False
+        )
+        return str(reply.get("text", "")).strip()
+
+    def _call(self, send: Any, *, final: bool) -> dict[str, Any]:
+        """One request to the model process, serialized; a dead process is
+        reported in plain words and puts the runtime in ``error``."""
         if not self._generate_lock.acquire(timeout=1.0):
             raise LlmBusyError("busy answering someone else")
         try:
@@ -892,12 +969,13 @@ class LlmRuntime:
             if proc is None or self.status()["state"] != "ready":
                 raise RuntimeError("model is not loaded")
             try:
-                reply = proc.generate(
-                    messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    deadline=deadline_seconds,
-                )
+                reply = send(proc)
+            except LlmWorkerTimeoutError as exc:
+                # Stuck mid-request, so it was stopped; reload on the next question.
+                self._proc = None
+                self._set(state="idle", unloaded=True)
+                logger.warning("tinyllm bot: %s; it reloads on the next question", exc)
+                raise
             except LlmWorkerDiedError as exc:
                 self._proc = None
                 self._set(
@@ -912,10 +990,10 @@ class LlmRuntime:
                 raise LlmPromptTooLongError(reply.get("error", ""))
             if not reply.get("ok"):
                 raise RuntimeError(reply.get("error") or "generation failed")
-            return str(reply.get("text", "")).strip()
+            return reply
         finally:
             self._set(last_used=time.monotonic())
-            if self._idle_unload_seconds == 0 and self._proc is not None:
+            if final and self._idle_unload_seconds == 0 and self._proc is not None:
                 self._stop_process()
                 self._set(state="idle", unloaded=True)
             self._generate_lock.release()
@@ -953,8 +1031,29 @@ def _stream_answer(llm: Any, request: dict[str, Any]) -> str:
     return "".join(pieces)
 
 
+def _choose(llm: Any, request: dict[str, Any]) -> str:
+    """The model's pick among ``request["choices"]``, forced by a grammar."""
+    from llama_cpp import LlamaGrammar  # type: ignore[import-not-found]
+
+    choices = [str(c) for c in request["choices"]]
+    rule = " | ".join(json.dumps(c) for c in choices)
+    grammar = LlamaGrammar.from_string(f"root ::= {rule}", verbose=False)
+    try:
+        out = llm.create_chat_completion(
+            messages=request["messages"],
+            max_tokens=max(len(c) for c in choices),
+            temperature=0.0,
+            grammar=grammar,
+        )
+    except ValueError as exc:
+        if "context window" in str(exc):
+            raise LlmPromptTooLongError(str(exc)) from exc
+        raise
+    return str(out["choices"][0]["message"].get("content") or "").strip()
+
+
 def _worker_main() -> int:
-    """Entry point of the model process: ``python -m app.bots.llm --worker``."""
+    """Entry point of the model process: ``python -m app.bots.bots_utils.tinyllm.llm --worker``."""
     # First in line for the OOM killer, so running out of memory costs the model,
     # not the radio server. Raising one's own score needs no privilege.
     with contextlib.suppress(OSError):
@@ -986,6 +1085,10 @@ def _worker_main() -> int:
                 if llm is None:
                     raise RuntimeError("model is not loaded")
                 reply = {"ok": True, "text": _stream_answer(llm, request)}
+            elif request["cmd"] == "choose":
+                if llm is None:
+                    raise RuntimeError("model is not loaded")
+                reply = {"ok": True, "text": _choose(llm, request)}
             else:
                 reply = {"ok": False, "error": f"unknown command {request['cmd']!r}"}
         except LlmPromptTooLongError as exc:
