@@ -67,11 +67,22 @@ function makeBot(): Bot {
     is_legacy: false,
     load_error: null,
     runs_24h: 0,
+    deletable: true,
   };
 }
 
 describe('BotEditor settings schema URL fields', () => {
   afterEach(() => vi.restoreAllMocks());
+
+  it('offers Delete only for deletable bots', async () => {
+    vi.spyOn(api, 'getBot').mockResolvedValue({ ...makeBot(), deletable: false });
+    render(
+      <BotEditor botId="bot-1" channels={[]} contacts={[]} onBack={vi.fn()} onDeleted={vi.fn()} />
+    );
+    // The Enabled toggle stays: a protected bot can still be switched off.
+    expect(await screen.findByText('Enabled')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+  });
 
   it('renders editable and generated URLs, preserving provider placeholders and copying', async () => {
     vi.spyOn(api, 'getBot').mockResolvedValue(makeBot());

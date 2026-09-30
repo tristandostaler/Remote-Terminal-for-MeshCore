@@ -16,7 +16,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 
 from app.bots.cron import parse_cron, validate_cron
 from app.bots.engine import bot_engine
-from app.bots.library import get_library_entry, list_library
+from app.bots.library import UNDELETABLE_BUILTINS, get_library_entry, list_library
 from app.bots.runtime import BotCodeError, load_bot_code
 from app.models import (
     Bot,
@@ -371,6 +371,11 @@ async def update_bot(bot_id: str, body: BotUpdateRequest) -> Bot:
 
 @router.delete("/{bot_id}")
 async def delete_bot(bot_id: str) -> dict[str, str]:
+    record = await BotRepository.get(bot_id)
+    if record is not None and record.builtin_key in UNDELETABLE_BUILTINS:
+        raise HTTPException(
+            status_code=403, detail=f"{record.name} cannot be deleted — disable it instead"
+        )
     deleted = await BotRepository.delete(bot_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="bot not found")

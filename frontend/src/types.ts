@@ -1723,6 +1723,8 @@ export interface Bot {
   is_legacy: boolean;
   load_error: string | null;
   runs_24h: number;
+  /** False for built-ins that can be disabled but not deleted (the `bots` bot). */
+  deletable: boolean;
 }
 
 export interface BotUpdatePayload {
@@ -1838,6 +1840,8 @@ export interface BotEngineSettings {
   banned_users: string[];
   profanity_mode: 'off' | 'censor' | 'drop';
   admin_users: BotAdminUser[];
+  /** How to reach whoever runs these bots; `!author` / `!source` answer with it. */
+  author_contact: string;
 }
 
 export interface BotEngineStatus {

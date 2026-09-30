@@ -18,6 +18,7 @@ dict (read by exec'ing the source through the normal loader):
         "scope": {...},                # optional; {"channels":..., "rooms":...},
                                        # default is #bot/#bots + DMs, no rooms
         "admin_only": False,           # optional
+        "enabled_by_default": False,   # optional; True seeds the bot enabled
         "cooldown_seconds": 0,         # optional
         "per_user_cooldown_seconds": 0,
         "queue_threshold_seconds": 0,
@@ -29,8 +30,11 @@ noise for the whole mesh.
 
 Seeding is additive and non-destructive: a bot the operator modified
 (``modified = 1``) is never touched; an unmodified built-in is refreshed when
-the library ships a newer ``version``. All seeded bots start **disabled** —
-enabling what a node answers to is the operator's call.
+the library ships a newer ``version``. Seeded bots start **disabled** —
+enabling what a node answers to is the operator's call — except the few whose
+``BOT_META["enabled_by_default"]`` is true: the #bots etiquette commands
+(``bots``, ``source``) that every bot is expected to answer. The flag applies
+to the insert only; an operator who disables one is never overridden.
 
 Bots that were *merged* into another bot are handled by ``retire_merged_bots``,
 which runs right after seeding — see ``MERGED_BOTS``.
@@ -90,6 +94,13 @@ def get_library_entry(builtin_key: str) -> dict[str, Any] | None:
         if entry["key"] == builtin_key:
             return entry
     return None
+
+
+# Built-ins the operator can disable but never delete. ``bots`` answers the
+# #bots discovery command every bot is expected to implement; a node that could
+# delete it would also lose the row seeding keeps enabled-by-default, and a
+# deleted row would just be re-seeded (enabled) on the next start anyway.
+UNDELETABLE_BUILTINS = frozenset({"bots"})
 
 
 # Built-in bots that were merged into another bot: retired key -> surviving key.
@@ -229,7 +240,7 @@ async def ensure_seeded() -> int:
                 description=entry["description"],
                 long_description=entry.get("long_description", ""),
                 code=entry["code"],
-                enabled=False,
+                enabled=bool(entry.get("enabled_by_default", False)),
                 admin_only=bool(entry.get("admin_only", False)),
                 respond_to_dms=bool(entry.get("respond_to_dms", True)),
                 scope=entry.get("scope"),

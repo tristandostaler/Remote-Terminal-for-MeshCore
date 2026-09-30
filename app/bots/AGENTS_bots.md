@@ -87,7 +87,8 @@ operators).
   line the bots list shows, `long_description` the 3-5 lines the editor's
   Settings tab shows under it. Seeding backfills an empty `long_description`
   without a version bump (only an empty one — never over an operator's text). Seeded at startup (`ensure_seeded`): inserts are
-  **disabled by default**; unmodified built-ins refresh on version bumps;
+  **disabled by default** unless `BOT_META["enabled_by_default"]` is true
+  (only `bots` and `source`, the #bots etiquette commands; insert-time only); unmodified built-ins refresh on version bumps;
   operator-modified ones are never touched. "Reset to default" restores from
   the shipped file.
   - **Deleting a library file is not enough to remove a bot.** Seeding never
@@ -108,7 +109,7 @@ operators).
 `bot_runs` (bounded history, feeds the dashboard),
 `bot_schedules` (standalone cron messages), `bot_feeds`, and the singleton
 `bot_engine_settings` (prefix, mention mode, rate limits, language, moderation,
-admin users). Repository: `app/repository/bots.py`.
+admin users, author contact). Repository: `app/repository/bots.py`.
 
 ## API
 
@@ -146,6 +147,34 @@ token gate only.
   on purpose: they have `msg.room_key`, and `ctx.send` must never mistake a room
   for a channel.
 - Seeded bots ship disabled — enabling what a node answers is an operator act.
+  The one exception is the #bots etiquette pair, `bots` (answers `!bots`:
+  what this bot is and its commands) and `source` (`!source` / `!author`: code
+  link and operator contact). Every bot on #bot / #bots is expected to answer
+  those, so they carry `enabled_by_default: True`, stay on the default
+  #bot / #bots + DMs scope, and have a 10 s per-bot cooldown. The flag is read
+  only when the row is inserted: an operator who disables either is never
+  re-enabled by seeding or a version refresh. Keep that list short — the flag
+  is for courtesy commands, not features.
+  - **`!bots` and `!author` always answer.** `UNIVERSAL_COMMAND_RE` in
+    `engine.py` lets a literal `!bots` / `!author` count as prefixed whatever
+    `command_prefix` is (another symbol, several, or empty), and
+    `is_universal_command` skips the `require_prefix` and `mention_mode` gates
+    for them, so the etiquette commands work on every node however it is
+    configured. Scope, the enabled flag, `admin_only` and the rate limits still
+    apply. They are the only exceptions: `!ping` or `!source` on a `?` node
+    still do nothing.
+  - **The author contact is an engine setting** (`bot_engine_settings.author_contact`,
+    migration 092; Bots › Engine › Author contact, next to the prefix), handed
+    to every run as `BotContext.author_contact`. Engine-wide so it is set once
+    and survives a bot reset; the `source` bot has no contact setting of its own.
+  - `BotContext.command_prefix` is the node's first configured prefix (`""`
+    when none), so a reply can spell commands the way they are typed here —
+    the `bots` bot's `help` / `source` / `author` hints use it.
+  - **The `bots` bot cannot be deleted**, only disabled.
+    `UNDELETABLE_BUILTINS` (`library/__init__.py`) makes `DELETE /api/bots/{id}`
+    answer 403, and the derived `Bot.deletable` field hides the editor's Delete
+    button. Protection is keyed on `builtin_key`, which the API never lets an
+    operator change. `source` stays deletable.
 - New and seeded bots are scoped to `#bot` / `#bots` + DMs, never "all
   channels": a command bot on Public is noise for the whole mesh. A built-in may
   widen its own default via `BOT_META["scope"]`, but nothing may default to

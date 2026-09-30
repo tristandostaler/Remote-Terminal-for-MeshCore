@@ -80,6 +80,29 @@ class TestPrefixAndAdmin:
         assert text == "wx seattle"
         assert not had_prefix
 
+    def test_bang_bots_bypasses_any_prefix(self):
+        """'!bots' is the #bots discovery convention: it matches whatever prefix is set."""
+        for prefix in ("?", "", "!!"):
+            self.engine.settings = BotEngineSettings(command_prefix=prefix)
+            for raw in ("!bots", "!BOTS", "!bots please", "!author", "!Author me"):
+                text, had_prefix, _ = self.engine._strip_prefix_and_mention(raw)
+                assert text == raw[1:], (prefix, raw)
+                assert had_prefix, (prefix, raw)
+
+    def test_bang_bots_is_universal_even_after_a_mention(self):
+        self.engine._node_name = lambda: "MyNode"  # type: ignore[method-assign]
+        assert self.engine.is_universal_command("!bots")
+        assert self.engine.is_universal_command("@[MyNode] !bots")
+        assert self.engine.is_universal_command("@[MyNode] !author")
+        assert not self.engine.is_universal_command("bots")
+        assert not self.engine.is_universal_command("!ping")
+
+    def test_the_bypass_is_bots_only(self):
+        self.engine.settings = BotEngineSettings(command_prefix="?")
+        for raw in ("!ping", "!botsy", "!help", "!source", "!authors"):
+            text, had_prefix, _ = self.engine._strip_prefix_and_mention(raw)
+            assert text == raw and not had_prefix, raw
+
     def test_admin_check(self):
         self.engine.settings = BotEngineSettings(
             admin_users=[BotAdminUser(public_key="AB" * 32, name="K0PHX")]

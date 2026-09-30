@@ -2524,6 +2524,8 @@ class Bot(BaseModel):
     is_legacy: bool = False
     load_error: str | None = None
     runs_24h: int = 0
+    # False for the built-ins the operator may disable but not delete.
+    deletable: bool = True
 
 
 class BotCreateRequest(BaseModel):
@@ -2694,6 +2696,8 @@ class BotEngineSettings(BaseModel):
     banned_users: list[str] = Field(default_factory=list)
     profanity_mode: str = "off"
     admin_users: list[BotAdminUser] = Field(default_factory=list)
+    # How to reach whoever runs these bots; `!author` / `!source` answer with it.
+    author_contact: str = ""
 
 
 class BotEngineSettingsUpdate(BaseModel):
@@ -2709,6 +2713,7 @@ class BotEngineSettingsUpdate(BaseModel):
     banned_users: list[str] | None = None
     profanity_mode: str | None = None
     admin_users: list[BotAdminUser] | None = None
+    author_contact: str | None = None
 
 
 class BotEngineStatus(BaseModel):
