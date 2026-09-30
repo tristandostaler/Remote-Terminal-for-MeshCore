@@ -62,7 +62,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.1.0",
+    "version": "1.1.1",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "settings_schema": [
@@ -212,9 +212,12 @@ async def ask(ctx, msg):
         # A model unloaded while idle reloads in about a second (a few on a Pi
         # reading from SD): wait for it and answer in this same run.
         state = await asyncio.to_thread(llm_runtime.wait_ready, RELOAD_WAIT_SECONDS)
+    # Raw errors (library paths, exception text) go only to an admin in a DM;
+    # everyone else, and every channel, gets the plain one-line reason.
+    detailed = bool(msg.is_dm and getattr(ctx, "sender_is_admin", False))
     if state != "ready":
         if state == "error":
-            await ctx.reply_split(f"🤖 {llm_runtime.describe()}")
+            await ctx.reply_split(f"🤖 {llm_runtime.describe(detailed=detailed)}")
         elif question:
             await ctx.reply(f"🤖 Warming up — {llm_runtime.describe()}. Ask again in a minute.")
         else:
@@ -258,7 +261,10 @@ async def ask(ctx, msg):
         return
     except Exception as exc:  # noqa: BLE001 - the mesh gets a line, the log gets the rest
         ctx.log(f"generation failed: {exc}", "WARNING")
-        await ctx.reply("🤖 Sorry, the model failed to answer.")
+        if detailed:
+            await ctx.reply_split(f"🤖 The model failed to answer: {exc}")
+        else:
+            await ctx.reply("🤖 Sorry, the model failed to answer.")
         return
 
     answer = " ".join(answer.split()) or "(no answer)"

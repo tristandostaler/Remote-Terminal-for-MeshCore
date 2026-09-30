@@ -89,7 +89,10 @@ COPY --from=frontend-builder /build/dist ./frontend/dist
 # Create data directory for SQLite database
 RUN mkdir -p /app/data
 
-RUN apt-get update && apt-get install -y --no-install-recommends jq libcodec2-1.2 \
+# libgomp1: llama.cpp (the tinyllm bot) is built with OpenMP and cannot load
+# without it. The slim image lacks it, and it would otherwise only arrive with
+# the compilers run.sh installs and then removes. Well under 1 MB.
+RUN apt-get update && apt-get install -y --no-install-recommends jq libcodec2-1.2 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY run.sh ./
