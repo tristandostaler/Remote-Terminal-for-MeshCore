@@ -1,4 +1,4 @@
-"""tinyllm: ask a tiny on-device language model — ``ask``, ``ai`` or ``llm <question>``.
+"""tinyllm: ask a tiny on-device language model — ``ask``, ``ai``, ``llm`` or ``tinyllm``.
 
 Answers with a small GGUF model run inside this server by llama-cpp-python —
 no Ollama, no cloud API, nothing to host. Pick the model in Settings: the
@@ -47,7 +47,7 @@ BOT_META = {
     "category": "Fun",
     "description": "Ask a tiny on-device AI model a question (no cloud, no Ollama)",
     "long_description": (
-        "`ask <question>` (or `ai` / `llm <question>`) answers with a small language model that runs "
+        "`ask <question>` (or `ai`, `llm` or `tinyllm <question>`) answers with a small language model that runs "
         "inside this server — nothing is sent to a cloud service. Choose the model below; each "
         "option lists its download size and the RAM it uses while loaded. The first question "
         "downloads and loads the model in the background (`ask` alone shows progress). Needs "
@@ -154,7 +154,7 @@ def _number(ctx, key, default, low, high):
 
 
 @bot.on_keyword()
-@bot.on_keyword("ask", "ai", "llm")
+@bot.on_keyword("ask", "ai", "llm", "tinyllm")
 async def ask(ctx, msg):
     try:
         spec = resolve_spec(ctx.settings)

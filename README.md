@@ -353,7 +353,7 @@ missing, and `POST /api/aeic/model/download` starts the fetch.
 
 ## Optional: Tiny On-Device AI Bot (`tinyllm`)
 
-The built-in **`tinyllm`** bot answers `ask <question>` (or `ai` / `llm <question>`) on
+The built-in **`tinyllm`** bot answers `ask <question>` (or `ai`, `llm` or `tinyllm <question>`) on
 `#bot`, `#bots` and in DMs with a small language model that runs **inside this
 server**: no Ollama, no cloud API, no GPU. It ships disabled.
 

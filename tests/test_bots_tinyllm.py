@@ -60,7 +60,12 @@ class TestBotMeta:
 
     def test_keywords(self):
         entry = get_library_entry("tinyllm")
-        assert set(load_bot_code(entry["code"]).declared_keywords) == {"ask", "ai", "llm"}
+        assert set(load_bot_code(entry["code"]).declared_keywords) == {
+            "ask",
+            "ai",
+            "llm",
+            "tinyllm",
+        }
 
 
 class _FakeRuntime:
