@@ -1029,35 +1029,50 @@ class TestDocsIndex:
         doc.write_text("## One\npears and more pears\n")
         assert index.search("pears", 500)[0].title == "One"
 
-    def test_seeded_once_and_never_restored(self, tmp_path):
+    def test_shipped_notes_are_seeded(self, tmp_path):
         from app.bots.bots_utils.tinyllm import llm_docs
 
         folder = tmp_path / "docs"
         llm_docs.seed_docs(folder)
         shipped = {p.name for p in llm_docs.SHIPPED_DOCS_DIR.glob("*.md")}
         assert {p.name for p in folder.glob("*.md")} == shipped
-        seeded = folder / "meshcore.md"
-        seeded.unlink()
-        llm_docs.seed_docs(folder)
-        assert not seeded.exists(), "a deleted starter file must stay deleted"
 
-    def test_a_new_shipped_file_reaches_an_existing_folder(self, tmp_path, monkeypatch):
+    def test_shipped_files_are_overwritten_and_added_files_kept(self, tmp_path, monkeypatch):
         from app.bots.bots_utils.tinyllm import llm_docs
 
         shipped_dir = tmp_path / "shipped"
         shipped_dir.mkdir()
         (shipped_dir / "old.md").write_text("# Old\nshipped\n")
+        (shipped_dir / "gone.md").write_text("# Gone\nshipped\n")
+        (shipped_dir / "deleted.md").write_text("# Deleted\nshipped\n")
         monkeypatch.setattr(llm_docs, "SHIPPED_DOCS_DIR", shipped_dir)
         folder = tmp_path / "docs"
         llm_docs.seed_docs(folder)
         (folder / "old.md").write_text("# Old\nmy edit\n")
+        (folder / "deleted.md").unlink()
+        (folder / "mine.md").write_text("# Mine\nmy notes\n")
 
+        # The next release updates one file, drops one and adds one.
         (shipped_dir / "old.md").write_text("# Old\nshipped, updated\n")
+        (shipped_dir / "gone.md").unlink()
         (shipped_dir / "new.md").write_text("# New\nshipped later\n")
         llm_docs.seed_docs(folder)
-        assert (folder / "new.md").read_text() == "# New\nshipped later\n"
-        assert (folder / "old.md").read_text() == "# Old\nmy edit\n", "edits are never overwritten"
-        assert (folder / llm_docs.SHIPPED_MANIFEST).read_text() == "new.md\nold.md\n"
+        assert (folder / "old.md").read_text() == "# Old\nshipped, updated\n"
+        assert (folder / "deleted.md").exists(), "a deleted shipped file comes back"
+        assert (folder / "new.md").exists()
+        assert not (folder / "gone.md").exists(), "a file no longer shipped is removed"
+        assert (folder / "mine.md").read_text() == "# Mine\nmy notes\n"
+        assert (folder / llm_docs.SHIPPED_MANIFEST).read_text() == "deleted.md\nnew.md\nold.md\n"
+
+    def test_an_unchanged_shipped_file_is_not_rewritten(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        folder = tmp_path / "docs"
+        llm_docs.seed_docs(folder)
+        seeded = folder / "meshcore.md"
+        os.utime(seeded, (1, 1))
+        llm_docs.seed_docs(folder)
+        assert seeded.stat().st_mtime == 1, "a rewrite would rebuild the search index"
 
     def test_the_starter_notes_answer_common_questions(self):
         from app.bots.bots_utils.tinyllm import llm_docs

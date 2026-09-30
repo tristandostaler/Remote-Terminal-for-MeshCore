@@ -1,7 +1,8 @@
 <!--
-Starter reference notes for the tinyllm bot. Copied once into the bot's docs
-folder (data/tinyllm-docs by default) and never overwritten there, so edit that
-copy freely, add your own .md files next to it, or delete what you don't want.
+Starter reference notes for the tinyllm bot, shipped with RemoteTerm. Copied
+into the bot's docs folder (data/tinyllm-docs by default) and overwritten there
+on every restart, so changes to this copy do not last: put your own notes in
+another .md file next to it, which is never touched.
 Every heading starts a section; the bot searches all sections and hands the
 best matches to the model.
 The regions guide is written from MeshCore's CLI documentation; the full

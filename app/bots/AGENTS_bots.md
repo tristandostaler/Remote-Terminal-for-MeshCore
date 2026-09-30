@@ -141,10 +141,11 @@ operators).
   these notes help?", with the section headings) and the model process forces
   the reply to exactly "yes"/"no" with a llama.cpp grammar at temperature 0;
   only when there are notes and >= 4 s left; a failed check keeps the notes;
-  it never triggers the unload-after-every-answer unload. The folder is seeded
-  from `library/docs/`: a `.shipped` manifest in it lists the files already
-  offered, so a file shipped later is added once while edited files are never
-  overwritten and deleted ones stay deleted. `meshcore.md` (basics, regions
+  it never triggers the unload-after-every-answer unload. The folder is synced
+  from `library/docs/` on the bot's first run after each start: shipped files
+  are rewritten whenever they differ (edits are lost, deletions come back), a
+  `.shipped` manifest lists them so one dropped from the repo is removed, and
+  any other file is the operator's and never touched. `meshcore.md` (basics, regions
   quick guide) is hand-written; `meshcore-cli.md` and `meshcore-faq.md` are
   MeshCore's own docs (MIT, license in their header comments) converted by
   `scripts/build/update_tinyllm_docs.py <MeshCore checkout>` -- rerun it when

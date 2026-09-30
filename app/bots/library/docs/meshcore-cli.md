@@ -1,6 +1,6 @@
 <!--
 Converted from MeshCore's docs/cli_commands.md (github.com/meshcore-dev/MeshCore, a366955 (2026-09-30)) by scripts/build/update_tinyllm_docs.py.
-Starter notes for the tinyllm bot: edit your copy in the tinyllm-docs folder.
+Starter notes for the tinyllm bot, overwritten in the tinyllm-docs folder on every restart: put your own notes in another .md file there.
 
 MIT License
 

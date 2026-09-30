@@ -11,10 +11,10 @@ Keyword search rather than embeddings on purpose: it needs no second model
 command for X", "how do I set the TX power" -- hinge on exact words like
 command and setting names, which is what keyword scoring matches best.
 
-The folder is seeded with the starter notes shipped in ``library/docs/``
-and is the operator's from then on: each shipped file is copied once (a
-manifest remembers which), never overwritten or restored, so edits and
-deletions stick while files added in later releases still arrive. The index is rebuilt
+The starter notes shipped in ``library/docs/`` are synced into the folder
+the first time the bot runs after each server start: they belong to the repository, so an edit to one
+is overwritten and a deleted one comes back. Any other ``.md`` file in the
+folder is the operator's and is never touched. The index is rebuilt
 whenever a file's size or modification time changes.
 """
 
@@ -23,7 +23,6 @@ from __future__ import annotations
 import logging
 import math
 import re
-import shutil
 import threading
 from collections import Counter
 from dataclasses import dataclass
@@ -299,29 +298,35 @@ class DocsIndex:
             return picked
 
 
-# Remembers which shipped files a docs folder was already given, one name per
-# line, so a later release can add new ones without restoring deleted ones.
+# Lists the shipped files currently in a docs folder, one name per line, so a
+# file dropped from a later release is removed there too, while files the
+# operator added are never touched.
 SHIPPED_MANIFEST = ".shipped"
 
 
 def seed_docs(folder: Path) -> None:
-    """Give the docs folder any shipped starter notes it has not had yet.
+    """Sync the shipped starter notes into the docs folder.
 
-    Each shipped file is copied once: a file the operator edited is never
-    overwritten, and one they deleted stays deleted.
+    Shipped files belong to the repository: each one is (re)written whenever
+    it differs from the shipped copy, so an update always lands and a deleted
+    one comes back, and one no longer shipped is removed. Every other file in
+    the folder is the operator's and is left alone.
     """
     manifest = folder / SHIPPED_MANIFEST
     try:
-        offered = set(manifest.read_text().split()) if manifest.exists() else set()
-        new = [p for p in sorted(SHIPPED_DOCS_DIR.glob("*.md")) if p.name not in offered]
-        if not new and manifest.exists():
-            return
         folder.mkdir(parents=True, exist_ok=True)
-        for shipped in new:
-            if not (folder / shipped.name).exists():
-                shutil.copyfile(shipped, folder / shipped.name)
-            offered.add(shipped.name)
-        manifest.write_text("".join(f"{name}\n" for name in sorted(offered)))
+        previous = set(manifest.read_text().split()) if manifest.exists() else set()
+        shipped = {p.name: p for p in SHIPPED_DOCS_DIR.glob("*.md")}
+        for name, source in shipped.items():
+            target = folder / name
+            content = source.read_bytes()
+            # Unchanged files are not rewritten, so their mtime -- and the
+            # search index built from it -- stays put.
+            if not target.is_file() or target.read_bytes() != content:
+                target.write_bytes(content)
+        for name in previous - shipped.keys():
+            (folder / name).unlink(missing_ok=True)
+        manifest.write_text("".join(f"{name}\n" for name in sorted(shipped)))
     except OSError as exc:
         logger.warning("tinyllm docs: cannot seed %s: %s", folder, exc)
 

@@ -103,7 +103,8 @@ def main() -> int:
             "<!--\n"
             f"Converted from MeshCore's {source} (github.com/meshcore-dev/MeshCore, "
             f"{commit or 'unknown revision'}) by scripts/build/update_tinyllm_docs.py.\n"
-            "Starter notes for the tinyllm bot: edit your copy in the tinyllm-docs folder.\n\n"
+            "Starter notes for the tinyllm bot, overwritten in the tinyllm-docs folder on every "
+            "restart: put your own notes in another .md file there.\n\n"
             f"{license_text}\n"
             "-->\n\n"
         )
