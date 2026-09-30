@@ -26,6 +26,7 @@ Nothing imports it until a model is loaded, so the app runs without it.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import shutil
@@ -47,7 +48,10 @@ CONTEXT_TOKENS = 1024
 # A failed download/load is retried on the next question after this long.
 RETRY_AFTER_SECONDS = 60
 
-INSTALL_HINT = "llama-cpp-python is not installed on this server: run `uv sync --extra llm`"
+INSTALL_HINT = (
+    "llama-cpp-python is not installed on this server: set MESHCORE_ENABLE_LLM=true "
+    "(Docker / Home Assistant) or run `uv sync --extra llm`"
+)
 
 
 @dataclass(frozen=True)
@@ -282,7 +286,7 @@ class LlmRuntime:
         if s["state"] == "ready":
             return f"{name} is ready"
         if s["state"] == "error":
-            return f"{name} failed: {s['error']}"
+            return f"{name} unavailable: {s['error']}"
         return "No model loaded"
 
     # -- preparation -----------------------------------------------------
@@ -319,10 +323,13 @@ class LlmRuntime:
 
     def _prepare(self, spec: ModelSpec, threads: int) -> None:
         try:
+            # The package may have been installed since the server started
+            # (run.sh compiles it in the background), so drop stale finder caches.
+            importlib.invalidate_caches()
             try:
                 from llama_cpp import Llama  # type: ignore[import-not-found]
             except ImportError as exc:
-                raise RuntimeError(INSTALL_HINT) from exc
+                raise RuntimeError(self._missing_package_reason()) from exc
             path = self._download(spec)
             self._set(state="loading")
             # Drop the previous model first, so a switch never holds two in RAM.
@@ -340,6 +347,19 @@ class LlmRuntime:
         except Exception as exc:  # noqa: BLE001 - surfaced through status()
             logger.warning("ask bot: preparing %s failed: %s", spec.name, exc)
             self._set(state="error", error=str(exc)[:200], failed_at=time.monotonic())
+
+    def _missing_package_reason(self) -> str:
+        """Why llama_cpp will not import, using the markers ``run.sh`` leaves.
+
+        In Docker, ``MESHCORE_ENABLE_LLM`` compiles llama-cpp-python in the
+        background after the server starts; the package appears mid-run and is
+        picked up by the next retry, so "still installing" is worth saying.
+        """
+        if (self.model_dir / ".installing").exists():
+            return "llama-cpp-python is still being installed (compiling, up to 20 min on a Pi)"
+        if (self.model_dir / ".install-failed").exists():
+            return "installing llama-cpp-python failed; see .install.log in the model folder"
+        return INSTALL_HINT
 
     def _download(self, spec: ModelSpec) -> Path:
         import httpx

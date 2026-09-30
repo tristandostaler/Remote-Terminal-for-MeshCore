@@ -48,11 +48,32 @@ COPY pyproject.toml uv.lock ./
 # also needs ~2.4 GiB of RAM available to the container.
 ARG ENABLE_AEIC=0
 
-# Install dependencies (no dev/test deps)
-RUN if [ "$ENABLE_AEIC" = "1" ]; then \
-        uv sync --frozen --no-dev --extra aeic; \
-    else \
-        uv sync --frozen --no-dev; \
+# Optional tiny LLM for the built-in `ask` bot (llama-cpp-python). Same story:
+# the normal way is MESHCORE_ENABLE_LLM=true at runtime, which run.sh installs
+# in the background after the server is up. This arg pre-bakes it:
+#
+#   docker build --build-arg ENABLE_LLM=1 -t remoteterm .
+#
+# llama-cpp-python is published as source only, so this compiles llama.cpp
+# (build tools are installed for the step and removed again). GGML_NATIVE=OFF
+# keeps the image portable across CPUs -- a runtime install builds for the
+# host's own CPU instead, which is faster.
+ARG ENABLE_LLM=0
+
+# Install dependencies (no dev/test deps). Extras go in ONE sync: uv sync removes
+# every extra it is not told about.
+RUN set -e; \
+    extras=""; \
+    if [ "$ENABLE_AEIC" = "1" ]; then extras="$extras --extra aeic"; fi; \
+    if [ "$ENABLE_LLM" = "1" ]; then \
+        extras="$extras --extra llm"; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends build-essential cmake; \
+    fi; \
+    CMAKE_ARGS="-DGGML_NATIVE=OFF" uv sync --frozen --no-dev $extras; \
+    if [ "$ENABLE_LLM" = "1" ]; then \
+        apt-get purge -y --auto-remove build-essential cmake; \
+        rm -rf /var/lib/apt/lists/* /root/.cache/uv; \
     fi
 
 # Copy application code (remoteterm/ is the import surface for DB-stored bots)

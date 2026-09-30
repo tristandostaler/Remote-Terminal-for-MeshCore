@@ -207,3 +207,13 @@ class TestRuntime:
         target.write_bytes(b"gguf")
         runtime = llm.LlmRuntime(model_dir=tmp_path)
         assert runtime._download(spec) == target
+
+    def test_install_markers_from_run_sh_are_reported(self, tmp_path):
+        """Docker compiles llama-cpp-python in the background (run.sh); the bot
+        says so instead of claiming the package is simply missing."""
+        runtime = llm.LlmRuntime(model_dir=tmp_path)
+        assert "MESHCORE_ENABLE_LLM" in runtime._missing_package_reason()
+        (tmp_path / ".install-failed").touch()
+        assert "failed" in runtime._missing_package_reason()
+        (tmp_path / ".installing").touch()
+        assert "still being installed" in runtime._missing_package_reason()

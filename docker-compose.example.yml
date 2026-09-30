@@ -35,6 +35,13 @@ services:
       # in ./data/.uv-cache so recreating the container does not refetch them.
       # MESHCORE_ENABLE_AEIC: "true"
 
+      # Optional tiny on-device LLM for the built-in `ask` bot. Compiles
+      # llama-cpp-python in the background after the first start (a few
+      # minutes; 10-20 on a Pi) while the server runs normally; the build is
+      # cached in ./data/.uv-cache. Then enable the `ask` bot under Bots and
+      # pick a model (100 MB - 1.1 GB download, 250 MB - 1.5 GB RAM).
+      # MESHCORE_ENABLE_LLM: "true"
+
       # Radio connection
       # Serial (USB)
       MESHCORE_SERIAL_PORT: /dev/meshcore-radio

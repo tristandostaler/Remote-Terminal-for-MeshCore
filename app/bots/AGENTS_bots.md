@@ -90,6 +90,13 @@ operators).
   dwarfs the 10 s `BOT_EXECUTION_TIMEOUT`); a run only starts it and reports
   progress. Generation streams tokens and stops at a deadline (≤ 7 s) so the
   reply still goes out inside the timeout; one answer at a time.
+  Docker: `MESHCORE_ENABLE_LLM=true` makes `run.sh` compile llama-cpp-python
+  in the background *after* the server is up (`uv sync --inexact`, never
+  before `exec`: a Pi takes 10-20 min), leaving `.installing` /
+  `.install-failed` / `.install.log` in the model dir; `_missing_package_reason`
+  reads them, and `importlib.invalidate_caches()` lets the next retry import
+  the package without a restart. Every `uv sync` in `run.sh` names all extras
+  wanted or already present, because a sync removes the ones it isn't told of.
 - `placeholders.py` — `{total_contacts}`-style tokens for scheduled messages.
 - `library/` — built-in bots as real `.py` files under `library/code/`, each
   self-describing via a module-level `BOT_META` dict (metadata +

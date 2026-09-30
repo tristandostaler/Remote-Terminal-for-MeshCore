@@ -357,8 +357,20 @@ The built-in **`ask`** bot answers `ask <question>` (or `ai <question>`) on
 `#bot`, `#bots` and in DMs with a small language model that runs **inside this
 server**: no Ollama, no cloud API, no GPU. It ships disabled.
 
-1. Install the optional dependency (clone-and-build installs only; it compiles
-   llama.cpp where no prebuilt wheel exists, a few minutes on a Pi):
+1. Install the optional dependency. llama-cpp-python is published as source,
+   so this compiles llama.cpp: a few minutes on a desktop, 10-20 on a Pi.
+
+   **Docker / docker-compose** — set `MESHCORE_ENABLE_LLM=true`. The server
+   starts normally and the compile runs **in the background** (the radio stays
+   online); the bot answers "still being installed" until it finishes. The
+   build is cached in `./data/.uv-cache`, so recreating the container reinstalls
+   in seconds. To pay the cost at image build instead:
+   `docker build --build-arg ENABLE_LLM=1 .`
+
+   **Home Assistant add-on** — switch on **`MESHCORE_ENABLE_LLM`** in the
+   Configuration tab and restart.
+
+   **Clone and build:**
 
    ```bash
    uv sync --extra llm              # or: uv sync --extra aeic --extra llm
