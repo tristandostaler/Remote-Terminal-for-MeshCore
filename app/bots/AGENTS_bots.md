@@ -161,15 +161,6 @@ operators).
   (only `bots` and `source`, the #bots etiquette commands; insert-time only); unmodified built-ins refresh on version bumps;
   operator-modified ones are never touched. "Reset to default" restores from
   the shipped file.
-  - **Settings are never rewritten by a refresh — unless the bot asks.** A
-    version refresh replaces code, schema and descriptions but keeps the stored
-    `settings`, so a setting whose meaning changes leaves the Settings tab and
-    the bot disagreeing. A library bot may define a module-level
-    `migrate_settings(settings) -> settings`; `ensure_seeded` runs it on the
-    stored settings at refresh (`_migrated_settings`, never raises) and saves
-    the result. Call it at run time too, so a row that was not refreshed yet
-    behaves the same. First user: tinyllm's free-text prompt becoming a
-    "match the model / custom" choice (1.2.0).
   - **Deleting a library file is not enough to remove a bot.** Seeding never
     deletes, and keyword dispatch runs *every* enabled bot that matches, so a
     left-behind row answers alongside whatever replaced it — two replies to one

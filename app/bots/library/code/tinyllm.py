@@ -61,21 +61,6 @@ _PART_RE = re.compile(r"^\(\d+/\d+\)\s*")
 PROMPT_MATCH_MODEL = "model"
 PROMPT_CUSTOM = "custom"
 
-# Every default prompt shipped before per-model prompts. Stored settings are
-# not rewritten by a version refresh, so an install still holding one of these
-# was never customized: migrate_settings turns it into "match the model". A
-# prompt the operator wrote is never in this set and becomes "custom".
-_PREVIOUS_DEFAULT_PROMPTS = frozenset(
-    {
-        "You are a helpful assistant on a low-bandwidth mesh radio network. "
-        "Answer in one or two short sentences, plain text, no markdown, under 200 characters.",
-        "You are a helpful assistant on a low-bandwidth mesh radio network. "
-        "Answer in one or two short sentences, plain text, no markdown, under 140 characters.",
-    }
-)
-# The answer-length default before 1.2.0; still holding it means never changed.
-_PREVIOUS_DEFAULT_MAX_TOKENS = 64
-
 BOT_META = {
     "key": "tinyllm",
     "name": "tinyllm",
@@ -270,25 +255,8 @@ BOT_META = {
 }
 
 
-def migrate_settings(settings):
-    """Stored settings from before per-model prompts (run by library seeding on
-    refresh, and by every run so both agree): an untouched default prompt
-    becomes "match the model", a hand-written one becomes "custom"."""
-    if "prompt_mode" not in settings:
-        text = str(settings.get("system_prompt") or "").strip()
-        if text and text not in _PREVIOUS_DEFAULT_PROMPTS:
-            settings["prompt_mode"] = PROMPT_CUSTOM
-        else:
-            settings["prompt_mode"] = PROMPT_MATCH_MODEL
-            settings["system_prompt"] = ""
-    if settings.get("max_tokens") == _PREVIOUS_DEFAULT_MAX_TOKENS:
-        settings["max_tokens"] = 40
-    return settings
-
-
 def system_prompt_for(settings, spec):
     """The prompt in effect: the operator's custom text, or the model's own."""
-    settings = migrate_settings(dict(settings))
     custom = str(settings.get("system_prompt") or "").strip()
     if settings.get("prompt_mode") == PROMPT_CUSTOM and custom:
         return custom

@@ -161,22 +161,6 @@ class TestAskBot:
         empty = await self._prompt(monkeypatch, {"prompt_mode": "custom", "system_prompt": ""})
         assert empty == llm.CATALOG_BY_KEY[llm.DEFAULT_MODEL].system_prompt
 
-    async def test_settings_from_before_prompt_modes(self, test_db, monkeypatch):
-        """No prompt_mode stored: an old default means "match the model", a
-        hand-written prompt means "custom" -- never erased."""
-        for old in (
-            "You are a helpful assistant on a low-bandwidth mesh radio network. "
-            "Answer in one or two short sentences, plain text, no markdown, "
-            "under 200 characters.",
-            "You are a helpful assistant on a low-bandwidth mesh radio network. "
-            "Answer in one or two short sentences, plain text, no markdown, "
-            "under 140 characters.",
-            "",
-        ):
-            prompt = await self._prompt(monkeypatch, {"system_prompt": old})
-            assert prompt == llm.CATALOG_BY_KEY[llm.DEFAULT_MODEL].system_prompt
-        assert await self._prompt(monkeypatch, {"system_prompt": "Be a pirate."}) == "Be a pirate."
-
     async def test_too_long_question_gets_a_clear_reply(self, test_db, monkeypatch):
         runtime = _FakeRuntime(answer=llm.LlmPromptTooLongError("exceed context window"))
         replies = await _run(monkeypatch, runtime, BotTestRequest(text="ask " + "🙂" * 400))
@@ -307,49 +291,7 @@ class TestFitMessages:
         assert len(out.encode()) <= 60
 
 
-class TestSettingsMigration:
-    async def test_seeding_migrates_stored_settings_on_refresh(self, test_db):
-        """A refresh replaces code and schema but never settings; migrate_settings
-        brings them in line so the Settings tab shows what the bot does."""
-        from app.bots.library import ensure_seeded
-        from app.repository.bots import BotRepository
-
-        entry = get_library_entry("tinyllm")
-        old_default = (
-            "You are a helpful assistant on a low-bandwidth mesh radio network. "
-            "Answer in one or two short sentences, plain text, no markdown, "
-            "under 140 characters."
-        )
-        existing = await BotRepository.get_by_builtin_key("tinyllm")
-        if existing is None:
-            existing = await BotRepository.create(
-                name="tinyllm", code=entry["code"], builtin_key="tinyllm"
-            )
-        await BotRepository.update(
-            existing.id,
-            builtin_version="1.1.1",
-            settings={"system_prompt": old_default, "max_tokens": 64, "model": "gemma3-270m"},
-        )
-        await ensure_seeded()
-        migrated = (await BotRepository.get(existing.id)).settings
-        assert migrated["prompt_mode"] == "model"
-        assert migrated["system_prompt"] == ""
-        assert migrated["max_tokens"] == 40
-        assert migrated["model"] == "gemma3-270m"
-
-        await BotRepository.update(
-            existing.id,
-            builtin_version="1.1.1",
-            settings={"system_prompt": "Talk like a pirate.", "max_tokens": 80},
-        )
-        await ensure_seeded()
-        kept = (await BotRepository.get(existing.id)).settings
-        assert kept == {
-            "prompt_mode": "custom",
-            "system_prompt": "Talk like a pirate.",
-            "max_tokens": 80,
-        }
-
+class TestModelDetails:
     def test_model_details_show_the_default_prompt(self):
         for option in llm.model_options()[:-1]:
             spec = llm.CATALOG_BY_KEY[option["value"]]
