@@ -399,6 +399,14 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
 
    A **Custom** option takes any GGUF chat model from Hugging Face.
 
+   Each model comes with its own **system prompt**, sized to what it can
+   follow (the smallest ones get a single plain instruction: told more, they
+   tend to repeat it back). It is shown in the model's details, and with
+   **System prompt: Match the selected model** (the default) switching models
+   switches the prompt. Pick **Custom** to write your own; it is then kept
+   whatever model you choose. Answers are capped in code to **Max messages
+   per answer** (default 1), cut back to whole sentences.
+
 3. Enable the bot. The first question downloads the model (once, into
    `MESHCORE_LLM_MODEL_DIR`, default `models/llm` beside the database) and loads it in the
    background; `ask` alone reports progress. Bot runs are limited to 10 s, so

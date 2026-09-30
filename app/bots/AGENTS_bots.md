@@ -17,7 +17,8 @@ operators).
   persistent `state`, `http` (httpx), `geocode`, i18n (`t`), `mesh_stats`,
   `get_enabled_bots`, logging, and `sender_is_admin` (the engine's Admin users
   check, the same one `admin_only` gates on) so a bot can keep raw diagnostics
-  for admins in DMs. Test runs capture sends instead of transmitting.
+  for admins in DMs, and `reply_budget()` (bytes one reply message can carry,
+  as `reply_split` sizes it). Test runs capture sends instead of transmitting.
   - **Image sends** take encoded bytes (anything Pillow opens — e.g. straight
     from `ctx.http`) or exactly 786,432 bytes of 512×512 packed RGB, and return
     how many messages it took. The image is stretched into a 512px square and
@@ -148,6 +149,15 @@ operators).
   (only `bots` and `source`, the #bots etiquette commands; insert-time only); unmodified built-ins refresh on version bumps;
   operator-modified ones are never touched. "Reset to default" restores from
   the shipped file.
+  - **Settings are never rewritten by a refresh — unless the bot asks.** A
+    version refresh replaces code, schema and descriptions but keeps the stored
+    `settings`, so a setting whose meaning changes leaves the Settings tab and
+    the bot disagreeing. A library bot may define a module-level
+    `migrate_settings(settings) -> settings`; `ensure_seeded` runs it on the
+    stored settings at refresh (`_migrated_settings`, never raises) and saves
+    the result. Call it at run time too, so a row that was not refreshed yet
+    behaves the same. First user: tinyllm's free-text prompt becoming a
+    "match the model / custom" choice (1.2.0).
   - **Deleting a library file is not enough to remove a bot.** Seeding never
     deletes, and keyword dispatch runs *every* enabled bot that matches, so a
     left-behind row answers alongside whatever replaced it — two replies to one
