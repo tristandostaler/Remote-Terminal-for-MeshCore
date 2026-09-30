@@ -37,6 +37,7 @@ function makeBot(overrides: Partial<Bot> = {}): Bot {
     is_legacy: false,
     load_error: null,
     runs_24h: 0,
+    deletable: true,
     ...overrides,
   };
 }
@@ -55,6 +56,7 @@ const engineStatus: BotEngineStatus = {
     banned_users: [],
     profanity_mode: 'off',
     admin_users: [],
+    author_contact: '',
   },
   disabled_until_restart: false,
   disabled_by_env: false,

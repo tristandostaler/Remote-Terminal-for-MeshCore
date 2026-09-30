@@ -287,7 +287,8 @@ CREATE TABLE IF NOT EXISTS bot_engine_settings (
     auto_detect_language INTEGER DEFAULT 1,
     banned_users TEXT DEFAULT '[]',
     profanity_mode TEXT DEFAULT 'off',
-    admin_users TEXT DEFAULT '[]'
+    admin_users TEXT DEFAULT '[]',
+    author_contact TEXT DEFAULT ''
 );
 INSERT OR IGNORE INTO bot_engine_settings (id) VALUES (1);
 """

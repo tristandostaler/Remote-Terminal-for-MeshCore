@@ -702,15 +702,17 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
               Reset to default
             </Button>
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 border-destructive/50 text-destructive hover:bg-destructive/10"
-            onClick={() => void handleDelete()}
-            onBlur={() => setConfirmDelete(false)}
-          >
-            {confirmDelete ? 'Confirm delete' : 'Delete'}
-          </Button>
+          {bot.deletable && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 border-destructive/50 text-destructive hover:bg-destructive/10"
+              onClick={() => void handleDelete()}
+              onBlur={() => setConfirmDelete(false)}
+            >
+              {confirmDelete ? 'Confirm delete' : 'Delete'}
+            </Button>
+          )}
           <Button size="sm" className="h-7" onClick={() => void handleSave()} disabled={saving}>
             {saving ? 'Saving…' : 'Save'}
           </Button>

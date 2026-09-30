@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
@@ -50,6 +51,12 @@ SETTLE_DELAY_SECONDS = 2.0
 TICK_SECONDS = 15.0
 LOG_RING_SIZE = 500
 MAX_TRACKED_USERS = 1000
+
+# The #bots etiquette: every bot answers "!bots" and gives a way to reach its
+# author, so "!bots" and "!author" match even when the node's command prefix is
+# something else or empty, and whatever the mention mode says. Nothing else
+# bypasses those gates.
+UNIVERSAL_COMMAND_RE = re.compile(r"!(?:bots|author)(?:\s|$)", re.IGNORECASE)
 
 _bot_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="botws_")
 
@@ -447,23 +454,38 @@ class BotEngine:
             return None
         return None
 
-    def _strip_prefix_and_mention(self, text: str) -> tuple[str, bool, bool]:
-        """Returns (text for keyword matching, had_prefix, had_mention)."""
+    def _strip_mention(self, text: str) -> tuple[str, bool]:
+        """Returns (text without a leading ``@[node]`` mention, had_mention)."""
         stripped = text.strip()
-        had_mention = False
         node_name = self._node_name()
         if node_name:
             mention = f"@[{node_name}]"
             if stripped.lower().startswith(mention.lower()):
-                stripped = stripped[len(mention) :].strip()
-                had_mention = True
+                return stripped[len(mention) :].strip(), True
+        return stripped, False
 
-        prefixes = [p.strip() for p in (self.settings.command_prefix or "").split(",") if p.strip()]
+    def _prefixes(self) -> list[str]:
+        return [p.strip() for p in (self.settings.command_prefix or "").split(",") if p.strip()]
+
+    def is_universal_command(self, text: str) -> bool:
+        """Is this ``!bots`` / ``!author``, answered whatever the prefix and mention settings say?"""
+        stripped, _ = self._strip_mention(text)
+        return UNIVERSAL_COMMAND_RE.match(stripped) is not None
+
+    def _strip_prefix_and_mention(self, text: str) -> tuple[str, bool, bool]:
+        """Returns (text for keyword matching, had_prefix, had_mention)."""
+        stripped, had_mention = self._strip_mention(text)
+
+        prefixes = self._prefixes()
         had_prefix = False
         best = ""
         for prefix in prefixes:
             if stripped.startswith(prefix) and len(prefix) > len(best):
                 best = prefix
+        if not best and UNIVERSAL_COMMAND_RE.match(stripped):
+            # "!bots" / "!author" are the #bots etiquette, so they are answered
+            # whatever prefix this node set (or none) — the only exceptions.
+            best = "!"
         if best:
             stripped = stripped[len(best) :].lstrip()
             had_prefix = True
@@ -539,12 +561,16 @@ class BotEngine:
         lowered = match_text.lower()
 
         keyword_allowed = True
-        if self.settings.require_prefix and not (had_prefix or had_mention or msg.is_dm):
-            keyword_allowed = False
-        if self.settings.mention_mode == "only" and not (had_mention or msg.is_dm):
-            keyword_allowed = False
-        if self.settings.mention_mode == "off" and had_mention:
-            keyword_allowed = False
+        # "!bots" / "!author" skip the prefix and mention gates: the #bots
+        # etiquette commands must answer however this node is configured. Scope, the
+        # enabled flag and the rate limits below still apply.
+        if not self.is_universal_command(msg.text):
+            if self.settings.require_prefix and not (had_prefix or had_mention or msg.is_dm):
+                keyword_allowed = False
+            if self.settings.mention_mode == "only" and not (had_mention or msg.is_dm):
+                keyword_allowed = False
+            if self.settings.mention_mode == "off" and had_mention:
+                keyword_allowed = False
 
         user_id = msg.sender_key or msg.sender_name or "unknown"
 
@@ -724,6 +750,8 @@ class BotEngine:
             log_fn=_log,
             send_fn=self.send_bot_message,
             translator=self.translator,
+            command_prefix=next(iter(self._prefixes()), ""),
+            author_contact=self.settings.author_contact,
             loop=asyncio.get_running_loop(),
         )
 
@@ -1131,6 +1159,9 @@ class BotEngine:
             record.declared_webhooks = [t.slug for t in loaded.code.collector.webhooks]
             record.is_legacy = loaded.code.is_legacy
         record.load_error = loaded.load_error
+        from app.bots.library import UNDELETABLE_BUILTINS
+
+        record.deletable = record.builtin_key not in UNDELETABLE_BUILTINS
         return record
 
 

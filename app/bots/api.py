@@ -324,6 +324,8 @@ class BotContext:
         send_fn: Callable[..., Awaitable[Any]] | None = None,
         translator: Any = None,
         loop: asyncio.AbstractEventLoop | None = None,
+        command_prefix: str = "",
+        author_contact: str = "",
     ) -> None:
         self.bot_id = bot_id
         self.bot_name = bot_name
@@ -344,6 +346,11 @@ class BotContext:
         self._translator = translator
         self._loop = loop or asyncio.get_event_loop()
         self._state_dirty = False
+        # The node's first configured command prefix ("" when none is set), so
+        # a reply can tell people how to type a command here.
+        self.command_prefix = command_prefix
+        # Bots › Engine › Author contact: how to reach whoever runs these bots.
+        self.author_contact = author_contact
 
     # -- persistence -----------------------------------------------------
     def mark_state_dirty(self) -> None:

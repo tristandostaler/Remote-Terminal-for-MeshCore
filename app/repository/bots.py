@@ -707,6 +707,7 @@ class BotEngineSettingsRepository:
             banned_users=_load_json(row["banned_users"], []),
             profanity_mode=row["profanity_mode"] or "off",
             admin_users=_load_json(row["admin_users"], []),
+            author_contact=row["author_contact"] or "",
         )
 
     @staticmethod
@@ -726,6 +727,7 @@ class BotEngineSettingsRepository:
             "banned_users",
             "profanity_mode",
             "admin_users",
+            "author_contact",
         }
         updates: list[str] = []
         params: list[Any] = []

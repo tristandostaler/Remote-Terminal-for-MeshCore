@@ -53,6 +53,7 @@ export function EngineTab({ contacts, onChanged }: { contacts: Contact[]; onChan
 
   // Draft settings (numeric fields held as strings while editing)
   const [commandPrefix, setCommandPrefix] = useState('!');
+  const [authorContact, setAuthorContact] = useState('');
   const [requirePrefix, setRequirePrefix] = useState(false);
   const [mentionMode, setMentionMode] = useState<'also' | 'only' | 'off'>('also');
   const [globalReply, setGlobalReply] = useState('0');
@@ -86,6 +87,7 @@ export function EngineTab({ contacts, onChanged }: { contacts: Contact[]; onChan
     setBannedUsers([...s.banned_users]);
     setProfanityMode(s.profanity_mode);
     setAdminUsers([...s.admin_users]);
+    setAuthorContact(s.author_contact);
     setDirty(false);
   };
 
@@ -121,6 +123,7 @@ export function EngineTab({ contacts, onChanged }: { contacts: Contact[]; onChan
         banned_users: bannedUsers,
         profanity_mode: profanityMode,
         admin_users: adminUsers,
+        author_contact: authorContact,
       });
       applyEngine(updated);
       toast.success('Engine settings saved');
@@ -235,6 +238,28 @@ export function EngineTab({ contacts, onChanged }: { contacts: Contact[]; onChan
             <p className="text-[0.6875rem] text-muted-foreground mt-2">
               Off: bare keywords also trigger. Comma-separate for multiple prefixes.
             </p>
+            <div className="mt-3">
+              <label
+                htmlFor="bot-author-contact"
+                className="text-xs text-muted-foreground mb-1 block"
+              >
+                Author contact
+              </label>
+              <Input
+                id="bot-author-contact"
+                value={authorContact}
+                placeholder="Email, callsign or mesh handle"
+                onChange={(e) => {
+                  setAuthorContact(e.target.value);
+                  markDirty();
+                }}
+                className="h-8 text-[0.8125rem]"
+              />
+              <p className="text-[0.6875rem] text-muted-foreground mt-1">
+                How people reach you: the reply to !author and !source. Blank asks them to DM this
+                node. !bots and !author always answer, whatever the prefix or mention setting.
+              </p>
+            </div>
             <div className="mt-3">
               <div className="text-xs text-muted-foreground mb-1">
                 Respond to @[BotName] mentions
