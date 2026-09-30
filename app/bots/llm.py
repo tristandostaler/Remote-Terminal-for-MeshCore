@@ -60,10 +60,15 @@ DISK_HEADROOM_BYTES = 512 * 1024 * 1024
 # Memory settings. Measured on a model with SmolLM2 135M Q8_0's exact shape:
 # ~200 MB in total, of which only ~45 MB cannot be reclaimed.
 #
-# Context window: a mesh prompt (system prompt + a question clipped to 500
-# characters) plus a 160-token answer fits in 512 tokens; the KV cache scales
-# with it, and 1024 cost 16 MB more for nothing.
+# Context window: the default. A mesh prompt (system prompt + a question
+# clipped to 500 characters) plus a short answer fits in 512 tokens; DM history
+# and reference notes fill what is left. The bot's "Context size" setting can
+# raise it (1024 / 2048) for more notes and history, at the cost of memory for
+# the KV cache (CONTEXT_MB_PER_1K_TOKENS, a generous per-model average) and of
+# prompt time on a slow CPU.
 CONTEXT_TOKENS = 512
+CONTEXT_CHOICES = (512, 1024, 2048)
+CONTEXT_MB_PER_1K_TOKENS = 32
 # Prompt batch size: the compute buffer scales with it. Mesh prompts are short,
 # so small batches cost no speed worth noticing.
 BATCH_TOKENS = 64
@@ -181,18 +186,31 @@ def _fmt_mb(mb: int) -> str:
 # low-bandwidth mesh radio network", it answers "hello" by describing itself as
 # one (seen on a real node). So the tiny ones get one plain instruction, and
 # nothing about their setting; a character limit is meaningless to them, and
-# answer length is capped in code anyway. Larger models can use a little more.
+# answer length is capped in code anyway. The 0.5B+ models can use context:
+# who they are, where they run, and to admit what they don't know rather than
+# make up MeshCore facts. Placeholders ({radio_name}, {sender}, {time},
+# {date}) are filled in by the bot; see PROMPT_PLACEHOLDERS.
 TINY_PROMPT = "You are a friendly chatbot. Reply with one short sentence."
 GEMMA_PROMPT = "Reply with one short, friendly sentence."
 SMALL_PROMPT = (
-    "You are a helpful assistant in a radio chat. "
-    "Answer in one or two short sentences of plain text."
+    "You are {radio_name}, a helpful bot on a MeshCore mesh radio network. People "
+    "message you from small radios, so answer in one or two short sentences of "
+    "plain text. If you don't know, say so."
 )
 LARGE_PROMPT = (
-    "You are a helpful assistant in a radio chat. Answer in one or two short "
-    "sentences of plain text, under 140 characters."
+    "You are {radio_name}, a helpful bot on a MeshCore mesh radio network, talking "
+    "with {sender}. People message you from small radios over LoRa, so answer in one "
+    "or two short sentences of plain text, under 140 characters. If you don't know "
+    "something, say so instead of guessing."
 )
 CUSTOM_MODEL_PROMPT = "You are a friendly chatbot. Reply with one or two short sentences."
+# What a prompt (default or custom) may contain; the bot fills them in.
+PROMPT_PLACEHOLDERS = {
+    "radio_name": "this radio's name",
+    "sender": "the name of the person asking",
+    "time": "the current time (HH:MM)",
+    "date": "today's date (YYYY-MM-DD)",
+}
 
 CATALOG: tuple[ModelSpec, ...] = (
     ModelSpec(
@@ -490,7 +508,14 @@ class _ModelProcess:
     """
 
     def __init__(
-        self, path: Path, *, threads: int, repack: bool, log_path: Path, env: dict | None
+        self,
+        path: Path,
+        *,
+        threads: int,
+        repack: bool,
+        n_ctx: int = CONTEXT_TOKENS,
+        log_path: Path,
+        env: dict | None,
     ) -> None:
         child_env = dict(os.environ if env is None else env)
         child_env["PYTHONPATH"] = os.pathsep.join(
@@ -511,7 +536,7 @@ class _ModelProcess:
             {
                 "cmd": "load",
                 "path": str(path),
-                "n_ctx": CONTEXT_TOKENS,
+                "n_ctx": n_ctx,
                 "n_batch": BATCH_TOKENS,
                 "threads": threads,
                 "use_mmap": USE_MMAP,
@@ -611,7 +636,8 @@ class LlmRuntime:
         self._total_bytes = 0
         self._worker: threading.Thread | None = None
         # (spec, threads, repack) of the current/last load: a change reloads.
-        self._load_key: tuple[ModelSpec, int, bool] | None = None
+        # (spec, threads, repack, n_ctx) of the current/last load: a change reloads.
+        self._load_key: tuple[ModelSpec, int, bool, int] | None = None
         self._failed_at = 0.0
         self._last_used = 0.0
         self._unloaded = False
@@ -668,17 +694,19 @@ class LlmRuntime:
         threads: int = 0,
         repack: bool = False,
         idle_unload_seconds: int = DEFAULT_IDLE_UNLOAD_SECONDS,
+        n_ctx: int = CONTEXT_TOKENS,
     ) -> str:
         """Make ``spec`` the loaded model, in the background. Returns the state.
 
         ``ready`` means :meth:`generate` can be called now. A preparation that is
         already running is never interrupted: asking for another model meanwhile
         returns the current state, and the switch happens on a later call.
-        Changing ``threads`` or ``repack`` reloads the model with them. An
+        Changing ``threads``, ``repack`` or ``n_ctx`` reloads the model with them. An
         unloaded model is reloaded. ``idle_unload_seconds`` is how long an unused
         model stays loaded (0: unload right after each answer).
         """
-        load_key = (spec, threads, repack)
+        n_ctx = n_ctx if n_ctx in CONTEXT_CHOICES else CONTEXT_TOKENS
+        load_key = (spec, threads, repack, n_ctx)
         with self._state_lock:
             self._idle_unload_seconds = max(0, int(idle_unload_seconds))
             busy = self._state in ("downloading", "loading")
@@ -697,7 +725,7 @@ class LlmRuntime:
             self._total_bytes = spec.download_mb << 20
             self._worker = threading.Thread(
                 target=self._prepare,
-                args=(spec, threads, repack),
+                args=(spec, threads, repack, n_ctx),
                 name="llm-prepare",
                 daemon=True,
             )
@@ -718,7 +746,9 @@ class LlmRuntime:
                 setattr(self, f"_{name}", value)
             self._state_changed.notify_all()
 
-    def _prepare(self, spec: ModelSpec, threads: int, repack: bool = False) -> None:
+    def _prepare(
+        self, spec: ModelSpec, threads: int, repack: bool = False, n_ctx: int = CONTEXT_TOKENS
+    ) -> None:
         try:
             # The package may have been installed since the server started
             # (run.sh compiles it in the background), so drop stale finder caches.
@@ -732,7 +762,7 @@ class LlmRuntime:
             # Drop the previous model first, so a switch never holds two in RAM.
             with self._generate_lock:
                 self._stop_process()
-                self._check_memory(spec, path, repack)
+                self._check_memory(spec, path, repack, n_ctx)
                 # One thread count for both phases: llama.cpp otherwise runs the
                 # prompt on every core, and a Pi pinned at 100% on a marginal
                 # power supply browns out and reboots.
@@ -741,6 +771,7 @@ class LlmRuntime:
                     path,
                     threads=n_threads,
                     repack=repack,
+                    n_ctx=n_ctx,
                     log_path=self.model_dir / ".worker.log",
                     env=self._worker_env,
                 )
@@ -758,7 +789,9 @@ class LlmRuntime:
                 failed_at=failed_at,
             )
 
-    def _check_memory(self, spec: ModelSpec, path: Path, repack: bool = False) -> None:
+    def _check_memory(
+        self, spec: ModelSpec, path: Path, repack: bool = False, n_ctx: int = CONTEXT_TOKENS
+    ) -> None:
         """Refuse a load that would not leave the system room to breathe.
 
         With repacking on, the weights may be held twice (see _weight_repacking).
@@ -767,7 +800,9 @@ class LlmRuntime:
         if available is None:
             return
         weights_mb = (path.stat().st_size >> 20) * (2 if repack else 1)
-        needed = weights_mb + LOAD_OVERHEAD_MB + MEMORY_RESERVE_MB
+        # The default context is part of LOAD_OVERHEAD_MB; a larger one costs more.
+        extra_ctx_mb = max(0, n_ctx - CONTEXT_TOKENS) * CONTEXT_MB_PER_1K_TOKENS // 1024
+        needed = weights_mb + extra_ctx_mb + LOAD_OVERHEAD_MB + MEMORY_RESERVE_MB
         if available < needed:
             raise LlmUserError(
                 f"not enough free memory for {spec.name}: needs about {needed} MB, "

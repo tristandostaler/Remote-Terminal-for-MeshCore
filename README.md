@@ -214,6 +214,7 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_AEIC_MODEL_DIR` | `data/models/aeic` | Where that codec's ~958 MB model is installed. Defaults to `models/aeic` beside the database so it survives container recreation |
 | `MESHCORE_ENABLE_LLM` | false | Install the `tinyllm` bot's llama-cpp-python on start (Docker / HA add-on). See [Optional: Tiny On-Device AI Bot](#optional-tiny-on-device-ai-bot-tinyllm) |
 | `MESHCORE_LLM_MODEL_DIR` | `data/models/llm` | Where the `tinyllm` bot's models are downloaded. Defaults to `models/llm` beside the database |
+| `MESHCORE_LLM_DOCS_DIR` | `data/tinyllm-docs` | Markdown reference notes the `tinyllm` bot searches. Seeded once with MeshCore basics and every repeater setting; edit or add `.md` files. Defaults to `tinyllm-docs` beside the database |
 | `UV_CACHE_DIR` | `data/.uv-cache` | Docker / HA add-on: where downloaded Python packages and the compiled llama.cpp are cached, so a container update reinstalls in seconds instead of recompiling. Defaults to `.uv-cache` beside the database |
 | `MESHCORE_DISABLE_BOTS` | false | Disable bot system entirely (blocks execution and config; an intermediate security precaution, but not as good as basic auth) |
 | `MESHCORE_BASIC_AUTH_USERNAME` | | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
@@ -225,7 +226,7 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_VIRTUAL_NODE_READ_ONLY` | false | Refuse every command that transmits or changes radio/contact/channel state; connected apps can still read contacts, channels and live messages |
 | `MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT` | 1000 | How many missed messages a returning app is handed when it reconnects to the virtual node (newest first when more were missed); `0` disables replay |
 
-On the Home Assistant add-on, `MESHCORE_AEIC_MODEL_DIR`, `MESHCORE_LLM_MODEL_DIR` and `UV_CACHE_DIR` are optional fields under **Show unused optional configuration options**; leave them empty to keep everything beside the database. A path set there must stay under `/app/data`, the only folder kept across add-on updates.
+On the Home Assistant add-on, `MESHCORE_AEIC_MODEL_DIR`, `MESHCORE_LLM_MODEL_DIR`, `MESHCORE_LLM_DOCS_DIR` and `UV_CACHE_DIR` are optional fields under **Show unused optional configuration options**; leave them empty to keep everything beside the database. A path set there must stay under `/app/data`, the only folder kept across add-on updates.
 
 Common launch patterns:
 
@@ -414,6 +415,24 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    with that contact is ignored. A conversation starts over after an hour of
    silence or when you send `ask reset`. Channels and rooms are never
    remembered.
+
+   **Reference notes.** For knowledge questions the bot searches a folder of
+   markdown files, `tinyllm-docs` beside the database (in the add-on's config
+   folder on Home Assistant), and gives the best-matching sections to the
+   model. It starts with MeshCore basics and every repeater setting with its
+   `get`/`set` command; edit it, delete what you don't want, or add your own
+   `.md` files -- every heading starts a searchable section. The search is
+   plain keyword matching (no second model, no extra RAM), which is what
+   "what's the command for X" questions need.
+
+   **Context size** (512 / 1024 / 2048 tokens) is how much the model reads at
+   once: the prompt, the question, DM history and reference notes share it.
+   Bigger fits more notes and history but costs memory and, on a Pi, answer
+   time.
+
+   Prompts can use **placeholders**: `{radio_name}` (this radio's name),
+   `{sender}`, `{time}` and `{date}`. The bigger models' default prompts use
+   them to know who and where they are; the tiny ones' stay bare.
 
 3. Enable the bot. The first question downloads the model (once, into
    `MESHCORE_LLM_MODEL_DIR`, default `models/llm` beside the database) and loads it in the

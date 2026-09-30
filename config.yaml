@@ -1,6 +1,6 @@
 name: "RemoteTerm for MeshCore Advanced"
 description: "RemoteTerm for MeshCore Advanced - MeshCore web client with bots, compression and images"
-version: "1.32.0"
+version: "1.33.0"
 slug: "remoteterm"
 init: false
 arch:
@@ -22,6 +22,7 @@ options:
   # UV_CACHE_DIR) after every update.
   #   MESHCORE_AEIC_MODEL_DIR: AI photo codec model (~958 MB)
   #   MESHCORE_LLM_MODEL_DIR:  tinyllm bot models (105 MB - 1.1 GB each)
+  #   MESHCORE_LLM_DOCS_DIR:   markdown reference notes the tinyllm bot searches
   #   UV_CACHE_DIR:            Python package cache, incl. the compiled llama.cpp
   # Server log verbosity: DEBUG, INFO, WARNING or ERROR. DEBUG shows every
   # received packet and every stored message; use it to trace a missing message.
@@ -63,6 +64,7 @@ schema:
   MESHCORE_DATABASE_PATH: str
   MESHCORE_AEIC_MODEL_DIR: str?
   MESHCORE_LLM_MODEL_DIR: str?
+  MESHCORE_LLM_DOCS_DIR: str?
   UV_CACHE_DIR: str?
   MESHCORE_LOG_LEVEL: list(DEBUG|INFO|WARNING|ERROR)
   MESHCORE_ENABLE_AEIC: bool

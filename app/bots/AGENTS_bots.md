@@ -17,7 +17,10 @@ operators).
   persistent `state`, `http` (httpx), `geocode`, i18n (`t`), `mesh_stats`,
   `get_enabled_bots`, logging, and `sender_is_admin` (the engine's Admin users
   check, the same one `admin_only` gates on) so a bot can keep raw diagnostics
-  for admins in DMs, and `reply_budget()` (bytes one reply message can carry,
+  for admins in DMs, `test_transcript` (test runs only: the Test tab's earlier
+  messages in this conversation, `{"text", "outgoing"}` oldest first, sent as
+  `BotTestRequest.transcript` because test runs store nothing; tinyllm reads
+  DM history from it when present), and `reply_budget()` (bytes one reply message can carry,
   as `reply_split` sizes it). Test runs capture sends instead of transmitting.
   - **Image sends** take encoded bytes (anything Pillow opens — e.g. straight
     from `ctx.http`) or exactly 786,432 bytes of 512×512 packed RGB, and return
@@ -125,6 +128,22 @@ operators).
   out. `history_messages` (default 10) of them, trimmed to
   `HISTORY_MAX_CHARS`, starting with a user turn. A prompt over the context
   window with history is retried once without it.
+  **Reference notes** (`app/bots/llm_docs.py`): BM25 keyword search (no
+  second model, no RAM) over the `.md` files in `settings.llm_docs_dir`
+  (`tinyllm-docs` beside the database), split into sections at headings and
+  at paragraphs past 800 chars; dotted setting names match whole or in parts;
+  the index rebuilds when a file's size/mtime changes. The folder is seeded
+  once from `library/docs/` and never restored (a deleted file stays
+  deleted). `library/docs/meshcore.md`'s repeater-settings half is generated
+  from `app/services/repeater_settings.py` -- regenerate it when that catalog
+  changes. The bot budgets the context by characters (~3/token, no tokenizer
+  in the server): what is left after prompt, question and answer goes to
+  history (up to half) and notes (the rest), searched with the question plus
+  the previous one; overflow retries drop history, then notes. `context_tokens`
+  (512/1024/2048) is a load parameter like threads/repack (part of the load
+  key; the memory check adds `CONTEXT_MB_PER_1K_TOKENS`). Prompts take
+  `{radio_name}` (lock-free `radio_manager.meshcore.self_info`), `{sender}`,
+  `{time}`, `{date}`, substituted by regex so other braces survive.
   Weight **repacking is off** (`_weight_repacking` wraps
   `llama_model_default_params` during the load to set `use_extra_bufts=False`;
   `Llama()` has no argument for it): on ARM with dotprod (Pi 5) llama.cpp
