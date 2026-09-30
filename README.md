@@ -409,9 +409,11 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
 
    In a **DM** the bot remembers the conversation: the last **DM memory**
    messages (default 10; 0 turns it off) go to the model with each new
-   question, so follow-ups work. A conversation is forgotten after an hour of
-   silence, on a server restart, or when you send `ask reset`. Channels and
-   rooms are never remembered.
+   question, so follow-ups work. They are read back from the DM conversation
+   itself (the stored messages), so memory survives restarts; ordinary chat
+   with that contact is ignored. A conversation starts over after an hour of
+   silence or when you send `ask reset`. Channels and rooms are never
+   remembered.
 
 3. Enable the bot. The first question downloads the model (once, into
    `MESHCORE_LLM_MODEL_DIR`, default `models/llm` beside the database) and loads it in the

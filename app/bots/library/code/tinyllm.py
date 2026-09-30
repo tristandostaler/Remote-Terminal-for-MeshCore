@@ -15,6 +15,7 @@ Needs the optional ``llm`` extra: ``uv sync --extra llm``.
 """
 
 import asyncio
+import re
 import time
 
 from app.bots.llm import (
@@ -23,7 +24,6 @@ from app.bots.llm import (
     LlmBusyError,
     LlmPromptTooLongError,
     LlmWorkerDiedError,
-    dm_sessions,
     llm_runtime,
     model_options,
     resolve_spec,
@@ -34,8 +34,26 @@ from remoteterm import bot
 # the time a run may use before the engine's 10 s timeout, leaving room to send.
 RELOAD_WAIT_SECONDS = 4
 RUN_BUDGET_SECONDS = 7.5
-# `ask reset` / `ask forget` in a DM clears that sender's conversation memory.
+# DM memory is read back from the conversation itself (the messages table):
+# incoming messages that were questions to this bot, and the answers it sent
+# right after them. `ask reset` / `ask forget` is a message too, so history
+# simply stops there; so does an hour of silence.
+KEYWORDS = ("ask", "ai", "llm", "tinyllm")
 RESET_WORDS = frozenset({"reset", "forget"})
+SESSION_IDLE_SECONDS = 3600
+# The most history text sent to the model: the context window is 512 tokens,
+# and on a Pi every token of prompt costs time out of the 10 s run.
+HISTORY_MAX_CHARS = 1000
+# The bot answers inside its 10 s run (a multi-part answer adds ~2 s a part),
+# so only what was sent this soon after a question can be its answer -- not
+# something the operator typed into the same DM later.
+ANSWER_WINDOW_SECONDS = 30
+# A leading command prefix (!, ?, ...) or @[mention], then a trigger word.
+_COMMAND_RE = re.compile(
+    r"^\W*(?:@\[[^\]]*\]\s*)?(" + "|".join(KEYWORDS) + r")\b\s*(.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_PART_RE = re.compile(r"^\(\d+/\d+\)\s*")
 
 # The system prompt is either the selected model's own (llm.CATALOG: each is
 # sized to what that model can follow, and follows it when the model changes)
@@ -169,9 +187,10 @@ BOT_META = {
             "help": (
                 "In a DM the bot remembers the conversation: this many earlier messages "
                 "(questions and answers) go to the model with each new question. 0 turns "
-                "it off. A conversation is forgotten after an hour of silence or on "
-                "`ask reset`; channels and rooms are never remembered. More memory makes a "
-                "Pi slower to answer."
+                "it off. Read back from the DM conversation itself, so it survives "
+                "restarts; it starts over after an hour of silence or on `ask reset`. "
+                "Channels and rooms are never remembered. More memory makes a Pi slower "
+                "to answer."
             ),
         },
         {
@@ -295,6 +314,69 @@ def fit_messages(text, budget_bytes, max_messages):
     return (cut[:space] if space > 0 else cut).rstrip(" ,;:") + "\u2026"
 
 
+def conversation_turns(messages, now):
+    """Rebuild question/answer turns from a DM conversation, oldest first.
+
+    ``messages`` are the conversation's stored rows (any order). A turn is an
+    incoming question to this bot plus the answer sent right after it: the
+    bot's own notices (they start with the robot emoji) are not answers, and a
+    multi-part answer's "(i/n)" parts are joined. Messages that were not
+    questions to the bot -- ordinary chat with this contact -- are ignored.
+    History starts after the last `ask reset` and after any gap of an hour.
+    The question being answered right now is already stored; it is left out.
+    """
+    turns = []  # [question, [answer parts], received_at]
+    answering = False  # still collecting the latest question's answer
+    last_seen = None
+    for message in sorted(messages, key=lambda m: (m.received_at, m.id)):
+        if last_seen is not None and message.received_at - last_seen > SESSION_IDLE_SECONDS:
+            turns = []
+        last_seen = message.received_at
+        if not message.outgoing:
+            # Any incoming message ends the previous answer, question or not.
+            answering = False
+            match = _COMMAND_RE.match(message.text or "")
+            if not match:
+                continue
+            question = match.group(2).strip()
+            if question.lower() in RESET_WORDS:
+                turns = []
+            elif question:
+                turns.append([question, [], message.received_at])
+                answering = True
+        elif (
+            answering
+            and message.received_at - turns[-1][2] <= ANSWER_WINDOW_SECONDS
+            and not (message.text or "").startswith("\U0001f916")
+        ):
+            turns[-1][1].append(_PART_RE.sub("", message.text or "").strip())
+    if last_seen is not None and now - last_seen > SESSION_IDLE_SECONDS:
+        return []
+    # The current question has no answer yet; so has any the bot never answered.
+    history = []
+    for question, parts, _ in turns:
+        if parts:
+            history.append({"role": "user", "content": question})
+            history.append({"role": "assistant", "content": " ".join(parts)})
+    return history
+
+
+async def dm_history(sender_key, limit):
+    """The last ``limit`` messages of this DM conversation with the bot, trimmed
+    to HISTORY_MAX_CHARS and always starting with the sender's question."""
+    from app.repository import MessageRepository
+
+    rows = await MessageRepository.get_all(
+        limit=min(200, limit * 4 + 10), msg_type="PRIV", conversation_key=sender_key
+    )
+    history = conversation_turns(rows, time.time())[-limit:]
+    while history and sum(len(m["content"]) for m in history) > HISTORY_MAX_CHARS:
+        history.pop(0)
+    while history and history[0]["role"] != "user":
+        history.pop(0)
+    return history
+
+
 def _number(ctx, key, default, low, high):
     try:
         value = float(ctx.settings.get(key, default))
@@ -312,9 +394,9 @@ async def ask(ctx, msg):
         await ctx.reply(f"🤖 ask: {exc}")
         return
 
-    if msg.is_dm and msg.sender_key and msg.arg_text.strip().lower() in RESET_WORDS:
-        forgot = dm_sessions.forget(msg.sender_key)
-        await ctx.reply("🤖 Conversation forgotten." if forgot else "🤖 Nothing to forget.")
+    if msg.is_dm and msg.arg_text.strip().lower() in RESET_WORDS:
+        # The reset message itself is the marker: history stops at it.
+        await ctx.reply("🤖 Conversation forgotten; starting fresh.")
         return
     started = time.monotonic()
     state = llm_runtime.ensure(
@@ -347,7 +429,7 @@ async def ask(ctx, msg):
     # DM memory: earlier turns with this sender, never in channels or rooms.
     session = msg.sender_key if (msg.is_dm and msg.sender_key) else None
     history_limit = int(_number(ctx, "history_messages", 10, 0, 20))
-    history = dm_sessions.history(session, history_limit) if session else []
+    history = await dm_history(session, history_limit) if session and history_limit else []
     system = {"role": "system", "content": system_prompt_for(ctx.settings, spec)}
 
     def ask_model(earlier):
@@ -400,6 +482,3 @@ async def ask(ctx, msg):
     budget = await ctx.reply_budget()
     answer = fit_messages(answer, budget, int(_number(ctx, "max_messages", 1, 1, 4)))
     await ctx.reply_split(answer)
-    if session and history_limit:
-        # What was actually sent, so the model sees the conversation as it went.
-        dm_sessions.record(session, question, answer)

@@ -5,6 +5,7 @@ the bot tests, and the runtime tests start the real model *process* with a fake
 ``llama_cpp`` package first on its path (see ``fake_llama``).
 """
 
+import itertools
 import os
 import textwrap
 import time
@@ -17,12 +18,6 @@ from app.bots.engine import BotEngine
 from app.bots.library import get_library_entry
 from app.bots.runtime import load_bot_code
 from app.models import BotTestRequest
-
-
-@pytest.fixture(autouse=True)
-def _fresh_dm_sessions(monkeypatch):
-    """Each test starts with no remembered DM conversations."""
-    monkeypatch.setattr(llm, "dm_sessions", llm.DmSessions())
 
 
 class TestCatalog:
@@ -729,11 +724,33 @@ class _HistoryAwareRuntime(_FakeRuntime):
         return f"Answer {self.turn}."
 
 
+ALICE = "ab" * 32
+BOB = "cd" * 32
+
+
+async def _store(sender, rows):
+    """Store a DM conversation as the server would: (text, outgoing, age_s)."""
+    from app.repository import MessageRepository
+
+    now = int(time.time())
+    for n, (text, outgoing, age) in enumerate(rows):
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text=text,
+            received_at=now - age,
+            conversation_key=sender,
+            sender_timestamp=now - age + n,
+            outgoing=outgoing,
+            sender_key=None if outgoing else sender,
+        )
+
+
 class TestDmMemory:
-    ALICE = "ab" * 32
-    BOB = "cd" * 32
+    """DM memory is read back from the stored conversation."""
 
     async def _dm(self, monkeypatch, runtime, text, sender=ALICE, settings=None):
+        # The triggering message is stored before the bot runs, as in the server.
+        await _store(sender, [(text, False, 0)])
         return await _run(
             monkeypatch,
             runtime,
@@ -741,76 +758,126 @@ class TestDmMemory:
             settings=settings,
         )
 
-    async def test_a_dm_remembers_the_conversation(self, test_db, monkeypatch):
+    async def test_follow_ups_see_the_earlier_turns(self, test_db, monkeypatch):
+        await _store(
+            ALICE,
+            [
+                ("ask my name is Ada", False, 60),
+                ("Nice to meet you, Ada.", True, 59),
+                ("did you get my photo?", False, 40),  # ordinary chat, not to the bot
+                ("yes!", True, 39),
+            ],
+        )
         runtime = _HistoryAwareRuntime()
-        await self._dm(monkeypatch, runtime, "ask my name is Ada")
         await self._dm(monkeypatch, runtime, "ask what is my name")
-        sent = runtime.asked[1][0]
+        sent = runtime.asked[0][0]
         assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
         assert sent[1]["content"] == "my name is Ada"
-        assert sent[2]["content"] == "Answer 1."
+        assert sent[2]["content"] == "Nice to meet you, Ada."
         assert sent[3]["content"] == "what is my name"
 
-    async def test_each_sender_has_their_own_memory(self, test_db, monkeypatch):
+    async def test_each_conversation_is_separate_and_channels_have_none(self, test_db, monkeypatch):
+        await _store(ALICE, [("ask I am Alice", False, 60), ("Hi Alice.", True, 59)])
         runtime = _HistoryAwareRuntime()
-        await self._dm(monkeypatch, runtime, "ask I am Alice")
-        await self._dm(monkeypatch, runtime, "ask who am I", sender=self.BOB)
-        assert len(runtime.asked[1][0]) == 2  # system + Bob's question only
-
-    async def test_channels_are_never_remembered(self, test_db, monkeypatch):
-        runtime = _HistoryAwareRuntime()
-        for _ in range(2):
-            await _run(monkeypatch, runtime, BotTestRequest(text="ask hi", sender_key=self.ALICE))
-        assert all(len(messages) == 2 for messages, _ in runtime.asked)
-
-    async def test_the_setting_limits_and_disables_it(self, test_db, monkeypatch):
-        runtime = _HistoryAwareRuntime()
-        for n in range(4):
-            await self._dm(monkeypatch, runtime, f"ask q{n}", settings={"history_messages": 2})
-        assert [m["content"] for m in runtime.asked[3][0][1:]] == ["q2", "Answer 3.", "q3"]
-        runtime = _HistoryAwareRuntime()
-        for n in range(2):
-            await self._dm(
-                monkeypatch, runtime, f"ask q{n}", sender=self.BOB, settings={"history_messages": 0}
-            )
+        await self._dm(monkeypatch, runtime, "ask who am I", sender=BOB)
+        assert len(runtime.asked[0][0]) == 2
+        await _run(monkeypatch, runtime, BotTestRequest(text="ask hi", sender_key=ALICE))
         assert len(runtime.asked[1][0]) == 2
 
+    async def test_the_setting_limits_and_disables_it(self, test_db, monkeypatch):
+        await _store(
+            ALICE,
+            [
+                ("ask q1", False, 60),
+                ("a1.", True, 59),
+                ("ask q2", False, 50),
+                ("a2.", True, 49),
+            ],
+        )
+        runtime = _HistoryAwareRuntime()
+        await self._dm(monkeypatch, runtime, "ask q3", settings={"history_messages": 2})
+        assert [m["content"] for m in runtime.asked[0][0][1:]] == ["q2", "a2.", "q3"]
+        runtime = _HistoryAwareRuntime()
+        await self._dm(monkeypatch, runtime, "ask q4", settings={"history_messages": 0})
+        assert len(runtime.asked[0][0]) == 2
+
     async def test_too_long_with_history_retries_without_it(self, test_db, monkeypatch):
-        runtime = _HistoryAwareRuntime()
-        await self._dm(monkeypatch, runtime, "ask first")
-        runtime.refuse_history = True
-        replies = await self._dm(monkeypatch, runtime, "ask second")
-        assert replies == ["Answer 2."]
+        await _store(ALICE, [("ask first", False, 60), ("Answer 0.", True, 59)])
+        runtime = _HistoryAwareRuntime(refuse_history=True)
+        replies = await self._dm(monkeypatch, runtime, "ask second", sender=ALICE)
+        assert replies == ["Answer 1."]
         assert len(runtime.asked[-1][0]) == 2
 
-    async def test_reset_forgets(self, test_db, monkeypatch):
-        runtime = _HistoryAwareRuntime()
-        await self._dm(monkeypatch, runtime, "ask remember this")
-        assert await self._dm(monkeypatch, runtime, "ask reset") == ["🤖 Conversation forgotten."]
-        assert await self._dm(monkeypatch, runtime, "ask forget") == ["🤖 Nothing to forget."]
-        await self._dm(monkeypatch, runtime, "ask fresh start")
-        assert len(runtime.asked[-1][0]) == 2
+    async def test_reset_replies(self, test_db, monkeypatch):
+        replies = await self._dm(monkeypatch, _HistoryAwareRuntime(), "ask reset")
+        assert replies == ["🤖 Conversation forgotten; starting fresh."]
 
 
-class TestDmSessions:
-    def test_expires_after_an_idle_hour(self):
-        sessions = llm.DmSessions()
-        sessions.record("a", "q", "r", now=0)
-        assert len(sessions.history("a", 10, now=llm.SESSION_IDLE_SECONDS - 1)) == 2
-        assert sessions.history("a", 10, now=llm.SESSION_IDLE_SECONDS + 1) == []
+_ROW_IDS = itertools.count(1)
 
-    def test_history_is_capped_by_length_and_starts_with_the_sender(self):
-        sessions = llm.DmSessions()
-        for n in range(6):
-            sessions.record("a", "q" * 300, f"answer {n}", now=0)
-        history = sessions.history("a", 20, now=0)
-        assert sum(len(m["content"]) for m in history) <= llm.HISTORY_MAX_CHARS
-        assert history[0]["role"] == "user"
-        assert history[-1]["content"] == "answer 5"
 
-    def test_only_the_most_recent_senders_are_kept(self):
-        sessions = llm.DmSessions()
-        for n in range(llm.SESSION_MAX_SENDERS + 5):
-            sessions.record(f"s{n}", "q", "r", now=0)
-        assert sessions.history("s0", 10, now=0) == []
-        assert sessions.history(f"s{llm.SESSION_MAX_SENDERS + 4}", 10, now=0)
+def _row(text, outgoing, at):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(text=text, outgoing=outgoing, received_at=at, id=next(_ROW_IDS))
+
+
+class TestConversationTurns:
+    def _turns(self, rows, now=None):
+        # Default "now": just after the last row, well inside the idle hour.
+        now = max(r.received_at for r in rows) + 10 if now is None else now
+        return _bot_namespace()["conversation_turns"](rows, now)
+
+    def test_pairs_questions_with_the_answers_sent_after_them(self):
+        rows = [
+            _row("!ask hi", False, 100),
+            _row("(1/2) Hello there,", True, 101),
+            _row("(2/2) friend.", True, 102),
+            _row("@[bot] llm how are you", False, 200),
+            _row("\U0001f916 Busy answering someone else, try again shortly.", True, 201),
+            _row("tinyllm and now?", False, 300),
+            _row("Fine.", True, 301),
+        ]
+        assert self._turns(rows) == [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "Hello there, friend."},
+            {"role": "user", "content": "and now?"},
+            {"role": "assistant", "content": "Fine."},
+        ]
+
+    def test_ordinary_chat_is_ignored(self):
+        rows = [
+            _row("hey, coffee later?", False, 100),
+            _row("sure", True, 101),
+            _row("asking for a friend", False, 102),  # "ask" must be a whole word
+        ]
+        assert self._turns(rows) == []
+
+    def test_reset_and_silence_start_a_new_conversation(self):
+        rows = [
+            _row("ask a", False, 100),
+            _row("A.", True, 101),
+            _row("ask reset", False, 200),
+            _row("\U0001f916 Conversation forgotten; starting fresh.", True, 201),
+            _row("ask b", False, 300),
+            _row("B.", True, 301),
+        ]
+        assert [m["content"] for m in self._turns(rows)] == ["b", "B."]
+        gap = [_row("ask a", False, 100), _row("A.", True, 101), _row("ask b", False, 5000)]
+        assert self._turns(gap) == []
+        assert self._turns([_row("ask a", False, 100), _row("A.", True, 101)], now=9000) == []
+
+    def test_only_the_bots_prompt_reply_is_its_answer(self):
+        rows = [
+            _row("ask a", False, 100),
+            _row("A.", True, 102),
+            _row("lol, typed by hand later", True, 400),  # outside the answer window
+            _row("ask b", False, 500),
+            _row("did you see that?", False, 501),  # ordinary chat ends the answer
+            _row("yes", True, 502),
+        ]
+        assert [m["content"] for m in self._turns(rows)] == ["a", "A."]
+
+    def test_the_current_question_is_left_out(self):
+        rows = [_row("ask a", False, 100), _row("A.", True, 101), _row("ask b", False, 102)]
+        assert [m["content"] for m in self._turns(rows, now=103)] == ["a", "A."]

@@ -113,14 +113,18 @@ operators).
   `ensure` reloads. The bot waits `RELOAD_WAIT_SECONDS` (4 s) for a reload and
   takes the elapsed time out of the answer deadline (`RUN_BUDGET_SECONDS`
   7.5 s), so a reload still answers in the same run.
-  **DM memory** (`DmSessions`, `dm_sessions` in `llm.py`): per-sender
-  question/answer turns, DMs only, `history_messages` of them (default 10)
-  sent before the new question; trimmed to `HISTORY_MAX_CHARS` and to start
-  with a user turn; forgotten after `SESSION_IDLE_SECONDS` (1 h), `ask
-  reset`/`forget`, or a restart. Deliberately in memory, not the bot's
-  persisted `state`: runs are concurrent and each saves its own copy of
-  `state`, so concurrent askers would overwrite each other's turns. A prompt
-  over the context window with history is retried once without it.
+  **DM memory** is read back from the stored DM conversation
+  (`dm_history` → `MessageRepository.get_all(msg_type="PRIV",
+  conversation_key=sender)`), not kept anywhere: `conversation_turns` pairs
+  each incoming question to the bot (`_COMMAND_RE`: optional prefix/mention +
+  a trigger word) with the outgoing parts sent within `ANSWER_WINDOW_SECONDS`
+  and before the next incoming message, skipping the bot's own "🤖" notices
+  and joining "(i/n)" parts. Ordinary chat with the contact is ignored;
+  `ask reset` is itself the marker history stops at, as is an hour of
+  silence; the current question (already stored) has no answer and drops
+  out. `history_messages` (default 10) of them, trimmed to
+  `HISTORY_MAX_CHARS`, starting with a user turn. A prompt over the context
+  window with history is retried once without it.
   Weight **repacking is off** (`_weight_repacking` wraps
   `llama_model_default_params` during the load to set `use_extra_bufts=False`;
   `Llama()` has no argument for it): on ARM with dotprod (Pi 5) llama.cpp
