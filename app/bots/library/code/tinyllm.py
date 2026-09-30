@@ -15,6 +15,7 @@ Needs the optional ``llm`` extra: ``uv sync --extra llm``.
 """
 
 import asyncio
+import re
 import time
 
 from app.bots.llm import (
@@ -33,27 +34,32 @@ from remoteterm import bot
 # the time a run may use before the engine's 10 s timeout, leaving room to send.
 RELOAD_WAIT_SECONDS = 4
 RUN_BUDGET_SECONDS = 7.5
+# DM memory is read back from the conversation itself (the messages table):
+# incoming messages that were questions to this bot, and the answers it sent
+# right after them. `ask reset` / `ask forget` is a message too, so history
+# simply stops there; so does an hour of silence.
+KEYWORDS = ("ask", "ai", "llm", "tinyllm")
+RESET_WORDS = frozenset({"reset", "forget"})
+SESSION_IDLE_SECONDS = 3600
+# The most history text sent to the model: the context window is 512 tokens,
+# and on a Pi every token of prompt costs time out of the 10 s run.
+HISTORY_MAX_CHARS = 1000
+# The bot answers inside its 10 s run (a multi-part answer adds ~2 s a part),
+# so only what was sent this soon after a question can be its answer -- not
+# something the operator typed into the same DM later.
+ANSWER_WINDOW_SECONDS = 30
+# A leading command prefix (!, ?, ...) or @[mention], then a trigger word.
+_COMMAND_RE = re.compile(
+    r"^\W*(?:@\[[^\]]*\]\s*)?(" + "|".join(KEYWORDS) + r")\b\s*(.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_PART_RE = re.compile(r"^\(\d+/\d+\)\s*")
 
 # The system prompt is either the selected model's own (llm.CATALOG: each is
 # sized to what that model can follow, and follows it when the model changes)
 # or the operator's custom text, which is never touched.
 PROMPT_MATCH_MODEL = "model"
 PROMPT_CUSTOM = "custom"
-
-# Every default prompt shipped before per-model prompts. Stored settings are
-# not rewritten by a version refresh, so an install still holding one of these
-# was never customized: migrate_settings turns it into "match the model". A
-# prompt the operator wrote is never in this set and becomes "custom".
-_PREVIOUS_DEFAULT_PROMPTS = frozenset(
-    {
-        "You are a helpful assistant on a low-bandwidth mesh radio network. "
-        "Answer in one or two short sentences, plain text, no markdown, under 200 characters.",
-        "You are a helpful assistant on a low-bandwidth mesh radio network. "
-        "Answer in one or two short sentences, plain text, no markdown, under 140 characters.",
-    }
-)
-# The answer-length default before 1.2.0; still holding it means never changed.
-_PREVIOUS_DEFAULT_MAX_TOKENS = 64
 
 BOT_META = {
     "key": "tinyllm",
@@ -68,7 +74,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.2.0",
+    "version": "1.3.0",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "settings_schema": [
@@ -157,6 +163,22 @@ BOT_META = {
             ),
         },
         {
+            "key": "history_messages",
+            "label": "DM memory (previous messages included)",
+            "type": "int",
+            "default": 10,
+            "min": 0,
+            "max": 20,
+            "help": (
+                "In a DM the bot remembers the conversation: this many earlier messages "
+                "(questions and answers) go to the model with each new question. 0 turns "
+                "it off. Read back from the DM conversation itself, so it survives "
+                "restarts; it starts over after an hour of silence or on `ask reset`. "
+                "Channels and rooms are never remembered. More memory makes a Pi slower "
+                "to answer."
+            ),
+        },
+        {
             "key": "temperature",
             "label": "Temperature",
             "type": "float",
@@ -223,6 +245,7 @@ BOT_META = {
         "system_prompt": "",
         "max_tokens": 40,
         "max_messages": 1,
+        "history_messages": 10,
         "temperature": 0.7,
         "time_limit_seconds": 6,
         "threads": 0,
@@ -232,25 +255,8 @@ BOT_META = {
 }
 
 
-def migrate_settings(settings):
-    """Stored settings from before per-model prompts (run by library seeding on
-    refresh, and by every run so both agree): an untouched default prompt
-    becomes "match the model", a hand-written one becomes "custom"."""
-    if "prompt_mode" not in settings:
-        text = str(settings.get("system_prompt") or "").strip()
-        if text and text not in _PREVIOUS_DEFAULT_PROMPTS:
-            settings["prompt_mode"] = PROMPT_CUSTOM
-        else:
-            settings["prompt_mode"] = PROMPT_MATCH_MODEL
-            settings["system_prompt"] = ""
-    if settings.get("max_tokens") == _PREVIOUS_DEFAULT_MAX_TOKENS:
-        settings["max_tokens"] = 40
-    return settings
-
-
 def system_prompt_for(settings, spec):
     """The prompt in effect: the operator's custom text, or the model's own."""
-    settings = migrate_settings(dict(settings))
     custom = str(settings.get("system_prompt") or "").strip()
     if settings.get("prompt_mode") == PROMPT_CUSTOM and custom:
         return custom
@@ -276,6 +282,69 @@ def fit_messages(text, budget_bytes, max_messages):
     return (cut[:space] if space > 0 else cut).rstrip(" ,;:") + "\u2026"
 
 
+def conversation_turns(messages, now):
+    """Rebuild question/answer turns from a DM conversation, oldest first.
+
+    ``messages`` are the conversation's stored rows (any order). A turn is an
+    incoming question to this bot plus the answer sent right after it: the
+    bot's own notices (they start with the robot emoji) are not answers, and a
+    multi-part answer's "(i/n)" parts are joined. Messages that were not
+    questions to the bot -- ordinary chat with this contact -- are ignored.
+    History starts after the last `ask reset` and after any gap of an hour.
+    The question being answered right now is already stored; it is left out.
+    """
+    turns = []  # [question, [answer parts], received_at]
+    answering = False  # still collecting the latest question's answer
+    last_seen = None
+    for message in sorted(messages, key=lambda m: (m.received_at, m.id)):
+        if last_seen is not None and message.received_at - last_seen > SESSION_IDLE_SECONDS:
+            turns = []
+        last_seen = message.received_at
+        if not message.outgoing:
+            # Any incoming message ends the previous answer, question or not.
+            answering = False
+            match = _COMMAND_RE.match(message.text or "")
+            if not match:
+                continue
+            question = match.group(2).strip()
+            if question.lower() in RESET_WORDS:
+                turns = []
+            elif question:
+                turns.append([question, [], message.received_at])
+                answering = True
+        elif (
+            answering
+            and message.received_at - turns[-1][2] <= ANSWER_WINDOW_SECONDS
+            and not (message.text or "").startswith("\U0001f916")
+        ):
+            turns[-1][1].append(_PART_RE.sub("", message.text or "").strip())
+    if last_seen is not None and now - last_seen > SESSION_IDLE_SECONDS:
+        return []
+    # The current question has no answer yet; so has any the bot never answered.
+    history = []
+    for question, parts, _ in turns:
+        if parts:
+            history.append({"role": "user", "content": question})
+            history.append({"role": "assistant", "content": " ".join(parts)})
+    return history
+
+
+async def dm_history(sender_key, limit):
+    """The last ``limit`` messages of this DM conversation with the bot, trimmed
+    to HISTORY_MAX_CHARS and always starting with the sender's question."""
+    from app.repository import MessageRepository
+
+    rows = await MessageRepository.get_all(
+        limit=min(200, limit * 4 + 10), msg_type="PRIV", conversation_key=sender_key
+    )
+    history = conversation_turns(rows, time.time())[-limit:]
+    while history and sum(len(m["content"]) for m in history) > HISTORY_MAX_CHARS:
+        history.pop(0)
+    while history and history[0]["role"] != "user":
+        history.pop(0)
+    return history
+
+
 def _number(ctx, key, default, low, high):
     try:
         value = float(ctx.settings.get(key, default))
@@ -293,6 +362,10 @@ async def ask(ctx, msg):
         await ctx.reply(f"🤖 ask: {exc}")
         return
 
+    if msg.is_dm and msg.arg_text.strip().lower() in RESET_WORDS:
+        # The reset message itself is the marker: history stops at it.
+        await ctx.reply("🤖 Conversation forgotten; starting fresh.")
+        return
     started = time.monotonic()
     state = llm_runtime.ensure(
         spec,
@@ -320,14 +393,17 @@ async def ask(ctx, msg):
         await ctx.reply(f"🤖 {spec.name} is ready. Usage: {ctx.command_prefix}ask <question>")
         return
 
-    messages = [
-        {"role": "system", "content": system_prompt_for(ctx.settings, spec)},
-        {"role": "user", "content": question[:500]},
-    ]
-    try:
-        answer = await asyncio.to_thread(
+    question = question[:500]
+    # DM memory: earlier turns with this sender, never in channels or rooms.
+    session = msg.sender_key if (msg.is_dm and msg.sender_key) else None
+    history_limit = int(_number(ctx, "history_messages", 10, 0, 20))
+    history = await dm_history(session, history_limit) if session and history_limit else []
+    system = {"role": "system", "content": system_prompt_for(ctx.settings, spec)}
+
+    def ask_model(earlier):
+        return asyncio.to_thread(
             llm_runtime.generate,
-            messages,
+            [system, *earlier, {"role": "user", "content": question}],
             max_tokens=int(_number(ctx, "max_tokens", 40, 16, 160)),
             temperature=_number(ctx, "temperature", 0.7, 0.0, 1.5),
             # The whole run must end inside the engine's 10 s: time spent
@@ -340,6 +416,16 @@ async def ask(ctx, msg):
                 ),
             ),
         )
+
+    try:
+        try:
+            answer = await ask_model(history)
+        except LlmPromptTooLongError:
+            if not history:
+                raise
+            # The conversation outgrew the context window: answer this one
+            # question on its own rather than not at all.
+            answer = await ask_model([])
     except LlmBusyError:
         await ctx.reply("🤖 Busy answering someone else, try again shortly.")
         return

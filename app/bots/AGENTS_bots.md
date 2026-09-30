@@ -113,6 +113,18 @@ operators).
   `ensure` reloads. The bot waits `RELOAD_WAIT_SECONDS` (4 s) for a reload and
   takes the elapsed time out of the answer deadline (`RUN_BUDGET_SECONDS`
   7.5 s), so a reload still answers in the same run.
+  **DM memory** is read back from the stored DM conversation
+  (`dm_history` → `MessageRepository.get_all(msg_type="PRIV",
+  conversation_key=sender)`), not kept anywhere: `conversation_turns` pairs
+  each incoming question to the bot (`_COMMAND_RE`: optional prefix/mention +
+  a trigger word) with the outgoing parts sent within `ANSWER_WINDOW_SECONDS`
+  and before the next incoming message, skipping the bot's own "🤖" notices
+  and joining "(i/n)" parts. Ordinary chat with the contact is ignored;
+  `ask reset` is itself the marker history stops at, as is an hour of
+  silence; the current question (already stored) has no answer and drops
+  out. `history_messages` (default 10) of them, trimmed to
+  `HISTORY_MAX_CHARS`, starting with a user turn. A prompt over the context
+  window with history is retried once without it.
   Weight **repacking is off** (`_weight_repacking` wraps
   `llama_model_default_params` during the load to set `use_extra_bufts=False`;
   `Llama()` has no argument for it): on ARM with dotprod (Pi 5) llama.cpp
@@ -149,15 +161,6 @@ operators).
   (only `bots` and `source`, the #bots etiquette commands; insert-time only); unmodified built-ins refresh on version bumps;
   operator-modified ones are never touched. "Reset to default" restores from
   the shipped file.
-  - **Settings are never rewritten by a refresh — unless the bot asks.** A
-    version refresh replaces code, schema and descriptions but keeps the stored
-    `settings`, so a setting whose meaning changes leaves the Settings tab and
-    the bot disagreeing. A library bot may define a module-level
-    `migrate_settings(settings) -> settings`; `ensure_seeded` runs it on the
-    stored settings at refresh (`_migrated_settings`, never raises) and saves
-    the result. Call it at run time too, so a row that was not refreshed yet
-    behaves the same. First user: tinyllm's free-text prompt becoming a
-    "match the model / custom" choice (1.2.0).
   - **Deleting a library file is not enough to remove a bot.** Seeding never
     deletes, and keyword dispatch runs *every* enabled bot that matches, so a
     left-behind row answers alongside whatever replaced it — two replies to one

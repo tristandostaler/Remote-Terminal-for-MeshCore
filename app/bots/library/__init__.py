@@ -96,33 +96,6 @@ def get_library_entry(builtin_key: str) -> dict[str, Any] | None:
     return None
 
 
-def _migrated_settings(entry: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any] | None:
-    """Run a built-in's ``migrate_settings(settings)`` on a version refresh.
-
-    A refresh replaces a bot's code and schema but never its stored settings,
-    so a setting that changes meaning (tinyllm's free-text prompt becoming a
-    "match the model / custom" choice) would leave the stored values and the
-    Settings tab disagreeing. A library bot may define a module-level
-    ``migrate_settings(settings) -> settings``; it runs on the stored settings
-    at refresh, and whatever it returns is saved. Returns ``None`` when there
-    is nothing to change. Never raises: a broken migration must not stop
-    seeding, so it is logged and the settings are left as they were.
-    """
-    from app.bots.runtime import load_bot_code
-
-    try:
-        migrate = load_bot_code(entry["code"]).namespace.get("migrate_settings")
-        if not callable(migrate):
-            return None
-        updated = migrate(dict(settings))
-    except Exception:  # noqa: BLE001 - see docstring
-        logger.exception("Settings migration for built-in %r failed", entry.get("key"))
-        return None
-    if not isinstance(updated, dict) or updated == settings:
-        return None
-    return updated
-
-
 # Built-ins the operator can disable but never delete. ``bots`` answers the
 # #bots discovery command every bot is expected to implement; a node that could
 # delete it would also lose the row seeding keeps enabled-by-default, and a
@@ -281,10 +254,6 @@ async def ensure_seeded() -> int:
             )
             changed += 1
         elif not existing.modified and existing.builtin_version != entry["version"]:
-            updates: dict[str, Any] = {}
-            migrated = _migrated_settings(entry, dict(existing.settings))
-            if migrated is not None:
-                updates["settings"] = migrated
             await BotRepository.update(
                 existing.id,
                 code=entry["code"],
@@ -293,7 +262,6 @@ async def ensure_seeded() -> int:
                 category=entry["category"],
                 settings_schema=entry.get("settings_schema") or [],
                 builtin_version=entry["version"],
-                **updates,
             )
             changed += 1
         elif not existing.long_description and entry.get("long_description"):
