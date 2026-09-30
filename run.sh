@@ -7,8 +7,10 @@ VENV_PYTHON="$APP_DIR/.venv/bin/python"
 OPTIONS=/data/options.json
 
 if [ -f "$OPTIONS" ]; then
-  # keys are already uppercase -> export as-is
-  eval "$(jq -r 'to_entries | .[] | "export \(.key)=\(.value | @sh)"' "$OPTIONS")"
+  # keys are already uppercase -> export as-is. Optional options left empty
+  # (or cleared after being set) are skipped, so they mean "unset" and the
+  # app's default applies, rather than exporting a literal "null" or "".
+  eval "$(jq -r 'to_entries | .[] | select(.value != null and .value != "") | "export \(.key)=\(.value | @sh)"' "$OPTIONS")"
 fi
 
 # ── optional AEIC neural image codec ──────────────────────────────────────────

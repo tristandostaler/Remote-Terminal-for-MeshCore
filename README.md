@@ -214,6 +214,7 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_AEIC_MODEL_DIR` | `data/models/aeic` | Where that codec's ~958 MB model is installed. Defaults to `models/aeic` beside the database so it survives container recreation |
 | `MESHCORE_ENABLE_LLM` | false | Install the `tinyllm` bot's llama-cpp-python on start (Docker / HA add-on). See [Optional: Tiny On-Device AI Bot](#optional-tiny-on-device-ai-bot-tinyllm) |
 | `MESHCORE_LLM_MODEL_DIR` | `data/models/llm` | Where the `tinyllm` bot's models are downloaded. Defaults to `models/llm` beside the database |
+| `UV_CACHE_DIR` | `data/.uv-cache` | Docker / HA add-on: where downloaded Python packages and the compiled llama.cpp are cached, so a container update reinstalls in seconds instead of recompiling. Defaults to `.uv-cache` beside the database |
 | `MESHCORE_DISABLE_BOTS` | false | Disable bot system entirely (blocks execution and config; an intermediate security precaution, but not as good as basic auth) |
 | `MESHCORE_BASIC_AUTH_USERNAME` | | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
 | `MESHCORE_BASIC_AUTH_PASSWORD` | | Optional app-wide HTTP Basic auth password; must be set together with `MESHCORE_BASIC_AUTH_USERNAME` |
@@ -223,6 +224,8 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_VIRTUAL_NODE_PORT` | 5000 | Port the virtual node listens on (the same port a WiFi companion uses) |
 | `MESHCORE_VIRTUAL_NODE_READ_ONLY` | false | Refuse every command that transmits or changes radio/contact/channel state; connected apps can still read contacts, channels and live messages |
 | `MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT` | 1000 | How many missed messages a returning app is handed when it reconnects to the virtual node (newest first when more were missed); `0` disables replay |
+
+On the Home Assistant add-on, `MESHCORE_AEIC_MODEL_DIR`, `MESHCORE_LLM_MODEL_DIR` and `UV_CACHE_DIR` are optional fields under **Show unused optional configuration options**; leave them empty to keep everything beside the database. A path set there must stay under `/app/data`, the only folder kept across add-on updates.
 
 Common launch patterns:
 
