@@ -138,8 +138,8 @@ def contact_listed(raw: Any, sender_key: str | None) -> bool:
 class UnmatchedTrigger:
     """Fallback: a DM no bot's keyword claimed, from a contact the bot lists.
 
-    ``contacts_setting`` names the bot setting holding those contacts (public
-    keys or key prefixes, separated by commas or whitespace; ``*`` = everyone).
+    ``contacts_setting`` names the bot setting holding those contacts (a
+    ``contact_list`` of public keys or key prefixes; ``*`` = everyone).
     The engine checks it before the rate limits, so a DM from anyone else
     never spends a reply slot.
     """

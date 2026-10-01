@@ -1676,10 +1676,14 @@ interface BotSettingsSchemaFieldBase {
 }
 
 export interface BotSettingsValueField extends BotSettingsSchemaFieldBase {
-  /** `textarea`: multi-line text. `section`: a heading that groups the fields after it (no value). */
+  /**
+   * `textarea`: multi-line text. `section`: a heading that groups the fields after it (no value).
+   * `contact_list`: a list of contact public keys (or prefixes, or `*`), added one at a time.
+   */
   type:
     | 'text'
     | 'textarea'
+    | 'contact_list'
     | 'password'
     | 'int'
     | 'float'
