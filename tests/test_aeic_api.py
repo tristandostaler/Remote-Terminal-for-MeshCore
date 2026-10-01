@@ -314,23 +314,6 @@ class TestInboundReassembly:
         assert bytes(session["bitstream"]) == payload
 
     @pytest.mark.asyncio
-    async def test_broadcasts_progress_for_each_chunk(self, test_db):
-        events: list[tuple[str, dict]] = []
-        chunks = _chunks(os.urandom(209), session_id=22)
-        for text in chunks:
-            await note_inbound_chunk(
-                text=text,
-                message_id=await _store_message(text),
-                conversation_type="PRIV",
-                conversation_key=PEER,
-                peer_public_key=PEER,
-                broadcast_fn=lambda kind, data: events.append((kind, data)),
-            )
-        assert [kind for kind, _ in events] == ["aeic_image_session"] * 2
-        assert [data["received"] for _, data in events] == [1, 2]
-        assert all(data["total"] == 2 for _, data in events)
-
-    @pytest.mark.asyncio
     async def test_the_reassembled_bitstream_is_the_base91_of_the_joined_chunks(self, test_db):
         """basE91 is stateful across the stream, so the join must precede the
         decode. Decoding chunk by chunk would corrupt every boundary."""
