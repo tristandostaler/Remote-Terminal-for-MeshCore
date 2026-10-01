@@ -42,6 +42,11 @@ RUN_BUDGET_SECONDS = 7.5
 # simply stops there; so does an hour of silence.
 KEYWORDS = ("ask", "ai", "llm", "tinyllm")
 RESET_WORDS = frozenset({"reset", "forget"})
+# Admin DM: "ask missed" lists questions that found no notes, "ask missed
+# clear" empties the list. Anyone else asking "missed" just gets an answer.
+MISSED_WORD = "missed"
+MISSED_SHOWN = 5
+MISSED_STATE = "missed_questions"
 SESSION_IDLE_SECONDS = 3600
 # The most history text sent to the model: the context window is 512 tokens,
 # and on a Pi every token of prompt costs time out of the 10 s run.
@@ -252,7 +257,9 @@ BOT_META = {
                 "page about this node's bots, private ones left out) and give the best "
                 "matches to the model with each question. Add your own .md files "
                 "there; the shipped ones are overwritten on restart. Each heading "
-                "starts a searchable section."
+                "starts a searchable section. synonyms.txt there groups words that mean "
+                "the same thing, and missed-questions.txt lists questions that found no "
+                "notes (admins can DM 'ask missed')."
             ),
         },
         {
@@ -426,6 +433,37 @@ def reference_notes(query, max_chars):
     return text, [s.title for s in sections]
 
 
+async def note_missed(ctx, question):
+    """Remember a question the notes could not answer, for the operator."""
+    from app.bots.bots_utils.tinyllm import llm_docs
+
+    missed = ctx.state.setdefault(MISSED_STATE, {})
+    if llm_docs.record_missed(missed, question, time.time()):
+        folder = llm_docs.docs_index().folder
+        await asyncio.to_thread(llm_docs.write_missed_file, folder, missed)
+
+
+async def show_missed(ctx, clear=False):
+    from app.bots.bots_utils.tinyllm import llm_docs
+
+    missed = ctx.state.setdefault(MISSED_STATE, {})
+    folder = llm_docs.docs_index().folder
+    if clear:
+        missed.clear()
+        await asyncio.to_thread(llm_docs.write_missed_file, folder, missed)
+        await ctx.reply("🤖 Missed questions cleared.")
+        return
+    rows = llm_docs.top_missed(missed, MISSED_SHOWN)
+    if not rows:
+        await ctx.reply("🤖 No missed questions yet: every question found notes.")
+        return
+    lines = [f"{count}x {question}" for question, count, _ in rows]
+    await ctx.reply_split(
+        f"🤖 Most asked without notes ({len(missed)} in all, see "
+        f"{llm_docs.MISSED_FILE}):\n" + "\n".join(lines)
+    )
+
+
 def notes_check_messages(question, titles):
     """The yes/no question put to the model before using the notes. Generic on
     purpose: the notes can be about anything the operator documents."""
@@ -568,6 +606,10 @@ async def ask(ctx, msg):
         # The reset message itself is the marker: history stops at it.
         await ctx.reply("🤖 Conversation forgotten; starting fresh.")
         return
+    words = msg.arg_text.strip().lower().split()
+    if msg.is_dm and ctx.sender_is_admin and words[:1] == [MISSED_WORD]:
+        await show_missed(ctx, clear=words[1:] == ["clear"])
+        return
     started = time.monotonic()
     if ctx.settings.get("use_docs", True):
         # Create the notes folder on the bot's first run, not its first real
@@ -644,6 +686,8 @@ async def ask(ctx, msg):
         room = min(room, int(_number(ctx, "notes_max_chars", NOTES_MAX_CHARS, 200, 3000)))
         searched = time.monotonic()
         notes, titles = await asyncio.to_thread(reference_notes, f"{question} {earlier}", room)
+        if not titles and not ctx.is_test:
+            await note_missed(ctx, question)
         ctx.log(
             f"notes: {len(notes)} chars from {len(titles)} section(s) "
             f"in {(time.monotonic() - searched) * 1000:.0f} ms"

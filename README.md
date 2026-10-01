@@ -444,6 +444,12 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    matches enough of the question's words -- one shared word such as "power"
    in "what is the power of love?" is not enough -- so notes stay out of
    unrelated questions. The notes can be about anything, not just MeshCore.
+   The notes get better with use: `missed-questions.txt` in the same folder
+   lists the questions that found no notes, most asked first (an admin can
+   also DM `ask missed`), so you know what to write next, and `synonyms.txt`
+   (yours, never overwritten) groups words that mean the same thing, such as
+   `wardrive, wardriving`, so a question phrased differently from the notes
+   still finds them.
    The notes are capped at about 700 characters per question by default (**Most
    reference notes per question**): the model reads them before answering, and
    on a Pi that reading is most of the wait, so a bigger cap means fuller but

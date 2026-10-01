@@ -1,0 +1,51 @@
+# Words that mean the same thing to the tinyllm bot's notes search, one group
+# per line, separated by commas. A question word matches a note when any word
+# of its group is in it. Single words only (no phrases); # starts a comment.
+#
+# This file is yours: it is created once and never overwritten, so add the
+# words people on your mesh actually use. missed-questions.txt, next to it,
+# lists questions that found nothing -- a good source of words to add here.
+# Changes are picked up on the next question.
+
+# Mesh and radio. Keep "reset" and "erase" out of these groups: they would
+# steer a restart or delete question toward a factory reset.
+reboot, restart
+delete, remove
+advert, advertisement, announce, beacon
+repeater, relay, digipeater
+message, msg
+dm, pm
+password, passcode
+firmware, fw
+frequency, freq
+bandwidth, bw
+tx, transmit
+rx, receive
+antenna, aerial
+battery, batt
+location, position, coordinates, gps
+wardrive, wardriving
+wifi, wlan, wireless
+pi, raspberry
+log, journal
+
+# Everyday words and spellings
+car, vehicle
+bike, bicycle, cycle
+tire, tyre
+colour, color
+metre, meter
+litre, liter
+centre, center
+temperature, temp
+hurt, injured, injury
+
+# French and English (accents do not matter)
+redemarrer, reboot
+supprimer, delete
+ajouter, add
+canal, channel
+frequence, frequency
+antenne, antenna
+batterie, battery
+repeteur, repeater

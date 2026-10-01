@@ -175,7 +175,16 @@ operators).
   is most of the wait. A rendered note carries only its last two heading
   levels. The engine warms the index at startup (`_warm_tinyllm_notes`) when an
   enabled tinyllm bot uses notes, and each run logs the notes size, search time
-  and model time. The bot budgets the context by characters (~3/token, no tokenizer
+  and model time. `synonyms.txt` in the docs folder (the operator's: created
+  once from `library/docs/synonyms.txt`, never overwritten, re-read when it
+  changes) groups single words; a question word matches through any word of
+  its group, scored with the asked word's own idf so a rare synonym cannot
+  outweigh it. Keep "reset"/"erase" out of the starter groups (they steer
+  restart/delete questions to factory reset; a test checks). Questions whose
+  search finds nothing (real runs only, not small talk) are counted in the
+  bot's state (`missed_questions`, capped at 200, least asked dropped) and
+  rendered to `missed-questions.txt` (not `.md`, never searched); an admin DM
+  `ask missed` lists the top 5 and `ask missed clear` empties it. The bot budgets the context by characters (~3/token, no tokenizer
   in the server): what is left after prompt, question and answer goes to
   history (up to half) and notes (the rest), searched with the question plus
   the previous one; overflow retries drop history, then notes. `context_tokens`
