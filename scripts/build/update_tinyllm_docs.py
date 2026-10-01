@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Regenerate the tinyllm bot's MeshCore reference notes from the firmware docs.
+"""Regenerate the tinyllm bot's converted reference notes.
 
-The ``tinyllm`` bot ships starter notes in ``app/bots/library/docs/``. Two of
-them are MeshCore's own documentation -- the CLI command reference and the FAQ
--- converted for the bot's keyword search: headings are kept (each one starts
-a searchable section), while tables of contents, links, bold markers and
-horizontal rules are dropped. Run this when MeshCore updates those docs:
+The ``tinyllm`` bot ships notes in ``app/bots/library/docs/``. Some are other
+documentation converted for the bot's keyword search: headings are kept (each
+one starts a searchable section), while tables of contents, links, bold
+markers and horizontal rules are dropped.
 
+* ``remoteterm-*.md`` -- this repository's own READMEs. Always regenerated;
+  rerun after a README change worth knowing offline (the READMEs are not in
+  the Docker image, so the bot cannot read them at runtime).
+* ``meshcore-cli.md`` and ``meshcore-faq.md`` -- MeshCore's CLI command
+  reference and FAQ. Only regenerated when given a MeshCore checkout:
+
+    uv run python scripts/build/update_tinyllm_docs.py
     git clone --depth 1 https://github.com/meshcore-dev/MeshCore /tmp/MeshCore
     uv run python scripts/build/update_tinyllm_docs.py /tmp/MeshCore
 
@@ -21,7 +27,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-OUT_DIR = Path(__file__).resolve().parents[2] / "app" / "bots" / "library" / "docs"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+OUT_DIR = REPO_ROOT / "app" / "bots" / "library" / "docs"
+# This repository's own docs: output file -> (source file, top heading).
+LOCAL_SOURCES = {
+    "remoteterm-readme.md": ("README.md", "RemoteTerm setup and features"),
+    "remoteterm-advanced.md": (
+        "README_ADVANCED.md",
+        "RemoteTerm advanced setup and troubleshooting",
+    ),
+    "remoteterm-home-assistant.md": ("README_HA.md", "RemoteTerm Home Assistant integration"),
+}
 SOURCES = {
     # output file: (source file, title for the top heading)
     "meshcore-cli.md": (
@@ -86,9 +102,22 @@ def convert(markdown: str, title: str) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
+    if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help")):
         print(__doc__)
         return 2
+    for name, (source, title) in LOCAL_SOURCES.items():
+        body = convert((REPO_ROOT / source).read_text(), title)
+        header = (
+            "<!--\n"
+            f"Converted from RemoteTerm's {source} by scripts/build/update_tinyllm_docs.py.\n"
+            "Notes for the tinyllm bot, overwritten in the tinyllm-docs folder on every "
+            "restart: put your own notes in another .md file there.\n"
+            "-->\n\n"
+        )
+        (OUT_DIR / name).write_text(header + body)
+        print(f"wrote {OUT_DIR / name} ({len(body)} chars)")
+    if len(sys.argv) == 1:
+        return 0
     repo = Path(sys.argv[1])
     license_text = (repo / "license.txt").read_text().strip()
     commit = subprocess.run(

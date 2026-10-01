@@ -4,6 +4,7 @@ __pycache__/
 build/
 !scripts/build/
 !scripts/build/**
+scripts/build/**/__pycache__/
 wheels/
 *.egg-info
 

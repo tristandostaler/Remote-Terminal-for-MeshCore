@@ -1143,7 +1143,7 @@ class TestDocsIndex:
             "what is my grid square": "Maidenhead",
             # practical-repairs.md
             "how to jump start a car": "Jump-starting",
-            "how do I change a flat tire": "flat tire",
+            "how do I change a flat tire": "flat car tire",
             "my pipes are frozen": "Frozen pipes",
             "breaker keeps tripping": "Tripped breaker",
             # knots.md
@@ -1155,6 +1155,58 @@ class TestDocsIndex:
             "how to cook beans": "dried beans",
             "how to make bread without yeast": "soda bread",
             "what temperature is chicken safe": "Safe cooking temperatures",
+            # remoteterm-*.md (converted READMEs)
+            "how do I install remoteterm with docker": "Docker",
+            "how to set up https": "HTTPS",
+            "how to enable the virtual node": "Virtual Companion Node",
+            # pi-linux-troubleshooting.md
+            "how do I see the logs": "logs",
+            "how to find the pi ip address": "IP address",
+            "radio not detected": "Radio not detected",
+            "disk is full": "Disk full",
+            "how to kill a process": "kill a process",
+            "how to back up the database": "Back up",
+            # electronics-and-power.md
+            "what is ohm's law": "Ohm",
+            "how long will my battery last": "how long a battery lasts",
+            "resistor color code": "Resistor colour code",
+            "how to use a multimeter": "multimeter",
+            # unit-conversions.md
+            "how many km in a mile": "Length",
+            "convert fahrenheit to celsius": "Temperature conversion",
+            "mpg to l/100km": "Fuel economy",
+            # weather-reading.md
+            "is the barometer falling": "Barometer",
+            "is a storm coming": "storm",
+            "what do cirrus clouds mean": "Cloud types",
+            # world-facts.md
+            "capital of France": "France",
+            "what is the capital of australia": "Australia",
+            "currency of japan": "Japan",
+            "phone code for germany": "Germany",
+            "capital of quebec": "Quebec",
+            "capital of texas": "Texas",
+            "how to call internationally": "international phone number",
+            # food-preservation.md
+            "how to make sauerkraut": "sauerkraut",
+            "is home canning safe": "canning",
+            "how to store potatoes": "store potatoes",
+            "how long does rice keep": "Shelf life",
+            # gardening.md
+            "when to plant tomatoes": "When to plant",
+            "how to compost": "Composting",
+            # bike-and-sewing.md
+            "how do I fix a flat on my bike": "bicycle tire",
+            "how to sew a button": "button",
+            "how to fix a zipper": "zipper",
+            # mesh-etiquette.md
+            "can I use bots on public": "Which channel",
+            "how often should I send adverts": "how often",
+            # french-english.md
+            "comment ajouter une région": "tâches MeshCore",
+            "comment redémarrer le répéteur": "tâches MeshCore",
+            "au secours": "phrases d'urgence",
+            "how do you say help in french": "Everyday phrases",
         }
         for question, expected in cases.items():
             assert expected in index.search(question, 700)[0].title, question
@@ -1168,12 +1220,36 @@ class TestDocsIndex:
             "hi there",
             "thanks!",
             "good morning",
-            "what is the power of love?",
+            "what is the power of friendship?",
             "tell me a joke",
             "write me a poem about the sea",
-            "how to kill a process",
+            "who won the hockey game",
+            "bonjour",
+            "merci beaucoup",
         ):
             assert index.search(chat, 700) == [], chat
+
+    def test_a_best_match_too_big_for_the_budget_is_cut_to_fit(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        body = " ".join(f"Sentence {n} about zeppelins." for n in range(60))
+        (tmp_path / "notes.md").write_text(f"## Zeppelins\n{body}\n")
+        index = llm_docs.DocsIndex(tmp_path)
+        assert all(len(s.text) <= llm_docs.SECTION_MAX_CHARS for s in index._sections), (
+            "an oversized paragraph is split at sentences"
+        )
+        found = index.search("zeppelins", 200)
+        assert len(found) == 1 and found[0].text.endswith("…")
+        assert len(found[0].render()) < 200
+        assert index.search("zeppelins", 60) == [], "too little room for a useful cut"
+
+    def test_accents_fold_so_french_questions_match(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        (tmp_path / "notes.md").write_text("## Ajouter une région\nregion put <nom>\n")
+        index = llm_docs.DocsIndex(tmp_path)
+        assert index.search("comment ajouter une region", 500)
+        assert index.search("ajouter une région", 500)
 
     def test_word_forms_meet(self):
         from app.bots.bots_utils.tinyllm import llm_docs
@@ -1181,6 +1257,7 @@ class TestDocsIndex:
         assert llm_docs._fold("flooding") == llm_docs._fold("floods") == llm_docs._fold("flooded")
         assert llm_docs._fold("regions") == llm_docs._fold("region")
         assert llm_docs._fold("frequencies") == llm_docs._fold("frequency")
+        assert llm_docs._fold("tomatoes") == llm_docs._fold("tomato")
         assert llm_docs._fold("address") == "address"
 
 

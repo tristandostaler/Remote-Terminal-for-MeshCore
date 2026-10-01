@@ -24,6 +24,7 @@ import logging
 import math
 import re
 import threading
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,8 @@ MIN_COVERAGE = 0.5
 MIN_MATCHED_TERMS = 2
 RELATIVE_FLOOR = 0.5
 RARE_WORD_SHARE = 0.05
+# A best match cut to fit the budget is only sent with at least this much text.
+SHORTENED_MIN_CHARS = 120
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
@@ -110,6 +113,88 @@ _STOPWORDS = frozenset(
         "anybody",
         "something",
         "during",
+        "up",
+        "see",
+        "use",
+        "make",
+        "should",
+        "could",
+        "would",
+        "mean",
+        "means",
+        "meaning",
+        # French function words, so a French question is judged on the words
+        # that carry its meaning (accents are folded first: "très" -> "tres").
+        "le",
+        "la",
+        "les",
+        "un",
+        "une",
+        "des",
+        "de",
+        "du",
+        "au",
+        "aux",
+        "et",
+        "ou",
+        "est",
+        "sont",
+        "en",
+        "dans",
+        "sur",
+        "pour",
+        "par",
+        "avec",
+        "sans",
+        "que",
+        "qui",
+        "quoi",
+        "comment",
+        "quel",
+        "quelle",
+        "quels",
+        "quelles",
+        "ce",
+        "cet",
+        "cette",
+        "ces",
+        "je",
+        "tu",
+        "il",
+        "elle",
+        "nous",
+        "vous",
+        "ils",
+        "elles",
+        "mon",
+        "ma",
+        "mes",
+        "ton",
+        "ta",
+        "tes",
+        "sa",
+        "ses",
+        "leur",
+        "se",
+        "ne",
+        "pas",
+        "tres",
+        "faire",
+        "fait",
+        "peux",
+        "peut",
+        "dois",
+        "doit",
+        "ca",
+        "qu",
+        "c",
+        "d",
+        "j",
+        "l",
+        "n",
+        "bonjour",
+        "salut",
+        "merci",
         # Small talk: "hello" alone must not pull in the one note that happens
         # to mention it.
         "hello",
@@ -157,6 +242,8 @@ def _fold(word: str) -> str:
         word = word[:-2]
     if len(word) > 4 and word.endswith("ies"):
         word = word[:-3] + "y"
+    elif len(word) > 4 and word.endswith("oes"):
+        word = word[:-2]  # tomatoes -> tomato
     elif len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
         word = word[:-1]
     return word
@@ -166,7 +253,9 @@ def _tokens(text: str) -> list[str]:
     """Lowercase words, plurals folded; dotted names (``flood.advert.interval``)
     also count as their parts, so either form of a setting name matches."""
     out: list[str] = []
-    for word in _WORD.findall(text.lower()):
+    # Accents folded to plain letters: "région" is one word, and meets "region".
+    text = unicodedata.normalize("NFKD", text.lower()).encode("ascii", "ignore").decode()
+    for word in _WORD.findall(text):
         if "." in word:
             out.extend(_fold(part) for part in word.split(".") if part not in _STOPWORDS)
         if word not in _STOPWORDS:
@@ -191,10 +280,18 @@ def parse_markdown(text: str, source: str = "") -> list[Section]:
         chunk = ""
         for paragraph in re.split(r"\n\s*\n", content):
             paragraph = " ".join(paragraph.split())
-            if chunk and len(chunk) + len(paragraph) + 1 > SECTION_MAX_CHARS:
-                sections.append(Section(title, chunk, source))
-                chunk = ""
-            chunk = f"{chunk} {paragraph}".strip()
+            # An oversized paragraph is split at sentences, so no section is
+            # much bigger than a small model's notes budget.
+            pieces = (
+                re.split(r"(?<=[.!?])\s+", paragraph)
+                if len(paragraph) > SECTION_MAX_CHARS
+                else [paragraph]
+            )
+            for piece in pieces:
+                if chunk and len(chunk) + len(piece) + 1 > SECTION_MAX_CHARS:
+                    sections.append(Section(title, chunk, source))
+                    chunk = ""
+                chunk = f"{chunk} {piece}".strip()
         if chunk:
             sections.append(Section(title, chunk, source))
 
@@ -299,11 +396,26 @@ class DocsIndex:
                     break
                 section = self._sections[i]
                 size = len(section.render()) + 1
-                if used + size > max_chars:
+                if used + size > max_chars and not picked:
+                    # The best match does not fit a small budget whole: its
+                    # start is better than no notes at all.
+                    section = _shortened(section, max_chars - 1)
+                    size = len(section.render()) + 1 if section else 0
+                if not section or used + size > max_chars:
                     continue
                 picked.append(section)
                 used += size
             return picked
+
+
+def _shortened(section: Section, max_chars: int) -> Section | None:
+    """``section`` cut at a word so its rendering fits ``max_chars``, or None
+    when too little of it would be left to be worth sending."""
+    room = max_chars - len(section.render()) + len(section.text) - 1
+    if room < SHORTENED_MIN_CHARS:
+        return None
+    text = section.text[:room].rsplit(" ", 1)[0] + "…"
+    return Section(section.title, text, section.source)
 
 
 # Lists the shipped files currently in a docs folder, one name per line, so a

@@ -22,7 +22,7 @@ before buying an antenna or pigtail. Tiny IPEX / U.FL connectors on boards
 are fragile and rated for only a few dozen connections: pull straight up, and
 glue or tape the cable so it cannot be yanked.
 
-## Choosing an antenna
+## Choosing an antenna (which antenna to buy)
 
 Use an antenna tuned for your band (for example 868 MHz in Europe, 915 MHz in
 North America); a wrong-band antenna loses a lot of signal. A higher-gain

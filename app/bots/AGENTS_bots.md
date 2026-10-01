@@ -137,8 +137,11 @@ operators).
   the index rebuilds when a file's size/mtime changes. Relevance gate
   (`_relevant` + `RELATIVE_FLOOR`): a section needs >= half the question's
   words and >= 2 of them (one-word questions: in its heading, or a rare word),
-  plus half the best score; plurals and -ing/-ed are folded, and small talk
-  ("hello", "thanks") is stopwords. Optional model check
+  plus half the best score; accents are folded to ASCII, plurals and
+  -ing/-ed/-ies/-oes are folded, and small talk, filler words and French
+  function words are stopwords. Paragraphs over 800 chars split at sentences;
+  a best match bigger than the budget is sent cut to fit (with "…") rather
+  than dropped. Optional model check
   (`check_notes_with_model`): `LlmRuntime.choose` asks a generic yes/no ("do
   these notes help?", with the section headings) and the model process forces
   the reply to exactly "yes"/"no" with a llama.cpp grammar at temperature 0;
@@ -154,8 +157,15 @@ operators).
   MeshCore updates them. `emergency-*.md` (first aid, psychological first
   aid, water/food, home safety and weather, radio, outdoors),
   `meshcore-hardware.md`, `radio-reference.md`, `practical-repairs.md`,
-  `knots.md` and `cooking-staples.md` are hand-written from public guidance
-  (Red Cross, CDC, WHO, ICAO); headings are phrased the way people ask, and
+  `knots.md`, `cooking-staples.md`, `pi-linux-troubleshooting.md`,
+  `electronics-and-power.md`, `unit-conversions.md`, `weather-reading.md`,
+  `food-preservation.md`, `gardening.md`, `bike-and-sewing.md`,
+  `mesh-etiquette.md` and `french-english.md` are hand-written from public
+  guidance (Red Cross, CDC, WHO, ICAO, USDA); `world-facts.md` is generated
+  from a table (one heading per country / state so each hit is small);
+  `remoteterm-*.md` are this repo's READMEs converted by the same script --
+  rerun it after a README change worth knowing offline (the READMEs are not
+  in the Docker image, so the bot cannot read them at runtime); headings are phrased the way people ask, and
   `tests/test_bots_tinyllm.py` pins sample questions to their sections --
   rerun it after editing any shipped note. `this-node-bots.md` is not shipped:
   the bot writes it on every run from `ctx.get_enabled_bots()` (so private

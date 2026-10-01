@@ -17,7 +17,7 @@ the good car, wait a few minutes, then start the dead one. Remove the clamps
 in reverse order, without letting them touch. Drive at least 20 to 30
 minutes to recharge. Do not jump a cracked, leaking or frozen battery.
 
-## Changing a flat tire
+## How to change a flat car tire
 
 Park on flat, firm ground away from traffic, hazard lights on, parking brake
 on, and block the wheel diagonally opposite. Loosen the wheel nuts about half
