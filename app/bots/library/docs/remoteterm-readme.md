@@ -1,6 +1,11 @@
-# RemoteTerm for MeshCore Advanced
+<!--
+Converted from RemoteTerm's README.md by scripts/build/update_tinyllm_docs.py.
+Notes for the tinyllm bot, overwritten in the tinyllm-docs folder on every restart: put your own notes in another .md file there.
+-->
 
-A fork of [RemoteTerm for MeshCore](https://github.com/jkingsman/Remote-Terminal-for-MeshCore) by Jack Kingsman, adding MCMP text compression, AEIC image transfer, and further interoperability work with other MeshCore clients.
+# RemoteTerm setup and features
+
+A fork of RemoteTerm for MeshCore by Jack Kingsman, adding MCMP text compression, AEIC image transfer, and further interoperability work with other MeshCore clients.
 
 Backend server + browser interface for MeshCore mesh radio networks, providing a rich, web-based power-user management and messaging system through a companion radio.
 
@@ -17,11 +22,11 @@ Connect your radio over Serial, TCP, or BLE, and then you can:
 * Visualize the mesh as a map or node set, view repeater stats, and more!
 * Inspect the radio's channel slots from the radio settings, and run firmware CLI commands on radios that have a CLI (repeater and room-server firmware; a companion radio has none and the panel says so)
 
-For advanced setup and troubleshooting see [README_ADVANCED.md](README_ADVANCED.md). If you plan to contribute, read [CONTRIBUTING.md](CONTRIBUTING.md).
+For advanced setup and troubleshooting see README_ADVANCED.md. If you plan to contribute, read CONTRIBUTING.md.
 
-**Warning:** This app is for trusted environments only. _Do not put this on an untrusted network, or open it to the public._ You can optionally set `MESHCORE_BASIC_AUTH_USERNAME` and `MESHCORE_BASIC_AUTH_PASSWORD` for app-wide HTTP Basic auth, but that is only a coarse gate and must be paired with HTTPS. The bots can execute arbitrary Python code which means anyone who gets access to the app can, too. To completely disable the bot system, start the server with `MESHCORE_DISABLE_BOTS=true` — this prevents all bot execution and blocks bot configuration changes via the API. If you need stronger access control, consider using a reverse proxy like Nginx, or extending FastAPI; full access control and user management are outside the scope of this app.
+Warning: This app is for trusted environments only. _Do not put this on an untrusted network, or open it to the public._ You can optionally set `MESHCORE_BASIC_AUTH_USERNAME` and `MESHCORE_BASIC_AUTH_PASSWORD` for app-wide HTTP Basic auth, but that is only a coarse gate and must be paired with HTTPS. The bots can execute arbitrary Python code which means anyone who gets access to the app can, too. To completely disable the bot system, start the server with `MESHCORE_DISABLE_BOTS=true` — this prevents all bot execution and blocks bot configuration changes via the API. If you need stronger access control, consider using a reverse proxy like Nginx, or extending FastAPI; full access control and user management are outside the scope of this app.
 
-![Screenshot of the application's web interface](app_screenshot.png)
+Screenshot of the application's web interface
 
 > [!WARNING]
 > RemoteTerm does *full* management of the radio, meaning that once a radio is connected to RemoteTerm, all contacts/channels will be imported and offloaded to RemoteTerm and the contacts actually synced to the device will be governed by RemoteTerm. This means that RemoteTerm can be a poor fit for users who are looking to swap radios in and out, maintaining radio state (favorites, channels, etc.) irrespective of app usage. Channels are kept loaded on the radio (Public first, then favorites and the most recently active, up to the slot count minus one) so the radio can decrypt and queue their messages as a fallback; set `MESHCORE_RESIDENT_CHANNELS_ENABLED=false` to wipe the slots instead.
@@ -30,58 +35,52 @@ For advanced setup and troubleshooting see [README_ADVANCED.md](README_ADVANCED.
 
 - Python 3.11+
 - Node.js LTS or current (20, 22, 24, 25) if you're not using a prebuilt release
-- [UV](https://astral.sh/uv) package manager: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- UV package manager: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - MeshCore radio connected via USB serial, TCP, or BLE
 
-<details>
-<summary>Finding your serial port</summary>
+Finding your serial port
 
-```bash
-#######
-# Linux
-#######
-ls /dev/ttyUSB* /dev/ttyACM*
+    #######
+    # Linux
+    #######
+    ls /dev/ttyUSB* /dev/ttyACM*
 
-#######
-# macOS
-#######
-ls /dev/cu.usbserial-* /dev/cu.usbmodem*
+    #######
+    # macOS
+    #######
+    ls /dev/cu.usbserial-* /dev/cu.usbmodem*
 
-###########
-# Windows
-###########
-# In PowerShell:
-Get-CimInstance Win32_SerialPort | Select-Object DeviceID, Caption
+    ###########
+    # Windows
+    ###########
+    # In PowerShell:
+    Get-CimInstance Win32_SerialPort | Select-Object DeviceID, Caption
 
-######
-# WSL2
-######
-# Run this in an elevated PowerShell (not WSL) window
-winget install usbipd
-# restart console
-# then find device ID
-usbipd list
-# make device shareable
-usbipd bind --busid 3-8 # (or whatever the right ID is)
-# attach device to WSL (run this each time you plug in the device)
-usbipd attach --wsl --busid 3-8
-# device will appear in WSL as /dev/ttyUSB0 or /dev/ttyACM0
-```
-</details>
+    ######
+    # WSL2
+    ######
+    # Run this in an elevated PowerShell (not WSL) window
+    winget install usbipd
+    # restart console
+    # then find device ID
+    usbipd list
+    # make device shareable
+    usbipd bind --busid 3-8 # (or whatever the right ID is)
+    # attach device to WSL (run this each time you plug in the device)
+    usbipd attach --wsl --busid 3-8
+    # device will appear in WSL as /dev/ttyUSB0 or /dev/ttyACM0
 
 ## Install Path 1: Clone And Build
 
-**This approach is recommended over Docker due to intermittent serial communications issues I've seen on \*nix systems.**
+This approach is recommended over Docker due to intermittent serial communications issues I've seen on \*nix systems.
 
-```bash
-git clone https://github.com/tristandostaler/Remote-Terminal-for-MeshCore.git
-cd Remote-Terminal-for-MeshCore
+    git clone https://github.com/tristandostaler/Remote-Terminal-for-MeshCore.git
+    cd Remote-Terminal-for-MeshCore
 
-uv sync
-cd frontend && npm install && npm run build && cd ..
+    uv sync
+    cd frontend && npm install && npm run build && cd ..
 
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
+    uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Access the app at http://localhost:8000. Once the backend is running, the interactive API docs are available at http://localhost:8000/docs.
 
@@ -97,11 +96,11 @@ Source checkouts expect a normal frontend build in `frontend/dist`.
 > bash scripts/setup/install_service.sh
 > ```
 >
-> For the full service workflow and post-install operations, see [README_ADVANCED.md](README_ADVANCED.md).
+> For the full service workflow and post-install operations, see README_ADVANCED.md.
 
 ## Install Path 2: Docker
 
-> **Warning:** Docker has had reports intermittent issues with serial event subscriptions. The native method above is more reliable.
+> Warning: Docker has had reports intermittent issues with serial event subscriptions. The native method above is more reliable.
 
 Local Docker builds are architecture-native by default. On Apple Silicon Macs and ARM64 Linux hosts such as Raspberry Pi, `docker compose build` / `docker compose up --build` will produce an ARM64 image unless you override the platform.
 
@@ -111,15 +110,11 @@ Create a local `docker-compose.yml` in one of two ways:
 
 1. Copy the example file and edit it by hand:
 
-```bash
-cp docker-compose.example.yml docker-compose.yml
-```
+    cp docker-compose.example.yml docker-compose.yml
 
 2. Or generate one interactively:
 
-```bash
-bash scripts/setup/install_docker.sh
-```
+    bash scripts/setup/install_docker.sh
 
 > The interactive generator enables a self-signed (snakeoil) TLS certificate by default. If you accept the default, the app will be served over HTTPS and the generated compose file will include certificate mounts and an SSL command override. Decline if you prefer plain HTTP or plan to terminate TLS externally.
 
@@ -129,67 +124,51 @@ The guided Docker flow can collect BLE settings, but BLE access from Docker stil
 
 Then customize the local compose file for your transport and launch:
 
-```bash
-sudo docker compose up # add -d for background once you validate it's working
-```
+    sudo docker compose up # add -d for background once you validate it's working
 
 The database is stored in `./data/` (bind-mounted), so the container shares the same database as the native app.
 
 To rebuild after pulling updates:
 
-```bash
-sudo docker compose pull
-sudo docker compose up -d
-```
+    sudo docker compose pull
+    sudo docker compose up -d
 
 > If you switched to a local build (`build: .` instead of `image:`), use `sudo docker compose up -d --build` instead — `pull` only fetches remote images.
 
 The example file and setup script default to the published Docker Hub image. To build locally from your checkout instead, replace:
 
-```yaml
-image: docker.io/tristandostaler/remoteterm-meshcore:latest
-```
+    image: docker.io/tristandostaler/remoteterm-meshcore:latest
 
 with:
 
-```yaml
-build: .
-```
+    build: .
 
 Then run:
 
-```bash
-sudo docker compose up -d --build
-```
+    sudo docker compose up -d --build
 
 The container runs as root by default for maximum serial passthrough compatibility across host setups. On Linux, if you switch between native and Docker runs, `./data` can end up root-owned. If you do not need that serial compatibility behavior, you can enable the optional `user: "${UID:-1000}:${GID:-1000}"` line in `docker-compose.yml` to keep ownership aligned with your host user.
 
 To stop:
 
-```bash
-sudo docker compose down
-```
+    sudo docker compose down
 
 ## Install Path 3: Arch Linux (AUR)
 
-A [`remoteterm-meshcore`](https://aur.archlinux.org/packages/remoteterm-meshcore) package is available in the AUR. Install it with an AUR helper or build it manually:
+A `remoteterm-meshcore` package is available in the AUR. Install it with an AUR helper or build it manually:
 
-```bash
-# with an AUR helper
-yay -S remoteterm-meshcore
+    # with an AUR helper
+    yay -S remoteterm-meshcore
 
-# or manually
-git clone https://aur.archlinux.org/remoteterm-meshcore.git
-cd remoteterm-meshcore
-makepkg -si
-```
+    # or manually
+    git clone https://aur.archlinux.org/remoteterm-meshcore.git
+    cd remoteterm-meshcore
+    makepkg -si
 
 Configure your radio connection, then start the service:
 
-```bash
-sudo vi /etc/remoteterm-meshcore/remoteterm.env
-sudo systemctl enable --now remoteterm-meshcore
-```
+    sudo vi /etc/remoteterm-meshcore/remoteterm.env
+    sudo systemctl enable --now remoteterm-meshcore
 
 Access the app at http://localhost:8000.
 
@@ -210,9 +189,9 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_BLE_PIN` | | BLE PIN (required when BLE address is set) |
 | `MESHCORE_LOG_LEVEL` | INFO | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `MESHCORE_DATABASE_PATH` | `data/meshcore.db` | SQLite database path. Its folder is the data folder: downloaded models and, in Docker, the build cache (`.uv-cache`) default to living beside it |
-| `MESHCORE_ENABLE_AEIC` | false | Install the optional AI image codec on start (Docker / HA add-on). See [Optional: AI Image Codec](#optional-ai-image-codec-aeic) |
+| `MESHCORE_ENABLE_AEIC` | false | Install the optional AI image codec on start (Docker / HA add-on). See Optional: AI Image Codec |
 | `MESHCORE_AEIC_MODEL_DIR` | `data/models/aeic` | Where that codec's ~958 MB model is installed. Defaults to `models/aeic` beside the database so it survives container recreation |
-| `MESHCORE_ENABLE_LLM` | false | Install the `tinyllm` bot's llama-cpp-python on start (Docker / HA add-on). See [Optional: Tiny On-Device AI Bot](#optional-tiny-on-device-ai-bot-tinyllm) |
+| `MESHCORE_ENABLE_LLM` | false | Install the `tinyllm` bot's llama-cpp-python on start (Docker / HA add-on). See Optional: Tiny On-Device AI Bot |
 | `MESHCORE_LLM_MODEL_DIR` | `data/models/llm` | Where the `tinyllm` bot's models are downloaded. Defaults to `models/llm` beside the database |
 | `MESHCORE_LLM_DOCS_DIR` | `data/tinyllm-docs` | Markdown reference notes the `tinyllm` bot searches. Holds MeshCore, emergency and everyday reference notes, refreshed on every restart, plus a page about this node's bots; add your own `.md` files, which are kept. Defaults to `tinyllm-docs` beside the database |
 | `UV_CACHE_DIR` | `data/.uv-cache` | Docker / HA add-on: where downloaded Python packages and the compiled llama.cpp are cached, so a container update reinstalls in seconds instead of recompiling. Defaults to `.uv-cache` beside the database |
@@ -220,36 +199,32 @@ Only one transport may be active at a time. If multiple are set, the server will
 | `MESHCORE_BASIC_AUTH_USERNAME` | | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
 | `MESHCORE_BASIC_AUTH_PASSWORD` | | Optional app-wide HTTP Basic auth password; must be set together with `MESHCORE_BASIC_AUTH_USERNAME` |
 | `MESHCORE_VAPID_SUBJECT` | `mailto:noreply@meshcore.local` | Subject (`sub`) claim for Web Push VAPID tokens; must be a `mailto:` or `https:` contact. Apple's push service rejects the default `.local` domain, so iOS/Safari users must set this to a real address (e.g. `mailto:you@example.com`). |
-| `MESHCORE_VIRTUAL_NODE_ENABLED` | false | Start the [virtual companion node](#virtual-companion-node-share-the-radio-with-other-meshcore-apps): a TCP server other MeshCore apps connect to as if it were the radio |
+| `MESHCORE_VIRTUAL_NODE_ENABLED` | false | Start the virtual companion node: a TCP server other MeshCore apps connect to as if it were the radio |
 | `MESHCORE_VIRTUAL_NODE_HOST` | `0.0.0.0` | Interface the virtual node listens on |
 | `MESHCORE_VIRTUAL_NODE_PORT` | 5000 | Port the virtual node listens on (the same port a WiFi companion uses) |
 | `MESHCORE_VIRTUAL_NODE_READ_ONLY` | false | Refuse every command that transmits or changes radio/contact/channel state; connected apps can still read contacts, channels and live messages |
 | `MESHCORE_VIRTUAL_NODE_REPLAY_LIMIT` | 1000 | How many missed messages a returning app is handed when it reconnects to the virtual node (newest first when more were missed); `0` disables replay |
 
-On the Home Assistant add-on, `MESHCORE_AEIC_MODEL_DIR`, `MESHCORE_LLM_MODEL_DIR`, `MESHCORE_LLM_DOCS_DIR` and `UV_CACHE_DIR` are optional fields under **Show unused optional configuration options**; leave them empty to keep everything beside the database. A path set there must stay under `/app/data`, the only folder kept across add-on updates.
+On the Home Assistant add-on, `MESHCORE_AEIC_MODEL_DIR`, `MESHCORE_LLM_MODEL_DIR`, `MESHCORE_LLM_DOCS_DIR` and `UV_CACHE_DIR` are optional fields under Show unused optional configuration options; leave them empty to keep everything beside the database. A path set there must stay under `/app/data`, the only folder kept across add-on updates.
 
 Common launch patterns:
 
-```bash
-# Serial (explicit port)
-MESHCORE_SERIAL_PORT=/dev/ttyUSB0 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # Serial (explicit port)
+    MESHCORE_SERIAL_PORT=/dev/ttyUSB0 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# TCP
-MESHCORE_TCP_HOST=192.168.1.100 MESHCORE_TCP_PORT=5000 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # TCP
+    MESHCORE_TCP_HOST=192.168.1.100 MESHCORE_TCP_PORT=5000 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# BLE
-MESHCORE_BLE_ADDRESS=AA:BB:CC:DD:EE:FF MESHCORE_BLE_PIN=123456 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
+    # BLE
+    MESHCORE_BLE_ADDRESS=AA:BB:CC:DD:EE:FF MESHCORE_BLE_PIN=123456 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 On Windows (PowerShell), set environment variables as a separate statement:
 
-```powershell
-$env:MESHCORE_SERIAL_PORT="COM8" # or your COM port
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
+    $env:MESHCORE_SERIAL_PORT="COM8" # or your COM port
+    uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 > [!WARNING]
-> **Windows + MQTT fanout:** Python's default Windows event loop (ProactorEventLoop) is not compatible with the MQTT libraries used by RemoteTerm. If you configure any MQTT integration, add `--loop none` to your uvicorn command:
+> Windows + MQTT fanout: Python's default Windows event loop (ProactorEventLoop) is not compatible with the MQTT libraries used by RemoteTerm. If you configure any MQTT integration, add `--loop none` to your uvicorn command:
 >
 > ```powershell
 > uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --loop none
@@ -261,59 +236,53 @@ If you enable Basic Auth, protect the app with HTTPS. HTTP Basic credentials are
 
 ## Optional: AI Image Codec (AEIC)
 
-RemoteTerm can send photos two ways. The default (**Standard**) packs a 256px
+RemoteTerm can send photos two ways. The default (Standard) packs a 256px
 greyscale AVIF/JPEG into 15–40 radio fragments and needs nothing extra. The
-optional **AI reconstruction** codec turns a 512px *colour* photo into ~150 bytes
+optional AI reconstruction codec turns a 512px *colour* photo into ~150 bytes
 — one or two ordinary messages — and the receiver rebuilds the picture with a
 neural network.
 
 It is off by default because it is heavy, and RemoteTerm is meant to run on small
 appliances. Enabling it is three steps.
 
-### 1. Requirements
+### Requirements
 
 | | |
 |---|---|
-| Platform | **64-bit only** (x86_64 or aarch64). onnxruntime publishes no wheels for armv7/armhf/i386, so the install fails there. |
-| Disk | ~120 MB of Python packages + **958 MB** of model |
-| RAM | **~2.4 GiB free** while decoding a photo. Encoding needs far less (~0.4 GiB). |
+| Platform | 64-bit only (x86_64 or aarch64). onnxruntime publishes no wheels for armv7/armhf/i386, so the install fails there. |
+| Disk | ~120 MB of Python packages + 958 MB of model |
+| RAM | ~2.4 GiB free while decoding a photo. Encoding needs far less (~0.4 GiB). |
 | Speed | Encoding ~0.3 s; decoding ~5 s per photo on a modern CPU, slower on a Pi. |
 
 A Raspberry Pi 4/5 with 4 GB+ works. A Pi Zero, a 32-bit OS, or a 2 GB board does
 not — leave it off there and the app behaves exactly as before.
 
-### 2. Turn on the dependencies
+### Turn on the dependencies
 
-**Docker / docker-compose** — just set an environment variable. No rebuild, no
+Docker / docker-compose — just set an environment variable. No rebuild, no
 custom image: `run.sh` installs the dependencies on the first start after you
 switch it on (~120 MB), and skips instantly on every start after that.
 
-```yaml
-services:
-  remoteterm:
-    environment:
-      MESHCORE_ENABLE_AEIC: "true"
-```
+    services:
+      remoteterm:
+        environment:
+          MESHCORE_ENABLE_AEIC: "true"
 
 or `docker run -e MESHCORE_ENABLE_AEIC=true ...`. Accepts `true`/`1`/`yes`/`on`.
 Wheels are cached in `./data/.uv-cache` (~200 MB), so recreating the container
 reinstalls in seconds instead of re-downloading.
 
-**Home Assistant add-on** — flip **`MESHCORE_ENABLE_AEIC`** in the add-on's
+Home Assistant add-on — flip `MESHCORE_ENABLE_AEIC` in the add-on's
 Configuration tab and restart.
 
-**Clone and build:**
+Clone and build:
 
-```bash
-uv sync --extra aeic
-```
+    uv sync --extra aeic
 
-**systemd installer** — installed up front, since a service shouldn't be
+systemd installer — installed up front, since a service shouldn't be
 installing packages on boot:
 
-```bash
-MESHCORE_ENABLE_AEIC=1 bash scripts/setup/install_service.sh
-```
+    MESHCORE_ENABLE_AEIC=1 bash scripts/setup/install_service.sh
 
 > [!NOTE]
 > If you'd rather pay the cost at image-build time than on first start, the
@@ -321,15 +290,15 @@ MESHCORE_ENABLE_AEIC=1 bash scripts/setup/install_service.sh
 > the runtime step a no-op.
 
 If the dependencies can't be installed — wrong architecture, no network — the app
-logs a warning and **starts normally without the codec**. It will never keep your
+logs a warning and starts normally without the codec. It will never keep your
 radio offline over an optional image feature.
 
-### 3. Download the model and turn it on
+### Download the model and turn it on
 
-Open any conversation → the **features** button in the chat header → **Photo
-codec**. The AI option shows a one-time **Download model (958 MB)** button with a
+Open any conversation → the features button in the chat header → Photo
+codec. The AI option shows a one-time Download model (958 MB) button with a
 progress bar; it is fetched from
-[huggingface.co/zjs81/aeic-se-onnx](https://huggingface.co/zjs81/aeic-se-onnx)
+huggingface.co/zjs81/aeic-se-onnx
 and every file is SHA-256 verified. The download is resumable, so a dropped
 connection continues rather than restarting.
 
@@ -338,8 +307,8 @@ is inside the mounted `data/` volume for both Docker and the Home Assistant
 add-on — so it survives container recreation and is downloaded once, not per
 restart.
 
-Once it is installed, pick **AI reconstruction** for a conversation. The choice is
-**per conversation**, so you can use it with one contact and leave everyone else
+Once it is installed, pick AI reconstruction for a conversation. The choice is
+per conversation, so you can use it with one contact and leave everyone else
 on Standard.
 
 You can also drive it over the API: `GET /api/aeic/status` reports what is
@@ -347,45 +316,43 @@ missing, and `POST /api/aeic/model/download` starts the fetch.
 
 ### Things worth knowing
 
-- **Both ends need it.** The recipient must also have the codec installed to see
+- Both ends need it. The recipient must also have the codec installed to see
   the photo; otherwise they get an unreadable `aei1:` text message. It does not
   currently interoperate with MCO Advanced clients.
-- **It is lossy in an unusual way.** The receiver gets a recognisably similar
+- It is lossy in an unusual way. The receiver gets a recognisably similar
   picture, not the same pixels — that is what makes 150 bytes possible.
-- **Bots can send photos too**, via `ctx.reply_image()` — see
-  [app/bots/AGENTS_bots.md](app/bots/AGENTS_bots.md).
+- Bots can send photos too, via `ctx.reply_image()` — see
+  app/bots/AGENTS_bots.md.
 - Without the dependencies or the model, the AI option is visible but disabled and
   explains which piece is missing. Nothing else changes.
 
 ## Optional: Tiny On-Device AI Bot (`tinyllm`)
 
-The built-in **`tinyllm`** bot answers `ask <question>` (or `ai`, `llm` or `tinyllm <question>`) on
-`#bot`, `#bots` and in DMs with a small language model that runs **inside this
-server**: no Ollama, no cloud API, no GPU. It ships disabled.
+The built-in `tinyllm` bot answers `ask <question>` (or `ai`, `llm` or `tinyllm <question>`) on
+`#bot`, `#bots` and in DMs with a small language model that runs inside this
+server: no Ollama, no cloud API, no GPU. It ships disabled.
 
 1. Install the optional dependency. llama-cpp-python is published as source,
    so this compiles llama.cpp once: a few minutes on a desktop, up to an hour on
    a small Pi (where memory limits it to one compile job).
 
-   **Docker / docker-compose** — set `MESHCORE_ENABLE_LLM=true`. The server
-   starts normally and the compile runs **in the background** (the radio stays
+   Docker / docker-compose — set `MESHCORE_ENABLE_LLM=true`. The server
+   starts normally and the compile runs in the background (the radio stays
    online); the bot answers "still being installed" until it finishes. The
    build is cached in `./data/.uv-cache`, so recreating the container reinstalls
    in seconds. To pay the cost at image build instead:
    `docker build --build-arg ENABLE_LLM=1 .`
 
-   **Home Assistant add-on** — switch on **`MESHCORE_ENABLE_LLM`** in the
+   Home Assistant add-on — switch on `MESHCORE_ENABLE_LLM` in the
    Configuration tab and restart.
 
-   **Clone and build:**
+   Clone and build:
 
-   ```bash
-   uv sync --extra llm              # or: uv sync --extra aeic --extra llm
-   ```
+       uv sync --extra llm              # or: uv sync --extra aeic --extra llm
 
    `uv sync` removes extras you don't name, so list every extra you use.
 
-2. Open **Bots → tinyllm → Settings** and pick a model. Each option shows its
+2. Open Bots → tinyllm → Settings and pick a model. Each option shows its
    download size, the RAM it uses while loaded, and rough speed and quality:
 
    | Model | Download | RAM | Notes |
@@ -394,21 +361,21 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    | SmolLM2 135M | 145 MB | ~210 MB | Toy, very fast |
    | Gemma 3 270M | 292 MB | ~450 MB | Short friendly chat |
    | SmolLM2 360M | 386 MB | ~550 MB | Decent small talk |
-   | **Qwen2.5 0.5B** (default) | 491 MB | ~650 MB | Best of the tiny tier |
+   | Qwen2.5 0.5B (default) | 491 MB | ~650 MB | Best of the tiny tier |
    | Llama 3.2 1B | 808 MB | ~1.1 GB | Smarter; Pi 5 or better |
    | Qwen2.5 1.5B | 1.1 GB | ~1.5 GB | Most capable; best on x86 |
 
-   A **Custom** option takes any GGUF chat model from Hugging Face.
+   A Custom option takes any GGUF chat model from Hugging Face.
 
-   Each model comes with its own **system prompt**, sized to what it can
+   Each model comes with its own system prompt, sized to what it can
    follow (the smallest ones get a single plain instruction: told more, they
    tend to repeat it back). It is shown in the model's details, and with
-   **System prompt: Match the selected model** (the default) switching models
-   switches the prompt. Pick **Custom** to write your own; it is then kept
-   whatever model you choose. Answers are capped in code to **Max messages
-   per answer** (default 1), cut back to whole sentences.
+   System prompt: Match the selected model (the default) switching models
+   switches the prompt. Pick Custom to write your own; it is then kept
+   whatever model you choose. Answers are capped in code to Max messages
+   per answer (default 1), cut back to whole sentences.
 
-   In a **DM** the bot remembers the conversation: the last **DM memory**
+   In a DM the bot remembers the conversation: the last DM memory
    messages (default 10; 0 turns it off) go to the model with each new
    question, so follow-ups work. They are read back from the DM conversation
    itself (the stored messages), so memory survives restarts; ordinary chat
@@ -416,7 +383,7 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    silence or when you send `ask reset`. Channels and rooms are never
    remembered.
 
-   **Reference notes.** For knowledge questions the bot searches a folder of
+   Reference notes. For knowledge questions the bot searches a folder of
    markdown files, `tinyllm-docs` beside the database (in the add-on's config
    folder on Home Assistant), and gives the best-matching sections to the
    model. It ships with MeshCore basics, a regions guide (add, remove, allow
@@ -433,7 +400,7 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    and cooking basics. For exact arithmetic and unit conversion, enable the
    offline `calc` bot (`calc 2*(3+4)`, `convert 10 mi to km`).
    The bot also keeps a page about this node's own enabled bots, so "how do I
-   get the weather?" names the right command; a bot marked **Private** in its
+   get the weather?" names the right command; a bot marked Private in its
    editor still answers but is left out of that page and of `help` / `bots`. These are general
    guidance, not medical training -- a tiny model can garble numbers, so keep a
    printed first-aid manual too. Those shipped files are refreshed from the release on every restart
@@ -444,16 +411,16 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    matches enough of the question's words -- one shared word such as "power"
    in "what is the power of love?" is not enough -- so notes stay out of
    unrelated questions. The notes can be about anything, not just MeshCore.
-   **Ask the model whether the notes fit** adds a quick yes/no from the model
+   Ask the model whether the notes fit adds a quick yes/no from the model
    before using them, to filter matches that share words but not meaning; it
    costs a short extra model pass and suits Qwen2.5 1.5B / Llama 3.2 1B best.
 
-   **Context size** (512 / 1024 / 2048 tokens) is how much the model reads at
+   Context size (512 / 1024 / 2048 tokens) is how much the model reads at
    once: the prompt, the question, DM history and reference notes share it.
    Bigger fits more notes and history but costs memory and, on a Pi, answer
    time.
 
-   Prompts can use **placeholders**: `{radio_name}` (this radio's name),
+   Prompts can use placeholders: `{radio_name}` (this radio's name),
    `{sender}`, `{time}` and `{date}`. The bigger models' default prompts use
    them to know who and where they are; the tiny ones' stay bare.
 
@@ -466,36 +433,36 @@ Tiny models are chatty and often wrong. Treat the answers as entertainment.
 
 ### Low-memory hardware (Pi 3, Pi Zero 2 W, 1-2 GB Pi 4)
 
-- **The compile is the heavy part, not the model.** Building llama.cpp peaks at
+- The compile is the heavy part, not the model. Building llama.cpp peaks at
   ~700 MB per compiler process. `run.sh` runs one compile job per ~800 MB free
   (at least one), at the lowest CPU and disk priority, and warns when less than
   900 MB is free. Set `CMAKE_BUILD_PARALLEL_LEVEL=1` to force a single job. It
   happens once: the result is cached beside the database (see above). On a 512 MB
   board, pre-bake instead: `docker build --build-arg ENABLE_LLM=1` on a bigger
   machine.
-- **A model that won't fit is refused, not loaded.** Before loading, the bot
+- A model that won't fit is refused, not loaded. Before loading, the bot
   checks free memory (and the container's memory limit) for the model file plus
   ~190 MB of headroom, and answers "not enough free memory… pick a smaller
   model" instead of letting the OOM killer take the whole server down.
-- **The smallest model needs ~180 MB**, and most of that is the model file
+- The smallest model needs ~180 MB, and most of that is the model file
   memory-mapped from disk, which Linux can drop under pressure. Only ~50 MB is
   memory nothing else can reclaim.
-- **No second copy of the model on ARM.** On a Pi 5 (and other ARM CPUs with
+- No second copy of the model on ARM. On a Pi 5 (and other ARM CPUs with
   dot-product instructions) llama.cpp normally rearranges the weights into a
   faster layout at load time, keeping a second, unreclaimable copy of the whole
   model in memory. The bot turns that off. If you have RAM to spare, the
-  **Faster ARM weight layout** setting turns it back on for quicker answers;
+  Faster ARM weight layout setting turns it back on for quicker answers;
   the memory check then counts the model twice.
-- **The model runs in its own process**, marked as the first thing the kernel
+- The model runs in its own process, marked as the first thing the kernel
   kills when memory runs out. If that happens, the bot replies that the model
   was stopped for lack of memory and the radio server keeps running; the next
   question reloads it.
-- **The model is unloaded when idle.** After 5 minutes with no questions
+- The model is unloaded when idle. After 5 minutes with no questions
   (setting: *Unload the model after*) its memory is freed entirely; the next
   question reloads it, typically in well under a second once the file is in
   the page cache, a few seconds from an SD card, and still answers in the same
   reply. Set it to 0 to hold the memory only while an answer is being written.
-- **CPU threads default to half the cores**, so a Pi on a marginal power supply
+- CPU threads default to half the cores, so a Pi on a marginal power supply
   isn't pinned at 100% (a common cause of brown-out reboots that look like
   crashes).
 
@@ -507,9 +474,7 @@ RemoteTerm opens a TCP server that speaks the companion wire protocol (the same
 one a WiFi companion speaks on port 5000), and apps connect to *RemoteTerm* as if
 it were the radio. It is the same idea as MeshMonitor's Virtual Node.
 
-```bash
-MESHCORE_VIRTUAL_NODE_ENABLED=true uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
+    MESHCORE_VIRTUAL_NODE_ENABLED=true uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Then, in the MeshCore mobile app pick the TCP/WiFi connection and enter the
 server's IP with port `5000`; with meshcore-cli use `meshcore-cli -t <server-ip>`;
@@ -518,7 +483,7 @@ apps can be connected at once. Docker users need to publish the port
 (`-p 5000:5000`), and the port can be changed with `MESHCORE_VIRTUAL_NODE_PORT`.
 In the Home Assistant add-on, switch on `MESHCORE_VIRTUAL_NODE_ENABLED` in the
 add-on options and pick the host port for "Virtual MeshCore companion node"
-under the add-on's **Network** section (default 5000; clear it to keep the port
+under the add-on's Network section (default 5000; clear it to keep the port
 closed).
 
 An app that reconnects picks up where it left off. The node remembers each app
@@ -532,17 +497,17 @@ share a cursor, and a device that changes address starts over.
 
 What it does for the radio:
 
-- **Answers from RemoteTerm's own state** — identity, the *whole* contact list
+- Answers from RemoteTerm's own state — identity, the *whole* contact list
   (the server keeps far more contacts than the radio can hold), channels, the
   clock, battery, every incoming message and the history a reconnecting app
   missed — so the traffic apps generate on connect and while browsing never
   reaches the radio.
-- **Caches read-only device queries** for 30 seconds, so several apps polling the
+- Caches read-only device queries for 30 seconds, so several apps polling the
   same thing cost one radio round trip.
-- **Forwards the rest** (sends, repeater logins, telemetry requests, radio
+- Forwards the rest (sends, repeater logins, telemetry requests, radio
   settings) under the same lock RemoteTerm uses for its own commands, so app
   traffic never interleaves with a sync or a send in progress.
-- **Keeps the web UI in sync**: messages sent from an app are stored, shown,
+- Keeps the web UI in sync: messages sent from an app are stored, shown,
   ACK-tracked and retried exactly like messages typed in the browser; contacts
   and channels added in an app appear in RemoteTerm too.
 
@@ -550,13 +515,13 @@ Some things are deliberately not proxied: rebooting, factory reset and private
 key import are refused, and private key export follows
 `MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT`. Changing the radio's own settings
 from an app (name, location, frequency, TX power, tuning, flood scope, path hash
-mode, signing) is **off by default** and refused until you switch on "Allow
-connected apps to change radio settings" in **Settings → Virtual Node**; it
+mode, signing) is off by default and refused until you switch on "Allow
+connected apps to change radio settings" in Settings → Virtual Node; it
 applies to every connected app at once. Set
 `MESHCORE_VIRTUAL_NODE_READ_ONLY=true` to turn connected apps into viewers that
 can read but never transmit or change anything, whatever that switch says.
 
-**Settings → Virtual Node** also shows whether the node is listening and on
+Settings → Virtual Node also shows whether the node is listening and on
 which address, every app connected right now (with a Disconnect button), and
 every app the node remembers with how far into the history it has caught up
 (with a Forget button, which makes that app's next connection start at the
@@ -569,9 +534,9 @@ present).
 
 ## Where To Go Next
 
-- Advanced setup, troubleshooting, HTTPS, systemd, remediation variables, and debug logging: [README_ADVANCED.md](README_ADVANCED.md)
-- Home Assistant-specific guidance and entity/sensor naming schemes: [README_HA.md](README_HA.md)
-- Contributing, tests, linting, E2E notes, and important AGENTS files: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Advanced setup, troubleshooting, HTTPS, systemd, remediation variables, and debug logging: README_ADVANCED.md
+- Home Assistant-specific guidance and entity/sensor naming schemes: README_HA.md
+- Contributing, tests, linting, E2E notes, and important AGENTS files: CONTRIBUTING.md
 - Live API docs after the backend is running: http://localhost:8000/docs
 
 ## Disclaimer

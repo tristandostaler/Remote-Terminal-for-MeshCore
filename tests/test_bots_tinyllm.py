@@ -1029,29 +1029,265 @@ class TestDocsIndex:
         doc.write_text("## One\npears and more pears\n")
         assert index.search("pears", 500)[0].title == "One"
 
-    def test_seeded_once_and_never_restored(self, tmp_path):
+    def test_shipped_notes_are_seeded(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        folder = tmp_path / "docs"
+        llm_docs.seed_docs(folder)
+        shipped = {p.name for p in llm_docs.SHIPPED_DOCS_DIR.glob("*.md")}
+        assert {p.name for p in folder.glob("*.md")} == shipped
+
+    def test_shipped_files_are_overwritten_and_added_files_kept(self, tmp_path, monkeypatch):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        shipped_dir = tmp_path / "shipped"
+        shipped_dir.mkdir()
+        (shipped_dir / "old.md").write_text("# Old\nshipped\n")
+        (shipped_dir / "gone.md").write_text("# Gone\nshipped\n")
+        (shipped_dir / "deleted.md").write_text("# Deleted\nshipped\n")
+        monkeypatch.setattr(llm_docs, "SHIPPED_DOCS_DIR", shipped_dir)
+        folder = tmp_path / "docs"
+        llm_docs.seed_docs(folder)
+        (folder / "old.md").write_text("# Old\nmy edit\n")
+        (folder / "deleted.md").unlink()
+        (folder / "mine.md").write_text("# Mine\nmy notes\n")
+
+        # The next release updates one file, drops one and adds one.
+        (shipped_dir / "old.md").write_text("# Old\nshipped, updated\n")
+        (shipped_dir / "gone.md").unlink()
+        (shipped_dir / "new.md").write_text("# New\nshipped later\n")
+        llm_docs.seed_docs(folder)
+        assert (folder / "old.md").read_text() == "# Old\nshipped, updated\n"
+        assert (folder / "deleted.md").exists(), "a deleted shipped file comes back"
+        assert (folder / "new.md").exists()
+        assert not (folder / "gone.md").exists(), "a file no longer shipped is removed"
+        assert (folder / "mine.md").read_text() == "# Mine\nmy notes\n"
+        assert (folder / llm_docs.SHIPPED_MANIFEST).read_text() == "deleted.md\nnew.md\nold.md\n"
+
+    def test_an_unchanged_shipped_file_is_not_rewritten(self, tmp_path):
         from app.bots.bots_utils.tinyllm import llm_docs
 
         folder = tmp_path / "docs"
         llm_docs.seed_docs(folder)
         seeded = folder / "meshcore.md"
-        assert seeded.exists()
-        seeded.unlink()
+        os.utime(seeded, (1, 1))
         llm_docs.seed_docs(folder)
-        assert not seeded.exists(), "a deleted starter file must stay deleted"
+        assert seeded.stat().st_mtime == 1, "a rewrite would rebuild the search index"
 
     def test_the_starter_notes_answer_common_questions(self):
         from app.bots.bots_utils.tinyllm import llm_docs
 
         index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
         cases = {
-            "how do I change the tx power of my repeater": "TX Power",
+            "how do I change the tx power of my repeater": "transmit power",
             "what is a hashtag channel": "Channels",
-            "repeater clock is ahead": "Clock",
-            "command for the firmware version": "Firmware version",
+            "repeater clock is ahead": "clock",
+            "command for the firmware version": "firmware version",
+            "how do I add a region": "Add a region",
+            "how to remove a region": "Remove (delete) a region",
+            "how to allow floods": "Allow flooding",
+            "block flooding for a region": "Block flooding",
+            "set home region": "home region",
+            "how do I save regions": "Save region changes",
+            "reboot the repeater": "Reboot",
         }
         for question, expected in cases.items():
             assert expected in index.search(question, 700)[0].title, question
+
+    def test_the_emergency_notes_answer_common_questions(self):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
+        cases = {
+            "how do I do CPR": "CPR",
+            "someone is choking": "Choking",
+            "how to use a tourniquet": "tourniquets",
+            "how to treat a burn": "Burns",
+            "signs of a stroke": "Stroke",
+            "how much bleach to purify water": "Purify water with bleach",
+            "how long is food safe in the fridge without power": "Fridge and freezer",
+            "can I run a generator in the garage": "Generator safety",
+            "I smell gas": "Gas leak",
+            "what to do during a tornado": "Tornado",
+            "what channel is the marine emergency": "Marine VHF",
+            "weather radio frequency": "Weather and emergency broadcast radio",
+            "how to call mayday": "Mayday",
+            "how to find north without a compass": "Find north",
+            "how to send an emergency message on the mesh": "emergency message on the mesh",
+        }
+        for question, expected in cases.items():
+            assert expected in index.search(question, 700)[0].title, question
+
+    def test_the_reference_notes_answer_common_questions(self):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
+        cases = {
+            # meshcore-hardware.md
+            "what antenna should I use": "Choosing an antenna",
+            "how high should the antenna be": "How high to put the antenna",
+            "where should I put my repeater": "Where to put a repeater",
+            "solar panel for repeater": "Solar power for a repeater",
+            "can I charge lithium battery in the cold": "Battery types and safety",
+            # emergency-psychological-first-aid.md
+            "someone is panicking": "panicking",
+            "my friend is suicidal": "suicidal",
+            "I want to kill myself": "crisis lines",
+            "I feel suicidal": "crisis lines",
+            "how to help kids after a disaster": "children",
+            "what to do with my pets in an evacuation": "Pets in an emergency",
+            # radio-reference.md
+            "morse code for S": "Morse code",
+            "what does QTH mean": "Q-codes",
+            "convert eastern time to UTC": "UTC and time zones",
+            "what is my grid square": "Maidenhead",
+            # practical-repairs.md
+            "how to jump start a car": "Jump-starting",
+            "how do I change a flat tire": "flat car tire",
+            "my pipes are frozen": "Frozen pipes",
+            "breaker keeps tripping": "Tripped breaker",
+            # knots.md
+            "how to tie a bowline": "bowline",
+            "how to join two ropes": "sheet bend",
+            "how to tighten a tarp line": "taut-line",
+            # cooking-staples.md
+            "how to cook rice": "white rice",
+            "how to cook beans": "dried beans",
+            "how to make bread without yeast": "soda bread",
+            "what temperature is chicken safe": "Safe cooking temperatures",
+            # remoteterm-*.md (converted READMEs)
+            "how do I install remoteterm with docker": "Docker",
+            "how to set up https": "HTTPS",
+            "how to enable the virtual node": "Virtual Companion Node",
+            # pi-linux-troubleshooting.md
+            "how do I see the logs": "logs",
+            "how to find the pi ip address": "IP address",
+            "radio not detected": "Radio not detected",
+            "disk is full": "Disk full",
+            "how to kill a process": "kill a process",
+            "how to back up the database": "Back up",
+            # electronics-and-power.md
+            "what is ohm's law": "Ohm",
+            "how long will my battery last": "how long a battery lasts",
+            "resistor color code": "Resistor colour code",
+            "how to use a multimeter": "multimeter",
+            # unit-conversions.md
+            "how many km in a mile": "Length",
+            "convert fahrenheit to celsius": "Temperature conversion",
+            "mpg to l/100km": "Fuel economy",
+            # weather-reading.md
+            "is the barometer falling": "Barometer",
+            "is a storm coming": "storm",
+            "what do cirrus clouds mean": "Cloud types",
+            # world-facts.md
+            "capital of France": "France",
+            "what is the capital of australia": "Australia",
+            "currency of japan": "Japan",
+            "phone code for germany": "Germany",
+            "capital of quebec": "Quebec",
+            "capital of texas": "Texas",
+            "how to call internationally": "international phone number",
+            # food-preservation.md
+            "how to make sauerkraut": "sauerkraut",
+            "is home canning safe": "canning",
+            "how to store potatoes": "store potatoes",
+            "how long does rice keep": "Shelf life",
+            # gardening.md
+            "when to plant tomatoes": "When to plant",
+            "how to compost": "Composting",
+            # bike-and-sewing.md
+            "how do I fix a flat on my bike": "bicycle tire",
+            "how to sew a button": "button",
+            "how to fix a zipper": "zipper",
+            # mesh-etiquette.md
+            "can I use bots on public": "Which channel",
+            "how often should I send adverts": "how often",
+            # french-english.md
+            "comment ajouter une région": "tâches MeshCore",
+            "comment redémarrer le répéteur": "tâches MeshCore",
+            "au secours": "phrases d'urgence",
+            "how do you say help in french": "Everyday phrases",
+        }
+        for question, expected in cases.items():
+            assert expected in index.search(question, 700)[0].title, question
+
+    def test_small_talk_finds_no_notes(self):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
+        for chat in (
+            "hello",
+            "hi there",
+            "thanks!",
+            "good morning",
+            "what is the power of friendship?",
+            "tell me a joke",
+            "write me a poem about the sea",
+            "who won the hockey game",
+            "bonjour",
+            "merci beaucoup",
+        ):
+            assert index.search(chat, 700) == [], chat
+
+    def test_a_best_match_too_big_for_the_budget_is_cut_to_fit(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        body = " ".join(f"Sentence {n} about zeppelins." for n in range(60))
+        (tmp_path / "notes.md").write_text(f"## Zeppelins\n{body}\n")
+        index = llm_docs.DocsIndex(tmp_path)
+        assert all(len(s.text) <= llm_docs.SECTION_MAX_CHARS for s in index._sections), (
+            "an oversized paragraph is split at sentences"
+        )
+        found = index.search("zeppelins", 200)
+        assert len(found) == 1 and found[0].text.endswith("…")
+        assert len(found[0].render()) < 200
+        assert index.search("zeppelins", 60) == [], "too little room for a useful cut"
+
+    def test_accents_fold_so_french_questions_match(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        (tmp_path / "notes.md").write_text("## Ajouter une région\nregion put <nom>\n")
+        index = llm_docs.DocsIndex(tmp_path)
+        assert index.search("comment ajouter une region", 500)
+        assert index.search("ajouter une région", 500)
+
+    def test_word_forms_meet(self):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        assert llm_docs._fold("flooding") == llm_docs._fold("floods") == llm_docs._fold("flooded")
+        assert llm_docs._fold("regions") == llm_docs._fold("region")
+        assert llm_docs._fold("frequencies") == llm_docs._fold("frequency")
+        assert llm_docs._fold("tomatoes") == llm_docs._fold("tomato")
+        assert llm_docs._fold("address") == "address"
+
+
+class TestUpdateTinyllmDocs:
+    """scripts/build/update_tinyllm_docs.py turns MeshCore's docs into notes."""
+
+    def _convert(self, markdown):
+        import importlib.util
+
+        path = Path(__file__).resolve().parents[1] / "scripts" / "build" / "update_tinyllm_docs.py"
+        spec = importlib.util.spec_from_file_location("update_tinyllm_docs", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.convert(markdown, "Title")
+
+    def test_keeps_placeholders_and_drops_markup(self):
+        out = self._convert(
+            "# Doc\n## Navigation\n- [Regions](#regions)\n---\n"
+            "### 3.1. **Add** a [region](#x)\n**Usage:** `region put <name> [parent]`<br>\n"
+        )
+        assert "Navigation" not in out and "---" not in out
+        assert "### Add a region" in out
+        assert "region put <name> [parent]" in out
+
+    def test_code_lines_never_become_headings(self):
+        out = self._convert("# Doc\n## Load\n```\n#Europe F\n```\n")
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        assert "    #Europe F" in out
+        assert [s.title for s in llm_docs.parse_markdown(out)] == ["Title > Load"]
 
 
 class TestPanelMemory:
@@ -1236,10 +1472,66 @@ class TestReviewFixes:
     ):
         from app.bots.bots_utils.tinyllm import llm_docs
 
+        index = llm_docs.DocsIndex(tmp_path / "docs")
         seen = []
-        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: seen.append(1))
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: seen.append(1) or index)
         await _run(monkeypatch, _FakeRuntime(state="downloading"), BotTestRequest(text="ask"))
         assert seen, "a bare `ask` creates the notes folder"
+        assert (tmp_path / "docs" / llm_docs.BOTS_PAGE).is_file()
+
+    async def test_the_bots_page_lists_this_nodes_bots_but_not_private_ones(
+        self, test_db, monkeypatch, tmp_path
+    ):
+        from app.bots.bots_utils.tinyllm import llm_docs
+        from app.repository.bots import BotRepository
+
+        code = (
+            "from remoteterm import bot\n"
+            "@bot.on_keyword('{kw}')\n"
+            "async def h(ctx, msg):\n"
+            "    await ctx.reply('ok')\n"
+        )
+        await BotRepository.create(
+            name="weatherish",
+            description="Weather for a place",
+            code=code.format(kw="wx"),
+            enabled=True,
+        )
+        await BotRepository.create(
+            name="wardriving",
+            description="Logs where packets were heard",
+            code=code.format(kw="wardrive"),
+            enabled=True,
+            private=True,
+        )
+        index = llm_docs.DocsIndex(tmp_path / "docs")
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: index)
+        from app.bots.engine import bot_engine
+
+        await bot_engine.reload_all()
+        try:
+            await _run(monkeypatch, _FakeRuntime(state="downloading"), BotTestRequest(text="ask"))
+        finally:
+            bot_engine.bots.clear()
+        page = (tmp_path / "docs" / llm_docs.BOTS_PAGE).read_text()
+        assert "## weatherish bot: Weather for a place" in page
+        assert "Commands: wx." in page
+        assert "wardriv" not in page, "a private bot never reaches the notes"
+        assert index.search("how do I get the weather", 700)[0].title.endswith(
+            "weatherish bot: Weather for a place"
+        )
+
+    def test_the_bots_page_is_only_rewritten_when_it_changes(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        bots = [{"name": "ping", "category": "Basic", "description": "Pong", "keywords": ["ping"]}]
+        llm_docs.write_bots_page(tmp_path, bots)
+        page = tmp_path / llm_docs.BOTS_PAGE
+        os.utime(page, (1, 1))
+        llm_docs.write_bots_page(tmp_path, bots)
+        assert page.stat().st_mtime == 1
+        llm_docs.write_bots_page(tmp_path, [])
+        assert "ping" not in page.read_text()
 
     def test_settings_are_grouped_and_ordered(self):
         schema = get_library_entry("tinyllm")["settings_schema"]

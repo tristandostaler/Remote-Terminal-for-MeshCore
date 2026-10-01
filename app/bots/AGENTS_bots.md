@@ -15,7 +15,9 @@ operators).
   (`reply`/`send`/`send_dm`/`send_room`), image sends
   (`reply_image`/`send_image`/`send_dm_image`/`send_room_image`), `settings`,
   persistent `state`, `http` (httpx), `geocode`, i18n (`t`), `mesh_stats`,
-  `get_enabled_bots`, logging, and `sender_is_admin` (the engine's Admin users
+  `get_enabled_bots` (enabled bots minus private ones -- `bots.private`, the
+  editor's Private switch: it still answers, but `help`, `bots` and the
+  tinyllm notes list bots through this, so none of them ever show it), logging, and `sender_is_admin` (the engine's Admin users
   check, the same one `admin_only` gates on) so a bot can keep raw diagnostics
   for admins in DMs, `test_transcript` (test runs only: the Test tab's earlier
   messages in this conversation, `{"text", "outgoing"}` oldest first, sent as
@@ -135,16 +137,39 @@ operators).
   the index rebuilds when a file's size/mtime changes. Relevance gate
   (`_relevant` + `RELATIVE_FLOOR`): a section needs >= half the question's
   words and >= 2 of them (one-word questions: in its heading, or a rare word),
-  plus half the best score; plurals are folded. Optional model check
+  plus half the best score; accents are folded to ASCII, plurals and
+  -ing/-ed/-ies/-oes are folded, and small talk, filler words and French
+  function words are stopwords. Paragraphs over 800 chars split at sentences;
+  a best match bigger than the budget is sent cut to fit (with "…") rather
+  than dropped. Optional model check
   (`check_notes_with_model`): `LlmRuntime.choose` asks a generic yes/no ("do
   these notes help?", with the section headings) and the model process forces
   the reply to exactly "yes"/"no" with a llama.cpp grammar at temperature 0;
   only when there are notes and >= 4 s left; a failed check keeps the notes;
-  it never triggers the unload-after-every-answer unload. The folder is seeded
-  once from `library/docs/` and never restored (a deleted file stays
-  deleted). `library/docs/meshcore.md`'s repeater-settings half is generated
-  from `app/services/repeater_settings.py` -- regenerate it when that catalog
-  changes. The bot budgets the context by characters (~3/token, no tokenizer
+  it never triggers the unload-after-every-answer unload. The folder is synced
+  from `library/docs/` on the bot's first run after each start: shipped files
+  are rewritten whenever they differ (edits are lost, deletions come back), a
+  `.shipped` manifest lists them so one dropped from the repo is removed, and
+  any other file is the operator's and never touched. `meshcore.md` (basics, regions
+  quick guide) is hand-written; `meshcore-cli.md` and `meshcore-faq.md` are
+  MeshCore's own docs (MIT, license in their header comments) converted by
+  `scripts/build/update_tinyllm_docs.py <MeshCore checkout>` -- rerun it when
+  MeshCore updates them. `emergency-*.md` (first aid, psychological first
+  aid, water/food, home safety and weather, radio, outdoors),
+  `meshcore-hardware.md`, `radio-reference.md`, `practical-repairs.md`,
+  `knots.md`, `cooking-staples.md`, `pi-linux-troubleshooting.md`,
+  `electronics-and-power.md`, `unit-conversions.md`, `weather-reading.md`,
+  `food-preservation.md`, `gardening.md`, `bike-and-sewing.md`,
+  `mesh-etiquette.md` and `french-english.md` are hand-written from public
+  guidance (Red Cross, CDC, WHO, ICAO, USDA); `world-facts.md` is generated
+  from a table (one heading per country / state so each hit is small);
+  `remoteterm-*.md` are this repo's READMEs converted by the same script --
+  rerun it after a README change worth knowing offline (the READMEs are not
+  in the Docker image, so the bot cannot read them at runtime); headings are phrased the way people ask, and
+  `tests/test_bots_tinyllm.py` pins sample questions to their sections --
+  rerun it after editing any shipped note. `this-node-bots.md` is not shipped:
+  the bot writes it on every run from `ctx.get_enabled_bots()` (so private
+  bots never appear), only when it changed, and seeding never touches it. The bot budgets the context by characters (~3/token, no tokenizer
   in the server): what is left after prompt, question and answer goes to
   history (up to half) and notes (the rest), searched with the question plus
   the previous one; overflow retries drop history, then notes. `context_tokens`

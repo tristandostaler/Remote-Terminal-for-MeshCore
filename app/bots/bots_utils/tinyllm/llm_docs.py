@@ -11,9 +11,10 @@ Keyword search rather than embeddings on purpose: it needs no second model
 command for X", "how do I set the TX power" -- hinge on exact words like
 command and setting names, which is what keyword scoring matches best.
 
-The folder is seeded once with the starter notes shipped in
-``library/docs/`` and is the operator's from then on: files are never
-overwritten or restored, so edits and deletions stick. The index is rebuilt
+The starter notes shipped in ``library/docs/`` are synced into the folder
+the first time the bot runs after each server start: they belong to the repository, so an edit to one
+is overwritten and a deleted one comes back. Any other ``.md`` file in the
+folder is the operator's and is never touched. The index is rebuilt
 whenever a file's size or modification time changes.
 """
 
@@ -22,8 +23,8 @@ from __future__ import annotations
 import logging
 import math
 import re
-import shutil
 import threading
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,10 +51,15 @@ MIN_COVERAGE = 0.5
 MIN_MATCHED_TERMS = 2
 RELATIVE_FLOOR = 0.5
 RARE_WORD_SHARE = 0.05
+# A best match cut to fit the budget is only sent with at least this much text.
+SHORTENED_MIN_CHARS = 120
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _WORD = re.compile(r"[a-z0-9]+(?:\.[a-z0-9]+)*")
+# Words that say nothing about what is being asked. The second group is
+# small talk: a greeting is never a lookup, even when "hello" happens to be in
+# the notes (it is the default room guest password).
 _STOPWORDS = frozenset(
     [
         "a",
@@ -101,6 +107,117 @@ _STOPWORDS = frozenset(
         "there",
         "get",
         "set",
+        "someone",
+        "somebody",
+        "anyone",
+        "anybody",
+        "something",
+        "during",
+        "up",
+        "see",
+        "use",
+        "make",
+        "should",
+        "could",
+        "would",
+        "mean",
+        "means",
+        "meaning",
+        # French function words, so a French question is judged on the words
+        # that carry its meaning (accents are folded first: "très" -> "tres").
+        "le",
+        "la",
+        "les",
+        "un",
+        "une",
+        "des",
+        "de",
+        "du",
+        "au",
+        "aux",
+        "et",
+        "ou",
+        "est",
+        "sont",
+        "en",
+        "dans",
+        "sur",
+        "pour",
+        "par",
+        "avec",
+        "sans",
+        "que",
+        "qui",
+        "quoi",
+        "comment",
+        "quel",
+        "quelle",
+        "quels",
+        "quelles",
+        "ce",
+        "cet",
+        "cette",
+        "ces",
+        "je",
+        "tu",
+        "il",
+        "elle",
+        "nous",
+        "vous",
+        "ils",
+        "elles",
+        "mon",
+        "ma",
+        "mes",
+        "ton",
+        "ta",
+        "tes",
+        "sa",
+        "ses",
+        "leur",
+        "se",
+        "ne",
+        "pas",
+        "tres",
+        "faire",
+        "fait",
+        "peux",
+        "peut",
+        "dois",
+        "doit",
+        "ca",
+        "qu",
+        "c",
+        "d",
+        "j",
+        "l",
+        "n",
+        "bonjour",
+        "salut",
+        "merci",
+        # Small talk: "hello" alone must not pull in the one note that happens
+        # to mention it.
+        "hello",
+        "hi",
+        "hey",
+        "hiya",
+        "thanks",
+        "thank",
+        "thx",
+        "ok",
+        "okay",
+        "yes",
+        "yeah",
+        "no",
+        "nope",
+        "bye",
+        "cheers",
+        "good",
+        "morning",
+        "afternoon",
+        "evening",
+        "night",
+        "lol",
     ]
 )
 
@@ -116,9 +233,19 @@ class Section:
 
 
 def _fold(word: str) -> str:
-    """Crude plural folding, so "lists" matches "list" and "adverts" "advert"."""
-    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
-        return word[:-1]
+    """Crude suffix folding so word forms meet: "lists"/"list",
+    "flooding"/"flooded"/"floods"/"flood". Applied to the notes and the question
+    alike, so the stems only have to agree, not be real words."""
+    if len(word) > 5 and word.endswith("ing"):
+        word = word[:-3]
+    elif len(word) > 4 and word.endswith("ed") and not word.endswith("eed"):
+        word = word[:-2]
+    if len(word) > 4 and word.endswith("ies"):
+        word = word[:-3] + "y"
+    elif len(word) > 4 and word.endswith("oes"):
+        word = word[:-2]  # tomatoes -> tomato
+    elif len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        word = word[:-1]
     return word
 
 
@@ -126,7 +253,9 @@ def _tokens(text: str) -> list[str]:
     """Lowercase words, plurals folded; dotted names (``flood.advert.interval``)
     also count as their parts, so either form of a setting name matches."""
     out: list[str] = []
-    for word in _WORD.findall(text.lower()):
+    # Accents folded to plain letters: "région" is one word, and meets "region".
+    text = unicodedata.normalize("NFKD", text.lower()).encode("ascii", "ignore").decode()
+    for word in _WORD.findall(text):
         if "." in word:
             out.extend(_fold(part) for part in word.split(".") if part not in _STOPWORDS)
         if word not in _STOPWORDS:
@@ -151,10 +280,18 @@ def parse_markdown(text: str, source: str = "") -> list[Section]:
         chunk = ""
         for paragraph in re.split(r"\n\s*\n", content):
             paragraph = " ".join(paragraph.split())
-            if chunk and len(chunk) + len(paragraph) + 1 > SECTION_MAX_CHARS:
-                sections.append(Section(title, chunk, source))
-                chunk = ""
-            chunk = f"{chunk} {paragraph}".strip()
+            # An oversized paragraph is split at sentences, so no section is
+            # much bigger than a small model's notes budget.
+            pieces = (
+                re.split(r"(?<=[.!?])\s+", paragraph)
+                if len(paragraph) > SECTION_MAX_CHARS
+                else [paragraph]
+            )
+            for piece in pieces:
+                if chunk and len(chunk) + len(piece) + 1 > SECTION_MAX_CHARS:
+                    sections.append(Section(title, chunk, source))
+                    chunk = ""
+                chunk = f"{chunk} {piece}".strip()
         if chunk:
             sections.append(Section(title, chunk, source))
 
@@ -259,27 +396,118 @@ class DocsIndex:
                     break
                 section = self._sections[i]
                 size = len(section.render()) + 1
-                if used + size > max_chars:
+                if used + size > max_chars and not picked:
+                    # The best match does not fit a small budget whole: its
+                    # start is better than no notes at all.
+                    section = _shortened(section, max_chars - 1)
+                    size = len(section.render()) + 1 if section else 0
+                if not section or used + size > max_chars:
                     continue
                 picked.append(section)
                 used += size
             return picked
 
 
-def seed_docs(folder: Path) -> None:
-    """Create the docs folder with the shipped starter notes, once.
+def _shortened(section: Section, max_chars: int) -> Section | None:
+    """``section`` cut at a word so its rendering fits ``max_chars``, or None
+    when too little of it would be left to be worth sending."""
+    room = max_chars - len(section.render()) + len(section.text) - 1
+    if room < SHORTENED_MIN_CHARS:
+        return None
+    text = section.text[:room].rsplit(" ", 1)[0] + "…"
+    return Section(section.title, text, section.source)
 
-    Only when the folder does not exist yet: after that it is the operator's,
-    and a file they deleted must stay deleted.
+
+# Lists the shipped files currently in a docs folder, one name per line, so a
+# file dropped from a later release is removed there too, while files the
+# operator added are never touched.
+SHIPPED_MANIFEST = ".shipped"
+
+
+def seed_docs(folder: Path) -> None:
+    """Sync the shipped starter notes into the docs folder.
+
+    Shipped files belong to the repository: each one is (re)written whenever
+    it differs from the shipped copy, so an update always lands and a deleted
+    one comes back, and one no longer shipped is removed. Every other file in
+    the folder is the operator's and is left alone.
     """
-    if folder.exists():
-        return
+    manifest = folder / SHIPPED_MANIFEST
     try:
-        folder.mkdir(parents=True)
-        for shipped in SHIPPED_DOCS_DIR.glob("*.md"):
-            shutil.copyfile(shipped, folder / shipped.name)
+        folder.mkdir(parents=True, exist_ok=True)
+        previous = set(manifest.read_text().split()) if manifest.exists() else set()
+        shipped = {p.name: p for p in SHIPPED_DOCS_DIR.glob("*.md")}
+        for name, source in shipped.items():
+            target = folder / name
+            content = source.read_bytes()
+            # Unchanged files are not rewritten, so their mtime -- and the
+            # search index built from it -- stays put.
+            if not target.is_file() or target.read_bytes() != content:
+                target.write_bytes(content)
+        for name in previous - shipped.keys():
+            (folder / name).unlink(missing_ok=True)
+        manifest.write_text("".join(f"{name}\n" for name in sorted(shipped)))
     except OSError as exc:
-        logger.warning("tinyllm docs: cannot create %s: %s", folder, exc)
+        logger.warning("tinyllm docs: cannot seed %s: %s", folder, exc)
+
+
+# Written by the tinyllm bot from this node's bots, not shipped: seeding
+# never touches it, and it is rewritten whenever the bots change.
+BOTS_PAGE = "this-node-bots.md"
+
+
+def render_bots_page(bots: list[dict]) -> str:
+    """Notes about the bots this node advertises, one section per bot.
+
+    ``bots`` is ``ctx.get_enabled_bots()``: enabled and not private. Headings
+    carry the name and one-liner, so "how do I get the weather?" finds the
+    weather bot.
+    """
+    out = [
+        "<!--",
+        "Written by the tinyllm bot from this node's enabled bots and rewritten",
+        "whenever they change: do not edit. Private bots are left out.",
+        "-->",
+        "",
+        "# This node's bots",
+        "",
+        "## Which bots and commands this node has",
+        "",
+        "This node runs RemoteTerm. Its bots answer commands sent in a bot channel",
+        "(#bot or #bots) or by direct message; a command is the first word of the",
+        "message, for example: help. Send help for the list of commands, and help",
+        "followed by a command for details on one.",
+    ]
+    if bots:
+        out.append("Bots here: " + ", ".join(b["name"] for b in bots) + ".")
+    for b in sorted(bots, key=lambda b: str(b["name"]).lower()):
+        keywords = list(dict.fromkeys(b.get("keywords") or []))
+        facts = [f"Category: {b.get('category') or 'Custom'}."]
+        facts.append(
+            f"Commands: {', '.join(keywords)}."
+            if keywords
+            else "It has no command of its own: it acts on its own triggers."
+        )
+        if b.get("admin_only"):
+            facts.append("Only the node's admins can use it.")
+        detail = " ".join(str(b.get("long_description") or "").replace("`", "").split())
+        heading = (
+            f"{b['name']} bot: {b['description']}" if b.get("description") else f"{b['name']} bot"
+        )
+        out += ["", f"## {' '.join(heading.split())}", "", " ".join([*facts, detail]).strip()]
+    return "\n".join(out) + "\n"
+
+
+def write_bots_page(folder: Path, bots: list[dict]) -> None:
+    """Write :func:`render_bots_page` into the docs folder when it changed."""
+    target = folder / BOTS_PAGE
+    content = render_bots_page(bots)
+    try:
+        if not target.is_file() or target.read_text() != content:
+            folder.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+    except OSError as exc:
+        logger.warning("tinyllm docs: cannot write %s: %s", target, exc)
 
 
 _indexes: dict[Path, DocsIndex] = {}

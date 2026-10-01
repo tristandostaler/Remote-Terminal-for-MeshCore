@@ -2498,6 +2498,8 @@ class Bot(BaseModel):
     enabled: bool = False
     admin_only: bool = False
     respond_to_dms: bool = True
+    # Private: still answers, but help / bots and the tinyllm notes never list it.
+    private: bool = False
     # ``{"channels": ..., "rooms": ...}``, each ``"all"`` / ``"none"`` /
     # ``{"only"|"except": [keys]}``. Rooms are opt-in: a new bot starts with an
     # empty pick list, and a missing ``rooms`` key means no room at all (scopes
@@ -2547,6 +2549,7 @@ class BotUpdateRequest(BaseModel):
     enabled: bool | None = None
     admin_only: bool | None = None
     respond_to_dms: bool | None = None
+    private: bool | None = None
     scope: dict | None = None
     cooldown_seconds: float | None = None
     per_user_cooldown_seconds: float | None = None

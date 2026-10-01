@@ -202,6 +202,8 @@ CREATE TABLE IF NOT EXISTS bots (
     enabled INTEGER DEFAULT 0,
     admin_only INTEGER DEFAULT 0,
     respond_to_dms INTEGER DEFAULT 1,
+    -- Private: answers, but never listed by help / bots or in the tinyllm notes.
+    private INTEGER DEFAULT 0,
     -- Default bot scope: the "#bot"/"#bots" hashtag keys plus DMs, and no room
     -- server (rooms are opt-in -- an answer there is public to everyone logged
     -- in). Must stay in sync with app/bot_scope.DEFAULT_BOT_SCOPE_JSON

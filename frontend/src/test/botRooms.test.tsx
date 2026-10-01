@@ -24,6 +24,7 @@ function makeBot(overrides: Partial<Bot> = {}): Bot {
     code: 'from remoteterm import bot',
     enabled: true,
     admin_only: false,
+    private: false,
     respond_to_dms: true,
     scope: { channels: 'all', rooms: 'all' },
     cooldown_seconds: 0,
@@ -149,6 +150,27 @@ describe('bots in rooms', () => {
     await waitFor(() => expect(updateBot).toHaveBeenCalled());
     const payload = updateBot.mock.calls[0][1];
     expect(payload.scope).toEqual({ channels: 'all', rooms: { only: [ROOM_KEY] } });
+  });
+
+  it('saves the Private switch', async () => {
+    vi.spyOn(api, 'getBot').mockResolvedValue(makeBot());
+    const updateBot = vi.spyOn(api, 'updateBot').mockResolvedValue(makeBot());
+
+    render(
+      <BotEditor
+        botId="bot-1"
+        channels={[]}
+        contacts={[room]}
+        onBack={vi.fn()}
+        onDeleted={vi.fn()}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: /Private/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }));
+
+    await waitFor(() => expect(updateBot).toHaveBeenCalled());
+    expect(updateBot.mock.calls[0][1].private).toBe(true);
   });
 
   it('answers no room at all when Only is left empty', async () => {

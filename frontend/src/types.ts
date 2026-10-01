@@ -1709,6 +1709,8 @@ export interface Bot {
   enabled: boolean;
   admin_only: boolean;
   respond_to_dms: boolean;
+  /** Still answers, but help / bots and the tinyllm notes never list it. */
+  private: boolean;
   /**
    * Where the bot listens. `rooms` is absent on scopes written before rooms
    * existed, which the backend reads as no room: rooms are opt-in, and a new
@@ -1748,6 +1750,7 @@ export interface BotUpdatePayload {
   enabled?: boolean;
   admin_only?: boolean;
   respond_to_dms?: boolean;
+  private?: boolean;
   scope?: Bot['scope'];
   cooldown_seconds?: number;
   per_user_cooldown_seconds?: number;

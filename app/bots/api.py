@@ -870,13 +870,18 @@ class BotContext:
         return await gather_mesh_stats()
 
     def get_enabled_bots(self) -> list[dict[str, Any]]:
-        """Metadata for every enabled bot: name, category, description, keywords."""
+        """Metadata for every enabled bot this node advertises: name, category,
+        description, long description, admin_only, keywords.
+
+        A private bot is left out: it still answers its commands, but every
+        list built from this (``help``, ``bots``, the tinyllm notes) skips it.
+        """
         from app.bots.engine import bot_engine
 
         out: list[dict[str, Any]] = []
         for loaded in bot_engine.bots.values():
             record = loaded.record
-            if not record.enabled or loaded.code is None:
+            if not record.enabled or record.private or loaded.code is None:
                 continue
             keywords: list[str] = []
             for kws, _handler in loaded.keyword_map:
@@ -886,6 +891,8 @@ class BotContext:
                     "name": record.name,
                     "category": record.category,
                     "description": record.description,
+                    "long_description": record.long_description,
+                    "admin_only": record.admin_only,
                     "keywords": keywords,
                 }
             )

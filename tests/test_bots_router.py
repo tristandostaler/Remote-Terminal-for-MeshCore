@@ -396,3 +396,49 @@ class TestKillSwitchUnified:
         finally:
             bot_engine.disabled_until_restart = False
             fanout_manager._bots_disabled_until_restart = False
+
+
+class TestPrivateBots:
+    async def test_private_is_saved_and_returned(self, test_db, client):
+        async with client:
+            created = (
+                await client.post("/api/bots", json={"name": "private-test", "code": VALID_CODE})
+            ).json()
+            assert created["private"] is False
+            updated = (
+                await client.patch(f"/api/bots/{created['id']}", json={"private": True})
+            ).json()
+            assert updated["private"] is True
+            assert (await client.get(f"/api/bots/{created['id']}")).json()["private"] is True
+
+    async def test_help_leaves_a_private_bot_out_but_it_still_answers(self, test_db):
+        from app.bots.engine import BotEngine, bot_engine
+        from app.bots.library import get_library_entry
+        from app.models import BotTestRequest
+        from app.repository.bots import BotRepository
+
+        def keyword_bot(word):
+            return VALID_CODE.replace('"hi"', f'"{word}"')
+
+        help_bot = await BotRepository.create(
+            name="help", code=get_library_entry("help")["code"], enabled=True
+        )
+        await BotRepository.create(name="visible", code=keyword_bot("ping"), enabled=True)
+        wardriving = await BotRepository.create(
+            name="wardriving", code=keyword_bot("wardrive"), enabled=True, private=True
+        )
+        await bot_engine.reload_all()
+        try:
+            listed = await BotEngine().test_run(help_bot, BotTestRequest(text="help", is_dm=True))
+            detail = await BotEngine().test_run(
+                help_bot, BotTestRequest(text="help wardrive", is_dm=True)
+            )
+            answered = await BotEngine().test_run(
+                wardriving, BotTestRequest(text="wardrive", is_dm=True)
+            )
+        finally:
+            bot_engine.bots.clear()
+        text = " ".join(r["text"] for r in listed.replies)
+        assert "ping" in text and "wardrive" not in text
+        assert all("wardriv" not in r["text"] for r in detail.replies)
+        assert [r["text"] for r in answered.replies] == ["hey"]
