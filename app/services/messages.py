@@ -265,6 +265,8 @@ async def reconcile_duplicate_message(
     rssi: int | None = None,
     snr: float | None = None,
     broadcast_fn: BroadcastFn,
+    transport_code: int | None = None,
+    region: str | None = None,
 ) -> None:
     logger.debug(
         "Duplicate %s for %s (msg_id=%d, outgoing=%s) - adding path",
@@ -280,6 +282,16 @@ async def reconcile_duplicate_message(
         )
     else:
         paths = existing_msg.paths or []
+
+    # The first stored copy may carry no scope: the radio's queued copy of a
+    # resident channel's message (the fallback path) has no transport code, and
+    # when it lands before the raw RX-log frame the scoped copy collapses onto it
+    # here. Region is a property of the on-air payload, so fill it in from the
+    # copy that has it rather than leaving the message reading "region: none".
+    if transport_code is not None and (
+        existing_msg.transport_code is None or (existing_msg.region is None and region)
+    ):
+        await MessageRepository.set_transport_scope(existing_msg.id, transport_code, region)
 
     if existing_msg.outgoing and existing_msg.type == "CHAN":
         ack_count = await MessageRepository.increment_ack_count(existing_msg.id)
@@ -317,6 +329,8 @@ async def handle_duplicate_message(
     rssi: int | None = None,
     snr: float | None = None,
     broadcast_fn: BroadcastFn,
+    transport_code: int | None = None,
+    region: str | None = None,
 ) -> None:
     """Handle a duplicate message by updating paths/acks on the existing record."""
     existing_msg = await MessageRepository.get_by_content(
@@ -344,6 +358,8 @@ async def handle_duplicate_message(
         rssi=rssi,
         snr=snr,
         broadcast_fn=broadcast_fn,
+        transport_code=transport_code,
+        region=region,
     )
 
 
@@ -428,6 +444,8 @@ async def create_message_from_decrypted(
             rssi=rssi,
             snr=snr,
             broadcast_fn=broadcast_fn,
+            transport_code=transport_code,
+            region=region,
         )
         return None
 

@@ -49,6 +49,7 @@ interface SettingsModalBaseProps {
   regionDiscovery: RadioRegionDiscoveryResponse | null;
   regionDiscoveryLoading: boolean;
   onDiscoverRegions: (publicKeys?: string[]) => Promise<void>;
+  onMessagesRetagged?: () => void;
   onHealthRefresh: () => Promise<void>;
   onRefreshAppSettings: () => Promise<void>;
   onLocalLabelChange?: (label: LocalLabel) => void;
@@ -96,6 +97,7 @@ export function SettingsModal(props: SettingsModalProps) {
     regionDiscovery,
     regionDiscoveryLoading,
     onDiscoverRegions,
+    onMessagesRetagged,
     onHealthRefresh,
     onRefreshAppSettings,
     onLocalLabelChange,
@@ -240,6 +242,7 @@ export function SettingsModal(props: SettingsModalProps) {
                 regionDiscovery={regionDiscovery}
                 regionDiscoveryLoading={regionDiscoveryLoading}
                 onDiscoverRegions={onDiscoverRegions}
+                onMessagesRetagged={onMessagesRetagged}
                 onClose={onClose}
                 className={sectionContentClass}
               />

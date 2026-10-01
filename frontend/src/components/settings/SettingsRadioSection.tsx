@@ -172,6 +172,7 @@ export function SettingsRadioSection({
   regionDiscovery,
   regionDiscoveryLoading,
   onDiscoverRegions,
+  onMessagesRetagged,
   onClose,
   className,
 }: {
@@ -192,6 +193,8 @@ export function SettingsRadioSection({
   regionDiscovery: RadioRegionDiscoveryResponse | null;
   regionDiscoveryLoading: boolean;
   onDiscoverRegions: (publicKeys?: string[]) => Promise<void>;
+  /** Called after stored messages were re-tagged, so loaded conversations refetch. */
+  onMessagesRetagged?: () => void;
   onClose: () => void;
   className?: string;
 }) {
@@ -581,6 +584,25 @@ export function SettingsRadioSection({
       .filter((r) => r.node_type === 'repeater')
       .map((r) => r.public_key);
     await onDiscoverRegions(discoveredRepeaterKeys);
+  };
+
+  const [regionBackfillBusy, setRegionBackfillBusy] = useState(false);
+
+  const handleRegionBackfill = async () => {
+    setRegionBackfillBusy(true);
+    try {
+      const result = await api.backfillRegions();
+      onMessagesRetagged?.();
+      toast.success('Messages re-tagged', {
+        description: `${result.scoped} region-scoped of ${result.scanned} checked, ${result.named} matched a known region`,
+      });
+    } catch (err) {
+      toast.error('Failed to re-tag messages', {
+        description: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setRegionBackfillBusy(false);
+    }
   };
 
   const handleAddDiscoveredRegions = () => {
@@ -1372,6 +1394,22 @@ export function SettingsRadioSection({
           label instead of a raw transport code. Saving a change re-tags existing messages whose
           original packet is still stored.
         </p>
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="flex-1 text-[0.8125rem] text-muted-foreground">
+            Re-check stored channel messages against the saved list now, e.g. when a message shows
+            no region but the packet inspector names one. Unsaved edits above are not used.
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleRegionBackfill}
+            disabled={regionBackfillBusy}
+          >
+            {regionBackfillBusy ? 'Re-tagging...' : 'Re-tag Messages'}
+          </Button>
+        </div>
 
         <div className="space-y-2 rounded-md border border-input bg-muted/20 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
