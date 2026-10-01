@@ -23,7 +23,8 @@ of minutes, so the memory is only taken while someone is actually talking to
 the bot; the next question reloads it, which is quick once the file is in the
 page cache.
 
-Every bot run is killed after ``BOT_EXECUTION_TIMEOUT`` (10 s), while a first
+Every bot run is killed after its Time limit (``timeout_seconds``, 10 s unless
+set; tinyllm ships 30), while a first
 download is hundreds of MB. So preparation (download, then load) always runs in
 a background thread and a run only *starts* it and reports progress; generation
 streams tokens and stops at a deadline the caller keeps inside the timeout.
@@ -590,6 +591,7 @@ class _ModelProcess:
         max_tokens: int,
         temperature: float,
         deadline: float,
+        answer_seconds: float | None = None,
     ) -> dict[str, Any]:
         return self._request(
             {
@@ -598,6 +600,7 @@ class _ModelProcess:
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "deadline": deadline,
+                "answer_seconds": answer_seconds,
             },
             deadline + ANSWER_GRACE_SECONDS,
         )
@@ -924,8 +927,10 @@ class LlmRuntime:
         max_tokens: int,
         temperature: float,
         deadline_seconds: float,
+        answer_seconds: float | None = None,
     ) -> str:
-        """Answer ``messages`` (blocking). Stops at ``deadline_seconds``.
+        """Answer ``messages`` (blocking). Stops at ``deadline_seconds`` (prompt
+        reading included), or after ``answer_seconds`` of writing.
 
         Tokens are streamed in the model process so a slow host still returns
         what it produced in time rather than nothing. Raises
@@ -936,7 +941,11 @@ class LlmRuntime:
         """
         reply = self._call(
             lambda proc: proc.generate(
-                messages, max_tokens=max_tokens, temperature=temperature, deadline=deadline_seconds
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                deadline=deadline_seconds,
+                answer_seconds=answer_seconds,
             ),
             final=True,
         )
@@ -1006,7 +1015,13 @@ llm_runtime = LlmRuntime()
 
 
 def _stream_answer(llm: Any, request: dict[str, Any]) -> str:
+    """Stream the answer, stopping at the hard ``deadline`` (counted from the
+    request, prompt reading included) or after ``answer_seconds`` of writing
+    (counted from the first token, so a long prompt read on a slow CPU does not
+    eat the writing time and cut the answer to a word)."""
     started = time.monotonic()
+    first_token_at: float | None = None
+    answer_seconds = request.get("answer_seconds")
     pieces: list[str] = []
     try:
         # llama-cpp-python checks the prompt length on the first read; other
@@ -1020,9 +1035,13 @@ def _stream_answer(llm: Any, request: dict[str, Any]) -> str:
         )
         for chunk in stream:
             delta = chunk["choices"][0].get("delta", {}).get("content")
+            now = time.monotonic()
             if delta:
                 pieces.append(delta)
-            if time.monotonic() - started > request["deadline"]:
+                first_token_at = first_token_at or now
+            if now - started > request["deadline"]:
+                break
+            if answer_seconds and first_token_at and now - first_token_at > answer_seconds:
                 break
     except ValueError as exc:
         if "context window" in str(exc):

@@ -212,6 +212,8 @@ CREATE TABLE IF NOT EXISTS bots (
     cooldown_seconds REAL DEFAULT 0,
     per_user_cooldown_seconds REAL DEFAULT 0,
     queue_threshold_seconds REAL DEFAULT 0,
+    -- How long one run may take before the engine stops it.
+    timeout_seconds REAL DEFAULT 10,
     settings_schema TEXT NOT NULL DEFAULT '[]',
     settings TEXT NOT NULL DEFAULT '{}',
     ui_triggers TEXT NOT NULL DEFAULT '[]',

@@ -470,8 +470,11 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
 
 3. Enable the bot. The first question downloads the model (once, into
    `MESHCORE_LLM_MODEL_DIR`, default `models/llm` beside the database) and loads it in the
-   background; `ask` alone reports progress. Bot runs are limited to 10 s, so
-   answers stop at the configured time limit and whatever was produced is sent.
+   background; `ask` alone reports progress. Each bot run is limited by the
+   bot's **Time limit** (Settings tab, Limits; 30 s for `tinyllm`, 10 s for
+   other bots, up to 120 s), and the answer is fitted inside it: reading the
+   question and notes first, then writing for at most **Answer time limit**
+   seconds, after which whatever was produced is sent.
 
 Tiny models are chatty and often wrong. Treat the answers as entertainment.
 

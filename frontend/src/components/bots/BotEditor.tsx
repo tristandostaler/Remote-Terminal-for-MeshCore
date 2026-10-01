@@ -405,6 +405,7 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
   const [cooldown, setCooldown] = useState('0');
   const [perUserCooldown, setPerUserCooldown] = useState('0');
   const [queueThreshold, setQueueThreshold] = useState('0');
+  const [timeLimit, setTimeLimit] = useState('10');
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [uiTriggers, setUiTriggers] = useState<BotUiTrigger[]>([]);
   const [newKeyword, setNewKeyword] = useState('');
@@ -437,6 +438,7 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
     setCooldown(String(loaded.cooldown_seconds));
     setPerUserCooldown(String(loaded.per_user_cooldown_seconds));
     setQueueThreshold(String(loaded.queue_threshold_seconds));
+    setTimeLimit(String(loaded.timeout_seconds));
     setSettings({ ...loaded.settings });
     setUiTriggers([...loaded.ui_triggers]);
     setDirty(false);
@@ -482,6 +484,7 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
       cooldown_seconds: parseFloat(cooldown) || 0,
       per_user_cooldown_seconds: parseFloat(perUserCooldown) || 0,
       queue_threshold_seconds: parseFloat(queueThreshold) || 0,
+      timeout_seconds: Math.min(120, Math.max(1, parseFloat(timeLimit) || 10)),
       settings,
       ui_triggers: uiTriggers,
     };
@@ -1122,10 +1125,25 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
                       className="h-8 font-mono text-[0.8125rem]"
                     />
                   </div>
+                  <div className="flex-1">
+                    <div className="text-xs text-muted-foreground mb-1">Time limit (s)</div>
+                    <Input
+                      type="number"
+                      aria-label="Time limit (s)"
+                      value={timeLimit}
+                      min={1}
+                      max={120}
+                      onChange={(e) => {
+                        setTimeLimit(e.target.value);
+                        markDirty();
+                      }}
+                      className="h-8 font-mono text-[0.8125rem]"
+                    />
+                  </div>
                 </div>
                 <p className="text-[0.6875rem] text-muted-foreground mt-2">
                   A request arriving within the queue threshold of cooldown expiry is queued instead
-                  of dropped.
+                  of dropped. A run still going at the time limit (1 to 120 s) is stopped.
                 </p>
               </div>
             </div>

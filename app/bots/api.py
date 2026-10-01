@@ -327,6 +327,7 @@ class BotContext:
         command_prefix: str = "",
         author_contact: str = "",
         sender_is_admin: bool = False,
+        time_limit_seconds: float = 10.0,
     ) -> None:
         self.bot_id = bot_id
         self.bot_name = bot_name
@@ -356,6 +357,9 @@ class BotContext:
         # same check `admin_only` bots are gated on), so a bot can keep
         # diagnostics -- raw errors, paths -- for admins in DMs.
         self.sender_is_admin = sender_is_admin
+        # How long this run may take before the engine stops it (the bot's
+        # Time limit), so a slow bot can size its own work to fit.
+        self.time_limit_seconds = time_limit_seconds
         # Test runs only: the Test tab's earlier messages in this conversation
         # ({"text", "outgoing"}, oldest first). Test runs store nothing, so a
         # bot reading a conversation's history uses this in their place.

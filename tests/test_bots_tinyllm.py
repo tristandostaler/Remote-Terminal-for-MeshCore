@@ -1737,3 +1737,37 @@ class TestMissedQuestions:
         await ns["show_missed"](Ctx, clear=True)
         assert Ctx.state[ns["MISSED_STATE"]] == {}
         assert sent[-1] == "🤖 Missed questions cleared."
+
+
+class TestTimeLimits:
+    async def test_the_deadline_follows_the_bots_time_limit(self, test_db, monkeypatch):
+        from app.repository.bots import BotRepository
+
+        runtime = _FakeRuntime()
+        monkeypatch.setattr(llm, "llm_runtime", runtime)
+        entry = get_library_entry("tinyllm")
+        bot = await BotRepository.create(
+            name="tinyllm-limit", code=entry["code"], timeout_seconds=30
+        )
+        response = await BotEngine().test_run(bot, BotTestRequest(text="ask hi"))
+        assert response.error is None, response.error
+        kwargs = runtime.asked[0][1]
+        # 30 s, minus the send reserve and the model process's grace period.
+        assert 24 < kwargs["deadline_seconds"] <= 30 - 1.5 - llm.ANSWER_GRACE_SECONDS
+        assert kwargs["answer_seconds"] == 6
+
+    def test_writing_time_counts_from_the_first_word(self):
+        """A slow prompt read must not cut the answer to its first word."""
+
+        class SlowReader:
+            def create_chat_completion(self, **kwargs):
+                time.sleep(0.3)  # reading the prompt
+                for word in ["one ", "two ", "three ", "four "]:
+                    yield {"choices": [{"delta": {"content": word}}]}
+                    time.sleep(0.02)
+
+        base = {"messages": [], "max_tokens": 10, "temperature": 0}
+        written = llm._stream_answer(SlowReader(), {**base, "deadline": 5, "answer_seconds": 0.2})
+        assert written == "one two three four "
+        cut = llm._stream_answer(SlowReader(), {**base, "deadline": 0.1})
+        assert cut == "one ", "the hard deadline still stops it"

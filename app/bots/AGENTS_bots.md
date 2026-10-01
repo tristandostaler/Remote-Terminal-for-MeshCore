@@ -95,9 +95,17 @@ operators).
   the process-wide `llm_runtime` singleton — bot code is re-exec'd on every
   settings save, so a model held in the bot's namespace would be reloaded each
   time. Download + load always run in a background thread (a first download
-  dwarfs the 10 s `BOT_EXECUTION_TIMEOUT`); a run only starts it and reports
-  progress. Generation streams tokens and stops at a deadline (≤ 7 s) so the
-  reply still goes out inside the timeout; one answer at a time.
+  dwarfs any run's time limit); a run only starts it and reports progress.
+  Each bot run is stopped at the bot's own `timeout_seconds` (column, migration
+  094; 10 s default, 1-120, editable under Limits, `BOT_META["timeout_seconds"]`
+  for a library default -- tinyllm ships 30 -- which a version refresh applies
+  only to a bot still on the stock 10). It reaches bot code as
+  `ctx.time_limit_seconds`. Generation streams tokens against two limits: a
+  hard deadline from that time limit (minus what the run used, the 1.5 s send
+  reserve and the model process's 3 s grace) that covers reading the prompt,
+  which llama.cpp cannot interrupt, and `answer_seconds` (the Answer time limit
+  setting) counted from the first token, so a slow prompt read does not cut the
+  answer to one word. One answer at a time.
   **Memory** (measured, SmolLM2 135M Q8: ~200 MB, ~45 MB unreclaimable): weights
   stay memory-mapped (reclaimable page cache), `n_ctx` 512 / `n_batch` 64, and
   `_check_memory` refuses a load when `available_memory_mb()` (min of

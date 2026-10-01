@@ -304,6 +304,7 @@ async def create_bot(body: BotCreateRequest) -> Bot:
         # None falls through to the repository default: #bot / #bots + DMs.
         scope=meta_defaults.get("scope"),
         cooldown_seconds=float(meta_defaults.get("cooldown_seconds", 0)),
+        timeout_seconds=float(meta_defaults.get("timeout_seconds", 10)),
         settings_schema=settings_schema,
         settings=settings,
         modified=not bool(body.from_builtin_key),

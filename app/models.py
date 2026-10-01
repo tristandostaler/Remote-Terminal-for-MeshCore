@@ -2508,6 +2508,8 @@ class Bot(BaseModel):
     cooldown_seconds: float = 0
     per_user_cooldown_seconds: float = 0
     queue_threshold_seconds: float = 0
+    # How long one run may take before the engine stops it (1-120 s).
+    timeout_seconds: float = 10
     settings_schema: list[dict] = Field(default_factory=list)
     settings: dict = Field(default_factory=dict)
     ui_triggers: list[dict] = Field(default_factory=list)
@@ -2554,6 +2556,7 @@ class BotUpdateRequest(BaseModel):
     cooldown_seconds: float | None = None
     per_user_cooldown_seconds: float | None = None
     queue_threshold_seconds: float | None = None
+    timeout_seconds: float | None = Field(default=None, ge=1, le=120)
     settings: dict | None = None
     ui_triggers: list[dict] | None = None
 

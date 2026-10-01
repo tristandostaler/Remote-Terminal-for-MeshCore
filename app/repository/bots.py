@@ -48,6 +48,7 @@ def _row_to_bot(row: aiosqlite.Row) -> Bot:
         cooldown_seconds=row["cooldown_seconds"] or 0,
         per_user_cooldown_seconds=row["per_user_cooldown_seconds"] or 0,
         queue_threshold_seconds=row["queue_threshold_seconds"] or 0,
+        timeout_seconds=row["timeout_seconds"] or 10,
         settings_schema=_load_json(row["settings_schema"], []),
         settings=_load_json(row["settings"], {}),
         ui_triggers=_load_json(row["ui_triggers"], []),
@@ -65,7 +66,7 @@ _BOT_COLUMNS = """
     id, name, category, description, long_description, code, enabled, admin_only,
     respond_to_dms, private,
     scope, cooldown_seconds, per_user_cooldown_seconds, queue_threshold_seconds,
-    settings_schema, settings, ui_triggers, builtin_key, builtin_version,
+    timeout_seconds, settings_schema, settings, ui_triggers, builtin_key, builtin_version,
     modified, last_error, sort_order, created_at, updated_at
 """
 
@@ -123,6 +124,7 @@ class BotRepository:
         cooldown_seconds: float = 0,
         per_user_cooldown_seconds: float = 0,
         queue_threshold_seconds: float = 0,
+        timeout_seconds: float = 10,
         settings_schema: list[dict[str, Any]] | None = None,
         settings: dict[str, Any] | None = None,
         ui_triggers: list[dict[str, Any]] | None = None,
@@ -139,10 +141,10 @@ class BotRepository:
                 INSERT INTO bots (
                     id, name, category, description, long_description, code, enabled,
                     admin_only, respond_to_dms, private, scope, cooldown_seconds,
-                    per_user_cooldown_seconds, queue_threshold_seconds, settings_schema,
-                    settings, ui_triggers, state, builtin_key, builtin_version, modified,
-                    sort_order, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, 0, ?, ?)
+                    per_user_cooldown_seconds, queue_threshold_seconds, timeout_seconds,
+                    settings_schema, settings, ui_triggers, state, builtin_key,
+                    builtin_version, modified, sort_order, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     new_id,
@@ -159,6 +161,7 @@ class BotRepository:
                     cooldown_seconds,
                     per_user_cooldown_seconds,
                     queue_threshold_seconds,
+                    timeout_seconds,
                     json.dumps(settings_schema or []),
                     json.dumps(settings or {}),
                     json.dumps(ui_triggers or []),
@@ -192,6 +195,7 @@ class BotRepository:
             "cooldown_seconds",
             "per_user_cooldown_seconds",
             "queue_threshold_seconds",
+            "timeout_seconds",
             "settings_schema",
             "settings",
             "ui_triggers",

@@ -442,3 +442,61 @@ class TestPrivateBots:
         assert "ping" in text and "wardrive" not in text
         assert all("wardriv" not in r["text"] for r in detail.replies)
         assert [r["text"] for r in answered.replies] == ["hey"]
+
+
+SLOW_CODE = (
+    "import asyncio\n"
+    "from remoteterm import bot\n"
+    '@bot.on_keyword("slow")\n'
+    "async def f(ctx, msg):\n"
+    "    await asyncio.sleep(1.5)\n"
+    '    await ctx.reply(f"done in {ctx.time_limit_seconds:.0f}")\n'
+)
+
+
+class TestBotTimeLimit:
+    async def test_each_bot_runs_within_its_own_time_limit(self, test_db):
+        from app.bots.engine import BotEngine
+        from app.models import BotTestRequest
+        from app.repository.bots import BotRepository
+
+        short = await BotRepository.create(name="slow-short", code=SLOW_CODE, timeout_seconds=1)
+        long = await BotRepository.create(name="slow-long", code=SLOW_CODE, timeout_seconds=5)
+        cut = await BotEngine().test_run(short, BotTestRequest(text="slow", is_dm=True))
+        done = await BotEngine().test_run(long, BotTestRequest(text="slow", is_dm=True))
+        assert "exceeded 1s timeout" in (cut.error or "")
+        assert done.error is None
+        assert [r["text"] for r in done.replies] == ["done in 5"]
+
+    async def test_the_api_saves_it_within_range(self, test_db, client):
+        async with client:
+            created = (
+                await client.post("/api/bots", json={"name": "limit-test", "code": VALID_CODE})
+            ).json()
+            assert created["timeout_seconds"] == 10
+            ok = await client.patch(f"/api/bots/{created['id']}", json={"timeout_seconds": 45})
+            assert ok.json()["timeout_seconds"] == 45
+            too_long = await client.patch(
+                f"/api/bots/{created['id']}", json={"timeout_seconds": 500}
+            )
+            assert too_long.status_code == 422
+
+    async def test_a_new_library_limit_reaches_only_a_bot_on_the_stock_default(self, test_db):
+        from app.bots.library import ensure_seeded, get_library_entry
+        from app.repository.bots import BotRepository
+
+        await ensure_seeded()
+        tiny = await BotRepository.get_by_builtin_key("tinyllm")
+        assert tiny is not None and tiny.timeout_seconds == 30, "new installs get 30 s"
+
+        # An install seeded before the limit existed: older version, stock 10 s.
+        await BotRepository.update(tiny.id, builtin_version="0.0.1", timeout_seconds=10)
+        await ensure_seeded()
+        assert (await BotRepository.get(tiny.id)).timeout_seconds == 30
+
+        # One the operator chose stays theirs.
+        await BotRepository.update(tiny.id, builtin_version="0.0.1", timeout_seconds=15)
+        await ensure_seeded()
+        refreshed = await BotRepository.get(tiny.id)
+        assert refreshed.timeout_seconds == 15
+        assert refreshed.builtin_version == get_library_entry("tinyllm")["version"]

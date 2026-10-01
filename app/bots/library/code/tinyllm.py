@@ -7,8 +7,9 @@ catalog in ``app/bots/bots_utils/tinyllm/llm.py``.
 
 The first question after enabling (or after switching models) starts a one-time
 download plus load in the background and says so; ``ask`` on its own reports
-progress. Bot runs are cut off at 10 s, so answers are generated against a
-deadline and whatever was produced by then is sent. One question is answered
+progress. A bot run is cut off at its Time limit (30 s for this bot by
+default, set under Limits), so answers are generated against a deadline that
+fits inside it and whatever was produced by then is sent. One question is answered
 at a time.
 
 Needs the optional ``llm`` extra: ``uv sync --extra llm``.
@@ -19,6 +20,7 @@ import re
 import time
 
 from app.bots.bots_utils.tinyllm.llm import (
+    ANSWER_GRACE_SECONDS,
     CONTEXT_CHOICES,
     CONTEXT_TOKENS,
     CUSTOM_MODEL,
@@ -33,9 +35,12 @@ from app.bots.bots_utils.tinyllm.llm import (
 from remoteterm import bot
 
 # How long a question waits for a reload before answering "warming up", and
-# the time a run may use before the engine's 10 s timeout, leaving room to send.
+# what the run keeps of the bot's Time limit for sending the reply.
 RELOAD_WAIT_SECONDS = 4
-RUN_BUDGET_SECONDS = 7.5
+SEND_RESERVE_SECONDS = 1.5
+# The engine stops a run at the bot's Time limit (Limits on its Settings tab).
+# A model on a Pi needs more than the 10 s every other bot gets.
+TIME_LIMIT_SECONDS = 30
 # DM memory is read back from the conversation itself (the messages table):
 # incoming messages that were questions to this bot, and the answers it sent
 # right after them. `ask reset` / `ask forget` is a message too, so history
@@ -49,12 +54,12 @@ MISSED_SHOWN = 5
 MISSED_STATE = "missed_questions"
 SESSION_IDLE_SECONDS = 3600
 # The most history text sent to the model: the context window is 512 tokens,
-# and on a Pi every token of prompt costs time out of the 10 s run.
+# and on a Pi every token of prompt costs time out of the run.
 HISTORY_MAX_CHARS = 1000
-# The bot answers inside its 10 s run (a multi-part answer adds ~2 s a part),
-# so only what was sent this soon after a question can be its answer -- not
-# something the operator typed into the same DM later.
-ANSWER_WINDOW_SECONDS = 30
+# The bot answers inside its run (Time limit at most 120 s; a multi-part
+# answer adds ~2 s a part), so only what was sent this soon after a question
+# can be its answer -- not something the operator typed into the DM later.
+ANSWER_WINDOW_SECONDS = 150
 # Rough prompt budgeting without a tokenizer in the server (only the model
 # process has one): ~3 characters per token is conservative for English, and
 # the chat template adds a little. What is left of the context after the
@@ -101,6 +106,7 @@ BOT_META = {
     "version": "1.5.0",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
+    "timeout_seconds": TIME_LIMIT_SECONDS,
     "settings_schema": [
         {
             "key": "_model",
@@ -219,10 +225,13 @@ BOT_META = {
             "type": "float",
             "default": 6,
             "min": 2,
-            "max": 7,
+            "max": 60,
             "help": (
-                "Generation stops here and the text so far is sent. Bot runs end at 10 s, and "
-                "the reply still has to go out, so this stays at 7 or less."
+                "How long the model may spend writing, counted from its first word; the "
+                "text so far is sent when it stops. Reading the question and notes comes "
+                "before that and is not counted. The whole run still has to fit in the "
+                "bot's Time limit (Limits; 30 s by default), and the bot stops early if "
+                "that is closer."
             ),
         },
         {
@@ -318,7 +327,7 @@ BOT_META = {
                     "label": "2048 tokens (~48 MB more memory)",
                     "description": (
                         "Plenty of room for notes and history; for a desktop-class CPU. On a "
-                        "Pi a long prompt may not finish inside the 10 s bot limit."
+                        "Pi a long prompt may not finish inside the bot's Time limit."
                     ),
                 },
             ],
@@ -585,6 +594,13 @@ def panel_history(transcript, limit, max_chars=HISTORY_MAX_CHARS):
     return _trimmed(conversation_turns(rows, now), limit, max_chars)
 
 
+def run_budget(ctx):
+    """Seconds this run may use, from the bot's Time limit, keeping room to
+    send the reply."""
+    limit = float(getattr(ctx, "time_limit_seconds", 10) or 10)
+    return max(2.0, limit - SEND_RESERVE_SECONDS)
+
+
 def _number(ctx, key, default, low, high):
     try:
         value = float(ctx.settings.get(key, default))
@@ -699,7 +715,7 @@ async def ask(ctx, msg):
         # ("what time is it" matches a Clock section). A quick yes/no from the
         # model itself filters those -- only when there are notes to judge,
         # and only with time to spare.
-        time_left = RUN_BUDGET_SECONDS - (time.monotonic() - started)
+        time_left = run_budget(ctx) - (time.monotonic() - started)
         if (
             notes
             and ctx.settings.get("check_notes_with_model")
@@ -727,15 +743,14 @@ async def ask(ctx, msg):
             [system, *earlier, {"role": "user", "content": question}],
             max_tokens=max_tokens,
             temperature=_number(ctx, "temperature", 0.7, 0.0, 1.5),
-            # The whole run must end inside the engine's 10 s: time spent
-            # reloading comes out of the answer's budget.
+            # The whole run must end inside the bot's Time limit: what the
+            # run already used, and the grace the model process gets before
+            # it is presumed stuck, come out of the hard deadline.
             deadline_seconds=max(
                 1.5,
-                min(
-                    _number(ctx, "time_limit_seconds", 6, 2, 7),
-                    RUN_BUDGET_SECONDS - (time.monotonic() - started),
-                ),
+                run_budget(ctx) - (time.monotonic() - started) - ANSWER_GRACE_SECONDS,
             ),
+            answer_seconds=_number(ctx, "time_limit_seconds", 6, 2, 60),
         )
 
     # Budgeting is an estimate; if the prompt still overflows the context, drop
