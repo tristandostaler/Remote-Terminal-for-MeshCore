@@ -69,8 +69,8 @@ operators).
   only for a DM that **no** in-scope bot's keyword matched (a match that a
   limiter, cooldown or Admin users check then stopped still counts, and so do
   `!bots` / `!author`), only when the sender is listed in that bot setting
-  (`api.contact_listed`: public keys or prefixes of 6+ hex chars, comma or
-  space separated, `*` = everyone -- checked before the limiters so other
+  (`api.contact_listed`: a `contact_list` setting of public keys or prefixes
+  of 6+ hex chars, `*` = everyone; text is split on commas/spaces -- checked before the limiters so other
   senders never spend a reply slot), and then through the same limiters as a
   keyword (`_admit`). `msg.keyword` is None and `msg.args` is the whole text.
   tinyllm uses it (`keywordless_contacts`) so listed contacts can DM a
@@ -246,7 +246,9 @@ operators).
 - `library/` — built-in bots as real `.py` files under `library/code/`, each
   self-describing via a module-level `BOT_META` dict (metadata +
   `settings_schema`). Field types the Settings tab renders: `text`,
-  `textarea` (multi-line), `password`, `int`/`float`/`number`, `bool`
+  `textarea` (multi-line), `contact_list` (a list of contact public keys,
+  prefixes of 6+ hex chars or `*`, added one at a time with an X to remove each;
+  read with `api.contact_listed`), `password`, `int`/`float`/`number`, `bool`
   (its `help` shows under the switch), `select` (options may carry a
   `description`, shown for the chosen one), `url`, `generated_url`, and
   `section` -- a heading with no value that groups the fields after it;

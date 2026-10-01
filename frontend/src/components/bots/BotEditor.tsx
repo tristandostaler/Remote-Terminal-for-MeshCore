@@ -164,18 +164,151 @@ export function validateGeneratedUrl(
   return null;
 }
 
+/** Entries of a `contact_list` value; text written by an older version splits like the backend does. */
+export function contactListEntries(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value.map(String) : String(value ?? '').split(/[\s,;]+/);
+  return raw.map((entry) => entry.trim()).filter(Boolean);
+}
+
+// Mirrors app/bots/api.py contact_listed: shorter prefixes never match anyone.
+const MIN_CONTACT_PREFIX = 6;
+
+/** Why an entry cannot be added, or null when it can. */
+export function contactEntryError(entry: string, existing: string[]): string | null {
+  if (entry !== '*' && !new RegExp(`^[0-9a-f]{${MIN_CONTACT_PREFIX},64}$`, 'i').test(entry)) {
+    return `Enter a public key (or a prefix of at least ${MIN_CONTACT_PREFIX} hex characters), or * for everyone`;
+  }
+  if (existing.some((key) => key.toLowerCase() === entry.toLowerCase())) {
+    return 'Already in the list';
+  }
+  return null;
+}
+
+/** A list of contacts: type or pick a key, Add, and remove each with its X. */
+function ContactListField({
+  field,
+  value,
+  contacts,
+  onChange,
+}: {
+  field: BotSettingsSchemaField;
+  value: unknown;
+  contacts: Contact[];
+  onChange: (value: unknown) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const entries = contactListEntries(value ?? field.default);
+  const inputId = `bot-setting-${field.key}`;
+  const listId = `${inputId}-contacts`;
+
+  const nameOf = (entry: string) => {
+    if (entry === '*') return 'Every contact';
+    const lowered = entry.toLowerCase();
+    const matches = contacts.filter((c) => c.public_key.toLowerCase().startsWith(lowered));
+    if (matches.length === 1) return matches[0].name || null;
+    return matches.length > 1 ? `${matches.length} contacts match this prefix` : null;
+  };
+
+  const add = () => {
+    const entry = draft.trim();
+    if (!entry) return;
+    const problem = contactEntryError(entry, entries);
+    setError(problem);
+    if (problem) return;
+    onChange([...entries, entry.toLowerCase()]);
+    setDraft('');
+  };
+
+  return (
+    <div>
+      <label htmlFor={inputId} className="block text-xs text-muted-foreground mb-1">
+        {field.label}
+      </label>
+      <div className="flex gap-2">
+        <Input
+          id={inputId}
+          list={listId}
+          value={draft}
+          placeholder="Public key, or pick a contact"
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              add();
+            }
+          }}
+          className="h-8 font-mono text-[0.8125rem]"
+        />
+        <datalist id={listId}>
+          {contacts.map((contact) => (
+            <option key={contact.public_key} value={contact.public_key}>
+              {contact.name || contact.public_key.slice(0, 12)}
+            </option>
+          ))}
+        </datalist>
+        <Button type="button" variant="outline" size="sm" className="h-8 shrink-0" onClick={add}>
+          <Plus className="h-3.5 w-3.5 mr-1" />
+          Add
+        </Button>
+      </div>
+      {error && <div className="text-[0.6875rem] text-destructive mt-1">{error}</div>}
+      {entries.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {entries.map((entry) => {
+            const name = nameOf(entry);
+            return (
+              <li
+                key={entry}
+                className="flex items-center gap-2 rounded-md border border-input bg-muted px-2.5 py-1"
+              >
+                <div className="min-w-0 flex-1">
+                  {name && <div className="text-[0.8125rem] truncate">{name}</div>}
+                  {entry !== '*' && (
+                    <code className="block font-mono text-[0.6875rem] text-muted-foreground break-all">
+                      {entry}
+                    </code>
+                  )}
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 shrink-0 p-0"
+                  aria-label={`Remove ${name || entry}`}
+                  onClick={() => onChange(entries.filter((key) => key !== entry))}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {field.help && (
+        <div className="text-[0.6875rem] text-muted-foreground mt-1">{field.help}</div>
+      )}
+    </div>
+  );
+}
+
 /** Renders one settings_schema field bound to the settings draft. */
 function SchemaField({
   field,
   value,
   schema,
   settings,
+  contacts,
   onChange,
 }: {
   field: BotSettingsSchemaField;
   value: unknown;
   schema: BotSettingsSchemaField[];
   settings: Record<string, unknown>;
+  contacts: Contact[];
   onChange: (value: unknown) => void;
 }) {
   const [revealed, setRevealed] = useState(false);
@@ -238,6 +371,10 @@ function SchemaField({
         )}
       </div>
     );
+  }
+
+  if (field.type === 'contact_list') {
+    return <ContactListField field={field} value={value} contacts={contacts} onChange={onChange} />;
   }
 
   if (field.type === 'section') {
@@ -1179,6 +1316,7 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
                         value={settings[field.key]}
                         schema={bot.settings_schema}
                         settings={settings}
+                        contacts={contacts}
                         onChange={(value) => {
                           setSettings((prev) => ({ ...prev, [field.key]: value }));
                           markDirty();

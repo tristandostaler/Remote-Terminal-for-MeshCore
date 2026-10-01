@@ -56,7 +56,7 @@ STOP_BEFORE_LIMIT_SECONDS = 3
 KEYWORDS = ("ask", "ai", "llm", "tinyllm")
 RESET_WORDS = frozenset({"reset", "forget"})
 # The setting naming the contacts whose DMs need no keyword (engine fallback,
-# ``@bot.on_unmatched``): public keys or prefixes, or ``*`` for everyone.
+# ``@bot.on_unmatched``): a ``contact_list`` of public keys or prefixes, or ``*``.
 KEYWORDLESS_SETTING = "keywordless_contacts"
 # Admin DM: "ask missed" lists questions that found no notes, "ask missed
 # clear" empties the list. Anyone else asking "missed" just gets an answer.
@@ -115,7 +115,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.7.0",
+    "version": "1.7.1",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "timeout_seconds": TIME_LIMIT_SECONDS,
@@ -270,11 +270,11 @@ BOT_META = {
         {
             "key": KEYWORDLESS_SETTING,
             "label": "Answer DMs without a keyword from",
-            "type": "text",
-            "default": "",
+            "type": "contact_list",
+            "default": [],
             "help": (
-                "Public keys (or prefixes of at least 6 characters) separated by commas or "
-                "spaces; `*` for every contact. Their DMs are answered without `ask` "
+                "Add contacts one at a time: pick one, or paste a public key (or a prefix "
+                "of at least 6 characters); `*` adds every contact. Their DMs are answered without `ask` "
                 "whenever no other bot's keyword matched, so `hello` still goes to the "
                 "hello bot. `ask ...` keeps working, and `reset` alone clears the "
                 "memory. All of their DM -- other bots' answers too -- counts toward "
@@ -426,7 +426,7 @@ BOT_META = {
         "max_tokens": 40,
         "max_messages": 1,
         "history_messages": 10,
-        KEYWORDLESS_SETTING: "",
+        KEYWORDLESS_SETTING: [],
         "use_docs": True,
         "check_notes_with_model": False,
         "notes_check_seconds": NOTES_CHECK_SECONDS,

@@ -186,7 +186,7 @@ class TestDispatch:
 class TestLibraryBots:
     async def test_hello_goes_to_hello_and_the_rest_to_tinyllm(self, engine):
         bots = []
-        for key, settings in (("hello", {}), ("tinyllm", {"keywordless_contacts": ALICE})):
+        for key, settings in (("hello", {}), ("tinyllm", {"keywordless_contacts": [ALICE]})):
             entry = get_library_entry(key)
             assert entry is not None
             bots.append(_loaded(key, entry["code"], settings=settings))

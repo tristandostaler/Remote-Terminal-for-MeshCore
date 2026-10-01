@@ -1848,7 +1848,7 @@ class TestKeywordless:
     history and new keyword-free messages the same way.
     """
 
-    LISTED = {"keywordless_contacts": ALICE}
+    LISTED = {"keywordless_contacts": [ALICE]}
 
     def _turns(self, rows, keywordless):
         now = max(r.received_at for r in rows) + 10

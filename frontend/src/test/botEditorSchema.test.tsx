@@ -4,8 +4,14 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { api } from '../api';
-import { BotEditor, resolveGeneratedUrl, validateGeneratedUrl } from '../components/bots/BotEditor';
-import type { Bot, BotSettingsSchemaField } from '../types';
+import {
+  BotEditor,
+  contactEntryError,
+  contactListEntries,
+  resolveGeneratedUrl,
+  validateGeneratedUrl,
+} from '../components/bots/BotEditor';
+import type { Bot, BotSettingsSchemaField, Contact } from '../types';
 
 const botEditorSource = readFileSync('src/components/bots/BotEditor.tsx', 'utf8');
 
@@ -230,6 +236,83 @@ describe('BotEditor settings schema URL fields', () => {
     fireEvent.change(provider, { target: { value: 'twilio' } });
     expect(screen.queryByText('VoIP username')).not.toBeInTheDocument();
     expect(screen.getByText('Twilio SID')).toBeInTheDocument();
+  });
+});
+
+describe('BotEditor contact list field', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const ADA = 'ab'.repeat(32);
+  const BOB = 'cd'.repeat(32);
+  const contacts = [
+    { public_key: ADA, name: 'Ada' },
+    { public_key: BOB, name: 'Bob' },
+  ] as Contact[];
+
+  function listBot(value: unknown): Bot {
+    const bot = makeBot();
+    bot.settings_schema = [
+      { key: 'who', label: 'Answer DMs without a keyword from', type: 'contact_list', default: [] },
+    ];
+    bot.settings = { who: value };
+    return bot;
+  }
+
+  async function open(value: unknown) {
+    vi.spyOn(api, 'getBot').mockResolvedValue(listBot(value));
+    const update = vi.spyOn(api, 'updateBot').mockImplementation(async (_id, payload) => ({
+      ...listBot(payload.settings?.who),
+    }));
+    render(
+      <BotEditor
+        botId="bot-1"
+        channels={[]}
+        contacts={contacts}
+        onBack={vi.fn()}
+        onDeleted={vi.fn()}
+      />
+    );
+    const input = await screen.findByLabelText('Answer DMs without a keyword from');
+    return { input, update };
+  }
+
+  it('adds keys one at a time, shows each with its contact name, and removes with X', async () => {
+    const { input, update } = await open([ADA]);
+    const listed = () => screen.queryAllByRole('listitem').map((item) => item.textContent);
+    expect(listed()).toEqual([`Ada${ADA}`]);
+
+    fireEvent.change(input, { target: { value: BOB.toUpperCase() } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(listed()).toEqual([`Ada${ADA}`, `Bob${BOB}`]);
+    expect(input).toHaveValue('');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Ada' }));
+    expect(listed()).toEqual([`Bob${BOB}`]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    expect(update.mock.calls[0][1].settings).toEqual({ who: [BOB] });
+  });
+
+  it('adds with Enter and refuses short prefixes and duplicates', async () => {
+    const { input } = await open([]);
+    fireEvent.change(input, { target: { value: 'abc' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(screen.getByText(/at least 6 hex characters/)).toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: '*' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(screen.getByText('Every contact')).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '*' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(screen.getByText('Already in the list')).toBeInTheDocument();
+  });
+
+  it('reads comma-separated text the way the backend does', () => {
+    expect(contactListEntries(`${ADA}, ${BOB.slice(0, 8)}`)).toEqual([ADA, BOB.slice(0, 8)]);
+    expect(contactListEntries(undefined)).toEqual([]);
+    expect(contactEntryError('abcdef', ['ABCDEF'])).toBe('Already in the list');
+    expect(contactEntryError('xyz123', [])).not.toBeNull();
   });
 });
 
