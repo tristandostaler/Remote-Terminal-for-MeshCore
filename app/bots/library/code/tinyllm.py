@@ -245,11 +245,11 @@ BOT_META = {
             "default": True,
             "help": (
                 "Search the markdown files in the tinyllm-docs folder (beside the database; "
-                "it ships with MeshCore notes and emergency notes: first aid, water, "
-                "power and weather safety, radio, navigation) and give the best matches "
-                "to the model with each question. Add your own .md files there; the "
-                "shipped ones are overwritten on restart. Each heading starts a "
-                "searchable section."
+                "it ships with MeshCore, emergency and everyday reference notes, plus a "
+                "page about this node's bots, private ones left out) and give the best "
+                "matches to the model with each question. Add your own .md files "
+                "there; the shipped ones are overwritten on restart. Each heading "
+                "starts a searchable section."
             ),
         },
         {
@@ -552,10 +552,13 @@ async def ask(ctx, msg):
     started = time.monotonic()
     if ctx.settings.get("use_docs", True):
         # Create the notes folder on the bot's first run, not its first real
-        # question, so it is there to edit as soon as the bot has been used.
-        from app.bots.bots_utils.tinyllm.llm_docs import docs_index
+        # question, so it is there to edit as soon as the bot has been used,
+        # and keep the page about this node's bots current (private bots are
+        # not in get_enabled_bots, so never in the notes).
+        from app.bots.bots_utils.tinyllm.llm_docs import docs_index, write_bots_page
 
-        await asyncio.to_thread(docs_index)
+        index = await asyncio.to_thread(docs_index)
+        await asyncio.to_thread(write_bots_page, index.folder, ctx.get_enabled_bots())
     try:
         n_ctx = int(ctx.settings.get("context_tokens") or CONTEXT_TOKENS)
     except (TypeError, ValueError):

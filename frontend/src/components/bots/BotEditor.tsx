@@ -401,6 +401,7 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
   const [roomList, setRoomList] = useState<string[]>([]);
   const [respondToDms, setRespondToDms] = useState(true);
   const [adminOnly, setAdminOnly] = useState(false);
+  const [isPrivate, setIsPrivate] = useState(false);
   const [cooldown, setCooldown] = useState('0');
   const [perUserCooldown, setPerUserCooldown] = useState('0');
   const [queueThreshold, setQueueThreshold] = useState('0');
@@ -432,6 +433,7 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
     setRoomList(scopeListOf(loaded.scope?.rooms));
     setRespondToDms(loaded.respond_to_dms);
     setAdminOnly(loaded.admin_only);
+    setIsPrivate(loaded.private);
     setCooldown(String(loaded.cooldown_seconds));
     setPerUserCooldown(String(loaded.per_user_cooldown_seconds));
     setQueueThreshold(String(loaded.queue_threshold_seconds));
@@ -476,6 +478,7 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
       scope: buildScope(),
       respond_to_dms: respondToDms,
       admin_only: adminOnly,
+      private: isPrivate,
       cooldown_seconds: parseFloat(cooldown) || 0,
       per_user_cooldown_seconds: parseFloat(perUserCooldown) || 0,
       queue_threshold_seconds: parseFloat(queueThreshold) || 0,
@@ -1051,6 +1054,24 @@ export function BotEditor({ botId, channels, contacts, onBack, onDeleted }: BotE
                     Admins only{' '}
                     <span className="text-[0.6875rem] text-muted-foreground">
                       — answer only senders on the Admin users list (Bots › Engine)
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2.5 cursor-pointer mt-2">
+                  <input
+                    type="checkbox"
+                    checked={isPrivate}
+                    onChange={(e) => {
+                      setIsPrivate(e.target.checked);
+                      markDirty();
+                    }}
+                    className="w-4 h-4 rounded border-input accent-primary mt-0.5"
+                  />
+                  <span className="text-[0.8125rem]">
+                    Private{' '}
+                    <span className="text-[0.6875rem] text-muted-foreground">
+                      — still answers its commands, but help, bots and the tinyllm bot&apos;s notes
+                      never list it
                     </span>
                   </span>
                 </label>

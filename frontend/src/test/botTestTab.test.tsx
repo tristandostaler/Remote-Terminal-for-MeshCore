@@ -15,6 +15,7 @@ function makeBot(overrides: Partial<Bot> = {}): Bot {
     code: 'from remoteterm import bot',
     enabled: true,
     admin_only: false,
+    private: false,
     respond_to_dms: true,
     scope: { channels: 'all', rooms: { only: [] } },
     cooldown_seconds: 0,

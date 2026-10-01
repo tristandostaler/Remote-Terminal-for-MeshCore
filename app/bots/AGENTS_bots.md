@@ -15,7 +15,9 @@ operators).
   (`reply`/`send`/`send_dm`/`send_room`), image sends
   (`reply_image`/`send_image`/`send_dm_image`/`send_room_image`), `settings`,
   persistent `state`, `http` (httpx), `geocode`, i18n (`t`), `mesh_stats`,
-  `get_enabled_bots`, logging, and `sender_is_admin` (the engine's Admin users
+  `get_enabled_bots` (enabled bots minus private ones -- `bots.private`, the
+  editor's Private switch: it still answers, but `help`, `bots` and the
+  tinyllm notes list bots through this, so none of them ever show it), logging, and `sender_is_admin` (the engine's Admin users
   check, the same one `admin_only` gates on) so a bot can keep raw diagnostics
   for admins in DMs, `test_transcript` (test runs only: the Test tab's earlier
   messages in this conversation, `{"text", "outgoing"}` oldest first, sent as
@@ -149,11 +151,15 @@ operators).
   quick guide) is hand-written; `meshcore-cli.md` and `meshcore-faq.md` are
   MeshCore's own docs (MIT, license in their header comments) converted by
   `scripts/build/update_tinyllm_docs.py <MeshCore checkout>` -- rerun it when
-  MeshCore updates them. `emergency-*.md` (first aid, water/food, home
-  safety and weather, radio, outdoors) are hand-written from public guidance
+  MeshCore updates them. `emergency-*.md` (first aid, psychological first
+  aid, water/food, home safety and weather, radio, outdoors),
+  `meshcore-hardware.md`, `radio-reference.md`, `practical-repairs.md`,
+  `knots.md` and `cooking-staples.md` are hand-written from public guidance
   (Red Cross, CDC, WHO, ICAO); headings are phrased the way people ask, and
   `tests/test_bots_tinyllm.py` pins sample questions to their sections --
-  rerun it after editing any shipped note. The bot budgets the context by characters (~3/token, no tokenizer
+  rerun it after editing any shipped note. `this-node-bots.md` is not shipped:
+  the bot writes it on every run from `ctx.get_enabled_bots()` (so private
+  bots never appear), only when it changed, and seeding never touches it. The bot budgets the context by characters (~3/token, no tokenizer
   in the server): what is left after prompt, question and answer goes to
   history (up to half) and notes (the rest), searched with the question plus
   the previous one; overflow retries drop history, then notes. `context_tokens`

@@ -161,6 +161,7 @@ function describeLimits(bot: Bot): string {
   if (bot.cooldown_seconds > 0) parts.push(`${bot.cooldown_seconds}s cd`);
   if (bot.per_user_cooldown_seconds > 0) parts.push(`${bot.per_user_cooldown_seconds}s/user`);
   if (bot.admin_only) parts.push('admins');
+  if (bot.private) parts.push('private');
   return parts.join(' · ') || '—';
 }
 

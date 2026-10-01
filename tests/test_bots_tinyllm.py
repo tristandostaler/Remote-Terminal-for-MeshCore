@@ -1118,6 +1118,47 @@ class TestDocsIndex:
         for question, expected in cases.items():
             assert expected in index.search(question, 700)[0].title, question
 
+    def test_the_reference_notes_answer_common_questions(self):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
+        cases = {
+            # meshcore-hardware.md
+            "what antenna should I use": "Choosing an antenna",
+            "how high should the antenna be": "How high to put the antenna",
+            "where should I put my repeater": "Where to put a repeater",
+            "solar panel for repeater": "Solar power for a repeater",
+            "can I charge lithium battery in the cold": "Battery types and safety",
+            # emergency-psychological-first-aid.md
+            "someone is panicking": "panicking",
+            "my friend is suicidal": "suicidal",
+            "I want to kill myself": "crisis lines",
+            "I feel suicidal": "crisis lines",
+            "how to help kids after a disaster": "children",
+            "what to do with my pets in an evacuation": "Pets in an emergency",
+            # radio-reference.md
+            "morse code for S": "Morse code",
+            "what does QTH mean": "Q-codes",
+            "convert eastern time to UTC": "UTC and time zones",
+            "what is my grid square": "Maidenhead",
+            # practical-repairs.md
+            "how to jump start a car": "Jump-starting",
+            "how do I change a flat tire": "flat tire",
+            "my pipes are frozen": "Frozen pipes",
+            "breaker keeps tripping": "Tripped breaker",
+            # knots.md
+            "how to tie a bowline": "bowline",
+            "how to join two ropes": "sheet bend",
+            "how to tighten a tarp line": "taut-line",
+            # cooking-staples.md
+            "how to cook rice": "white rice",
+            "how to cook beans": "dried beans",
+            "how to make bread without yeast": "soda bread",
+            "what temperature is chicken safe": "Safe cooking temperatures",
+        }
+        for question, expected in cases.items():
+            assert expected in index.search(question, 700)[0].title, question
+
     def test_small_talk_finds_no_notes(self):
         from app.bots.bots_utils.tinyllm import llm_docs
 
@@ -1130,6 +1171,7 @@ class TestDocsIndex:
             "what is the power of love?",
             "tell me a joke",
             "write me a poem about the sea",
+            "how to kill a process",
         ):
             assert index.search(chat, 700) == [], chat
 
@@ -1353,10 +1395,66 @@ class TestReviewFixes:
     ):
         from app.bots.bots_utils.tinyllm import llm_docs
 
+        index = llm_docs.DocsIndex(tmp_path / "docs")
         seen = []
-        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: seen.append(1))
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: seen.append(1) or index)
         await _run(monkeypatch, _FakeRuntime(state="downloading"), BotTestRequest(text="ask"))
         assert seen, "a bare `ask` creates the notes folder"
+        assert (tmp_path / "docs" / llm_docs.BOTS_PAGE).is_file()
+
+    async def test_the_bots_page_lists_this_nodes_bots_but_not_private_ones(
+        self, test_db, monkeypatch, tmp_path
+    ):
+        from app.bots.bots_utils.tinyllm import llm_docs
+        from app.repository.bots import BotRepository
+
+        code = (
+            "from remoteterm import bot\n"
+            "@bot.on_keyword('{kw}')\n"
+            "async def h(ctx, msg):\n"
+            "    await ctx.reply('ok')\n"
+        )
+        await BotRepository.create(
+            name="weatherish",
+            description="Weather for a place",
+            code=code.format(kw="wx"),
+            enabled=True,
+        )
+        await BotRepository.create(
+            name="wardriving",
+            description="Logs where packets were heard",
+            code=code.format(kw="wardrive"),
+            enabled=True,
+            private=True,
+        )
+        index = llm_docs.DocsIndex(tmp_path / "docs")
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: index)
+        from app.bots.engine import bot_engine
+
+        await bot_engine.reload_all()
+        try:
+            await _run(monkeypatch, _FakeRuntime(state="downloading"), BotTestRequest(text="ask"))
+        finally:
+            bot_engine.bots.clear()
+        page = (tmp_path / "docs" / llm_docs.BOTS_PAGE).read_text()
+        assert "## weatherish bot: Weather for a place" in page
+        assert "Commands: wx." in page
+        assert "wardriv" not in page, "a private bot never reaches the notes"
+        assert index.search("how do I get the weather", 700)[0].title.endswith(
+            "weatherish bot: Weather for a place"
+        )
+
+    def test_the_bots_page_is_only_rewritten_when_it_changes(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        bots = [{"name": "ping", "category": "Basic", "description": "Pong", "keywords": ["ping"]}]
+        llm_docs.write_bots_page(tmp_path, bots)
+        page = tmp_path / llm_docs.BOTS_PAGE
+        os.utime(page, (1, 1))
+        llm_docs.write_bots_page(tmp_path, bots)
+        assert page.stat().st_mtime == 1
+        llm_docs.write_bots_page(tmp_path, [])
+        assert "ping" not in page.read_text()
 
     def test_settings_are_grouped_and_ordered(self):
         schema = get_library_entry("tinyllm")["settings_schema"]

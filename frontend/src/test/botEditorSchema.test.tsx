@@ -41,6 +41,7 @@ function makeBot(): Bot {
     code: 'from remoteterm import bot',
     enabled: false,
     admin_only: false,
+    private: false,
     respond_to_dms: true,
     scope: { channels: 'all' },
     cooldown_seconds: 0,

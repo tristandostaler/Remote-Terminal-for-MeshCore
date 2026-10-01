@@ -339,6 +339,65 @@ def seed_docs(folder: Path) -> None:
         logger.warning("tinyllm docs: cannot seed %s: %s", folder, exc)
 
 
+# Written by the tinyllm bot from this node's bots, not shipped: seeding
+# never touches it, and it is rewritten whenever the bots change.
+BOTS_PAGE = "this-node-bots.md"
+
+
+def render_bots_page(bots: list[dict]) -> str:
+    """Notes about the bots this node advertises, one section per bot.
+
+    ``bots`` is ``ctx.get_enabled_bots()``: enabled and not private. Headings
+    carry the name and one-liner, so "how do I get the weather?" finds the
+    weather bot.
+    """
+    out = [
+        "<!--",
+        "Written by the tinyllm bot from this node's enabled bots and rewritten",
+        "whenever they change: do not edit. Private bots are left out.",
+        "-->",
+        "",
+        "# This node's bots",
+        "",
+        "## Which bots and commands this node has",
+        "",
+        "This node runs RemoteTerm. Its bots answer commands sent in a bot channel",
+        "(#bot or #bots) or by direct message; a command is the first word of the",
+        "message, for example: help. Send help for the list of commands, and help",
+        "followed by a command for details on one.",
+    ]
+    if bots:
+        out.append("Bots here: " + ", ".join(b["name"] for b in bots) + ".")
+    for b in sorted(bots, key=lambda b: str(b["name"]).lower()):
+        keywords = list(dict.fromkeys(b.get("keywords") or []))
+        facts = [f"Category: {b.get('category') or 'Custom'}."]
+        facts.append(
+            f"Commands: {', '.join(keywords)}."
+            if keywords
+            else "It has no command of its own: it acts on its own triggers."
+        )
+        if b.get("admin_only"):
+            facts.append("Only the node's admins can use it.")
+        detail = " ".join(str(b.get("long_description") or "").replace("`", "").split())
+        heading = (
+            f"{b['name']} bot: {b['description']}" if b.get("description") else f"{b['name']} bot"
+        )
+        out += ["", f"## {' '.join(heading.split())}", "", " ".join([*facts, detail]).strip()]
+    return "\n".join(out) + "\n"
+
+
+def write_bots_page(folder: Path, bots: list[dict]) -> None:
+    """Write :func:`render_bots_page` into the docs folder when it changed."""
+    target = folder / BOTS_PAGE
+    content = render_bots_page(bots)
+    try:
+        if not target.is_file() or target.read_text() != content:
+            folder.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+    except OSError as exc:
+        logger.warning("tinyllm docs: cannot write %s: %s", target, exc)
+
+
 _indexes: dict[Path, DocsIndex] = {}
 _indexes_lock = threading.Lock()
 
