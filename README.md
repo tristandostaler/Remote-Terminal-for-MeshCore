@@ -444,6 +444,17 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    matches enough of the question's words -- one shared word such as "power"
    in "what is the power of love?" is not enough -- so notes stay out of
    unrelated questions. The notes can be about anything, not just MeshCore.
+   The notes get better with use: `missed-questions.txt` in the same folder
+   lists the questions that found no notes, most asked first (an admin can
+   also DM `ask missed`), so you know what to write next, and `synonyms.txt`
+   (yours, never overwritten) groups words that mean the same thing, such as
+   `wardrive, wardriving`, so a question phrased differently from the notes
+   still finds them.
+   The notes are capped at about 700 characters per question by default (**Most
+   reference notes per question**): the model reads them before answering, and
+   on a Pi that reading is most of the wait, so a bigger cap means fuller but
+   slower answers. The Test tab's logs show the notes size, search time and
+   model time for each question.
    **Ask the model whether the notes fit** adds a quick yes/no from the model
    before using them, to filter matches that share words but not meaning; it
    costs a short extra model pass and suits Qwen2.5 1.5B / Llama 3.2 1B best.
@@ -459,8 +470,11 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
 
 3. Enable the bot. The first question downloads the model (once, into
    `MESHCORE_LLM_MODEL_DIR`, default `models/llm` beside the database) and loads it in the
-   background; `ask` alone reports progress. Bot runs are limited to 10 s, so
-   answers stop at the configured time limit and whatever was produced is sent.
+   background; `ask` alone reports progress. Each bot run is limited by the
+   bot's **Time limit** (Settings tab, Limits; 30 s for `tinyllm`, 10 s for
+   other bots, up to 120 s), and the answer is fitted inside it: reading the
+   question and notes first, then writing for at most **Answer time limit**
+   seconds, after which whatever was produced is sent.
 
 Tiny models are chatty and often wrong. Treat the answers as entertainment.
 

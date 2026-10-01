@@ -1720,6 +1720,8 @@ export interface Bot {
   cooldown_seconds: number;
   per_user_cooldown_seconds: number;
   queue_threshold_seconds: number;
+  /** How long one run may take before the engine stops it (1-120 s). */
+  timeout_seconds: number;
   settings_schema: BotSettingsSchemaField[];
   settings: Record<string, unknown>;
   ui_triggers: BotUiTrigger[];
@@ -1755,6 +1757,7 @@ export interface BotUpdatePayload {
   cooldown_seconds?: number;
   per_user_cooldown_seconds?: number;
   queue_threshold_seconds?: number;
+  timeout_seconds?: number;
   settings?: Record<string, unknown>;
   ui_triggers?: BotUiTrigger[];
 }

@@ -46,7 +46,18 @@ from app.models import Bot, BotEngineSettings, BotLogEntry, BotTestRequest, BotT
 
 logger = logging.getLogger(__name__)
 
+# How long one bot run may take: each bot's own timeout_seconds, kept in range.
 BOT_EXECUTION_TIMEOUT = 10.0
+BOT_TIMEOUT_MIN = 1.0
+BOT_TIMEOUT_MAX = 120.0
+
+
+def bot_time_limit(bot: Bot) -> float:
+    try:
+        value = float(bot.timeout_seconds)
+    except (TypeError, ValueError):
+        return BOT_EXECUTION_TIMEOUT
+    return min(BOT_TIMEOUT_MAX, max(BOT_TIMEOUT_MIN, value))
 SETTLE_DELAY_SECONDS = 2.0
 TICK_SECONDS = 15.0
 LOG_RING_SIZE = 500
@@ -152,9 +163,29 @@ class BotEngine:
             self.log("WARN", "engine", "Bots disabled by MESHCORE_DISABLE_BOTS — engine idle")
         await self.reload_all()
         await self._prime_known_contacts()
+        self._warm_tinyllm_notes()
         self._ticker_task = asyncio.create_task(self._ticker())
         self._started = True
         self.log("INFO", "engine", f"Bot engine started with {len(self.bots)} bots")
+
+    def _warm_tinyllm_notes(self) -> None:
+        """Seed and index the tinyllm notes in the background at startup, so the
+        first question does not wait for it (about a second on a Pi)."""
+        if self.disabled or not any(
+            b.record.enabled
+            and b.record.builtin_key == "tinyllm"
+            and b.record.settings.get("use_docs", True)
+            for b in self.bots.values()
+        ):
+            return
+        from app.bots.bots_utils.tinyllm.llm_docs import docs_index
+
+        async def warm() -> None:
+            index = await asyncio.to_thread(docs_index)
+            await asyncio.to_thread(index.search, "warm", 1)
+
+        # Fire-and-forget, like other background work: a failure is logged.
+        asyncio.create_task(warm())
 
     async def stop(self) -> None:
         self._started = False
@@ -753,6 +784,7 @@ class BotEngine:
             command_prefix=next(iter(self._prefixes()), ""),
             author_contact=self.settings.author_contact,
             sender_is_admin=self._is_admin_sender(msg) if msg else False,
+            time_limit_seconds=bot_time_limit(bot),
             loop=asyncio.get_running_loop(),
         )
 
@@ -787,17 +819,18 @@ class BotEngine:
         state_before = json.dumps(ctx.state, sort_keys=True, default=str)
         result = "no_reply"
         error: str | None = None
+        limit = bot_time_limit(bot)
         try:
             if legacy:
                 assert loaded.code is not None and msg is not None
-                await call_legacy(loaded.code, ctx, msg, BOT_EXECUTION_TIMEOUT, _bot_executor)
+                await call_legacy(loaded.code, ctx, msg, limit, _bot_executor)
             else:
-                await call_handler(handler, ctx, msg, event, BOT_EXECUTION_TIMEOUT, _bot_executor)
+                await call_handler(handler, ctx, msg, event, limit, _bot_executor)
             if ctx.replies_sent > 0:
                 result = "replied"
         except TimeoutError:
             result = "timeout"
-            error = f"execution exceeded {BOT_EXECUTION_TIMEOUT:.0f}s timeout"
+            error = f"execution exceeded {limit:.0f}s timeout (the bot's Time limit, Limits)"
             self.log("ERROR", bot.name, error)
         except Exception as exc:  # noqa: BLE001 - operator code can raise anything
             result = "error"
@@ -1105,13 +1138,14 @@ class BotEngine:
 
         start = time.monotonic()
         error: str | None = None
+        limit = ctx.time_limit_seconds
         try:
             if legacy:
-                await call_legacy(code, ctx, msg, BOT_EXECUTION_TIMEOUT, _bot_executor)
+                await call_legacy(code, ctx, msg, limit, _bot_executor)
             else:
-                await call_handler(handler, ctx, msg, None, BOT_EXECUTION_TIMEOUT, _bot_executor)
+                await call_handler(handler, ctx, msg, None, limit, _bot_executor)
         except TimeoutError:
-            error = f"execution exceeded {BOT_EXECUTION_TIMEOUT:.0f}s timeout"
+            error = f"execution exceeded {limit:.0f}s timeout (the bot's Time limit, Limits)"
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
         duration_ms = int((time.monotonic() - start) * 1000)

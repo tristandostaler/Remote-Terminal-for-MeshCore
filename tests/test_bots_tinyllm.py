@@ -975,11 +975,29 @@ class TestReferenceNotes:
                 monkeypatch,
                 runtime,
                 BotTestRequest(text="ask tx power"),
-                settings={"context_tokens": n_ctx},
+                settings={"context_tokens": n_ctx, "notes_max_chars": 3000},
             )
             sizes[n_ctx] = len(runtime.asked[0][0][0]["content"])
             assert runtime.n_ctx == int(n_ctx)
         assert sizes["2048"] > sizes["512"] * 2
+
+    async def test_notes_are_capped_so_the_model_has_less_to_read(
+        self, test_db, monkeypatch, notes
+    ):
+        (notes / "big.md").write_text(
+            "".join(f"## TX power note {n}\n{'tx power detail ' * 30}\n" for n in range(12))
+        )
+        sent = {}
+        for cap in (None, 1500):
+            runtime = _FakeRuntime()
+            settings = {"context_tokens": "2048"}
+            if cap:
+                settings["notes_max_chars"] = cap
+            await _run(monkeypatch, runtime, BotTestRequest(text="ask tx power"), settings=settings)
+            system = runtime.asked[0][0][0]["content"]
+            sent[cap] = len(system[system.index("Reference notes") :])
+        assert sent[None] <= 700 + 80, "the default cap holds with a big context"
+        assert sent[1500] > sent[None]
 
     async def test_overflow_drops_history_then_notes(self, test_db, monkeypatch, notes):
         class Picky(_FakeRuntime):
@@ -1203,8 +1221,10 @@ class TestDocsIndex:
             "can I use bots on public": "Which channel",
             "how often should I send adverts": "how often",
             # french-english.md
-            "comment ajouter une région": "tâches MeshCore",
-            "comment redémarrer le répéteur": "tâches MeshCore",
+            # French questions reach the English guides through accents and
+            # the starter synonyms (ajouter = add, redemarrer = reboot).
+            "comment ajouter une région": "Add a region",
+            "comment redémarrer le répéteur": "Reboot",
             "au secours": "phrases d'urgence",
             "how do you say help in french": "Everyday phrases",
         }
@@ -1533,6 +1553,31 @@ class TestReviewFixes:
         llm_docs.write_bots_page(tmp_path, [])
         assert "ping" not in page.read_text()
 
+    async def test_engine_start_warms_the_notes_index(self, test_db, monkeypatch, tmp_path):
+        import asyncio
+
+        from app.bots.bots_utils.tinyllm import llm_docs
+        from app.bots.engine import BotEngine
+        from app.repository.bots import BotRepository
+
+        built = []
+        index = llm_docs.DocsIndex(tmp_path / "docs")
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: built.append(1) or index)
+        entry = get_library_entry("tinyllm")
+        await BotRepository.create(
+            name="tinyllm-warm", code=entry["code"], enabled=True, builtin_key="tinyllm"
+        )
+        engine = BotEngine()
+        await engine.start()
+        try:
+            for _ in range(50):
+                if built:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            await engine.stop()
+        assert built, "the index is built at startup, not on the first question"
+
     def test_settings_are_grouped_and_ordered(self):
         schema = get_library_entry("tinyllm")["settings_schema"]
         sections = [f["label"] for f in schema if f["type"] == "section"]
@@ -1547,3 +1592,182 @@ class TestReviewFixes:
         assert by_key["system_prompt"]["type"] == "textarea"
         assert by_key["check_notes_with_model"]["show_when"] == {"key": "use_docs", "value": "true"}
         assert schema[0]["type"] == "section"
+
+
+class TestSynonyms:
+    """synonyms.txt in the docs folder: the operator's own word groups."""
+
+    def test_parsing_keeps_single_word_groups(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        path = tmp_path / "synonyms.txt"
+        path.write_text(
+            "# comment line\n"
+            "reboot, restart  # trailing comment\n"
+            "wardrive = wardriving\n"
+            "power outage, blackout\n"  # a phrase is skipped, leaving one word
+            "the, a\n"  # stopwords only
+        )
+        synonyms = llm_docs.load_synonyms(path)
+        assert synonyms["reboot"] == {"restart"} and synonyms["restart"] == {"reboot"}
+        assert synonyms["wardrive"] == {"wardriv"}
+        assert "blackout" not in synonyms
+        assert "the" not in synonyms
+        assert llm_docs.load_synonyms(tmp_path / "missing.txt") == {}
+
+    def test_a_synonym_finds_the_note_and_edits_apply_at_once(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        (tmp_path / "notes.md").write_text("## Wardriving logger\nLogs where packets were heard.\n")
+        index = llm_docs.DocsIndex(tmp_path)
+        assert index.search("wardrive", 500) == []
+        (tmp_path / "synonyms.txt").write_text("wardrive, wardriving\n")
+        assert index.search("wardrive", 500)[0].title == "Wardriving logger"
+
+    def test_a_rare_synonym_does_not_outweigh_the_asked_word(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        (tmp_path / "en.md").write_text("## Add a region\nregion put adds a region.\n")
+        (tmp_path / "fr.md").write_text(
+            "## French words\najouter une region = add a region, ajouter ajouter.\n"
+        )
+        (tmp_path / "synonyms.txt").write_text("ajouter, add\n")
+        index = llm_docs.DocsIndex(tmp_path)
+        assert index.search("how do I add a region", 500)[0].title == "Add a region"
+
+    def test_the_starter_list_is_created_once_and_never_overwritten(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        folder = tmp_path / "docs"
+        llm_docs.seed_docs(folder)
+        mine = folder / llm_docs.SYNONYMS_FILE
+        assert "reboot, restart" in mine.read_text()
+        mine.write_text("wardrive, wardriving\n")
+        llm_docs.seed_docs(folder)
+        assert mine.read_text() == "wardrive, wardriving\n"
+
+    def test_the_starter_list_never_steers_toward_a_factory_reset(self):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        index = llm_docs.DocsIndex(llm_docs.SHIPPED_DOCS_DIR)
+        for question in ("how do I restart the repeater", "how do I delete a region"):
+            titles = [s.title for s in index.search(question, 700)]
+            assert titles and not any("Factory" in t for t in titles), question
+
+
+class TestMissedQuestions:
+    def test_counting_skips_small_talk_and_keeps_the_most_asked(self, monkeypatch):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        missed = {}
+        assert not llm_docs.record_missed(missed, "hello", 1)
+        assert llm_docs.record_missed(missed, "Who runs the hill repeater?", 1)
+        assert llm_docs.record_missed(missed, "who runs   the hill repeater", 2)
+        assert missed == {"who runs the hill repeater": [2, 2]}
+
+        monkeypatch.setattr(llm_docs, "MISSED_MAX", 3)
+        for n in range(5):
+            llm_docs.record_missed(missed, f"rare question {n}", 10 + n)
+        assert len(missed) == 3
+        assert "who runs the hill repeater" in missed, "the most asked survives"
+        assert [q for q, _, _ in llm_docs.top_missed(missed)][0] == "who runs the hill repeater"
+
+    def test_the_file_lists_them_most_asked_first_and_is_not_searched(self, tmp_path):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        llm_docs.write_missed_file(tmp_path, {"b question": [1, 0], "a question": [3, 0]})
+        lines = (tmp_path / llm_docs.MISSED_FILE).read_text().splitlines()
+        body = [line for line in lines if line and not line.startswith("#")]
+        assert body[0].startswith("3x  a question") and body[1].startswith("1x  b question")
+        assert llm_docs.DocsIndex(tmp_path).search("question", 500) == []
+
+    async def test_a_question_without_notes_is_recorded(self, tmp_path, monkeypatch):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        index = llm_docs.DocsIndex(tmp_path)
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: index)
+        ns = load_bot_code(get_library_entry("tinyllm")["code"]).namespace
+
+        class Ctx:
+            state = {}
+
+        await ns["note_missed"](Ctx, "who runs the hill repeater")
+        assert Ctx.state[ns["MISSED_STATE"]]["who runs the hill repeater"][0] == 1
+        assert "who runs the hill repeater" in (tmp_path / llm_docs.MISSED_FILE).read_text()
+
+    async def test_admins_list_and_clear_them_by_dm(self, test_db, monkeypatch):
+        admin = "ef" * 32
+        runtime = _FakeRuntime()
+        replies = await _run(
+            monkeypatch,
+            runtime,
+            BotTestRequest(text="ask missed", is_dm=True, sender_key=admin),
+            admin_key=admin,
+        )
+        assert replies == ["🤖 No missed questions yet: every question found notes."]
+        assert runtime.asked == [], "the command never reaches the model"
+
+        stranger = await _run(
+            monkeypatch,
+            _FakeRuntime(),
+            BotTestRequest(text="ask missed", is_dm=True, sender_key="12" * 32),
+            admin_key=admin,
+        )
+        assert stranger == ["Paris is the capital of France."], "anyone else gets an answer"
+
+    async def test_the_list_shows_the_most_asked_and_clears(self, tmp_path, monkeypatch):
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        index = llm_docs.DocsIndex(tmp_path)
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: index)
+        ns = load_bot_code(get_library_entry("tinyllm")["code"]).namespace
+        sent = []
+
+        class Ctx:
+            state = {ns["MISSED_STATE"]: {"a question": [3, 5], "b question": [1, 9]}}
+
+            @staticmethod
+            async def reply(text):
+                sent.append(text)
+
+            reply_split = reply
+
+        await ns["show_missed"](Ctx)
+        assert "3x a question\n1x b question" in sent[-1]
+        await ns["show_missed"](Ctx, clear=True)
+        assert Ctx.state[ns["MISSED_STATE"]] == {}
+        assert sent[-1] == "🤖 Missed questions cleared."
+
+
+class TestTimeLimits:
+    async def test_the_deadline_follows_the_bots_time_limit(self, test_db, monkeypatch):
+        from app.repository.bots import BotRepository
+
+        runtime = _FakeRuntime()
+        monkeypatch.setattr(llm, "llm_runtime", runtime)
+        entry = get_library_entry("tinyllm")
+        bot = await BotRepository.create(
+            name="tinyllm-limit", code=entry["code"], timeout_seconds=30
+        )
+        response = await BotEngine().test_run(bot, BotTestRequest(text="ask hi"))
+        assert response.error is None, response.error
+        kwargs = runtime.asked[0][1]
+        # 30 s, minus the send reserve and the model process's grace period.
+        assert 24 < kwargs["deadline_seconds"] <= 30 - 1.5 - llm.ANSWER_GRACE_SECONDS
+        assert kwargs["answer_seconds"] == 6
+
+    def test_writing_time_counts_from_the_first_word(self):
+        """A slow prompt read must not cut the answer to its first word."""
+
+        class SlowReader:
+            def create_chat_completion(self, **kwargs):
+                time.sleep(0.3)  # reading the prompt
+                for word in ["one ", "two ", "three ", "four "]:
+                    yield {"choices": [{"delta": {"content": word}}]}
+                    time.sleep(0.02)
+
+        base = {"messages": [], "max_tokens": 10, "temperature": 0}
+        written = llm._stream_answer(SlowReader(), {**base, "deadline": 5, "answer_seconds": 0.2})
+        assert written == "one two three four "
+        cut = llm._stream_answer(SlowReader(), {**base, "deadline": 0.1})
+        assert cut == "one ", "the hard deadline still stops it"

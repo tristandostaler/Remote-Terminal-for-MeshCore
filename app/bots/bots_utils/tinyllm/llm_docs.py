@@ -23,7 +23,9 @@ from __future__ import annotations
 import logging
 import math
 import re
+import shutil
 import threading
+import time
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
@@ -229,7 +231,10 @@ class Section:
     source: str
 
     def render(self) -> str:
-        return f"[{self.title}] {self.text}"
+        # The last two heading levels say enough ("Regions > Add a region");
+        # the full path repeats a file's top heading in every note the model
+        # has to read.
+        return f"[{' > '.join(self.title.split(' > ')[-2:])}] {self.text}"
 
 
 def _fold(word: str) -> str:
@@ -323,6 +328,7 @@ class DocsIndex:
         self._titles: list[set[str]] = []
         self._lengths: list[int] = []
         self._df: Counter[str] = Counter()
+        self._synonyms: dict[str, set[str]] = {}
 
     def _files(self) -> list[Path]:
         if not self.folder.is_dir():
@@ -331,7 +337,9 @@ class DocsIndex:
 
     def _refresh(self) -> None:
         files = self._files()
-        signature = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in files)
+        synonyms_file = self.folder / SYNONYMS_FILE
+        stats = [(p, p.stat()) for p in [*files, synonyms_file] if p.is_file()]
+        signature = tuple((str(p), st.st_mtime_ns, st.st_size) for p, st in stats)
         if signature == self._signature:
             return
         sections: list[Section] = []
@@ -346,20 +354,27 @@ class DocsIndex:
         self._titles = [set(_tokens(s.title)) for s in sections]
         self._lengths = [sum(d.values()) for d in docs]
         self._df = Counter(term for d in docs for term in d)
+        self._synonyms = load_synonyms(synonyms_file)
         self._signature = signature
 
-    def _relevant(self, i: int, terms: set[str]) -> bool:
-        """The coverage part of the relevance gate (see MIN_COVERAGE)."""
+    def _relevant(self, i: int, groups: dict[str, set[str]]) -> bool:
+        """The coverage part of the relevance gate (see MIN_COVERAGE).
+
+        ``groups`` maps each question word to itself plus its synonyms; a word
+        is matched when any of them is in the section."""
         # Words are what the asker typed: a dotted name also contributes its
         # parts, which must not count as extra words matched.
-        words = {t for t in terms if "." not in t} or terms
-        matched = {t for t in words if t in self._docs[i]}
+        words = {t for t in groups if "." not in t} or set(groups)
+        doc = self._docs[i]
+        matched = {t for t in words if any(a in doc for a in groups[t])}
         if len(words) == 1:
             # One word: in the heading, or rare enough to be what the section
             # is about (a distinctive name, not a word every section uses).
             (word,) = words
-            rare = self._df[word] <= max(2, len(self._docs) * RARE_WORD_SHARE)
-            return bool(matched) and (word in self._titles[i] or rare)
+            found = [a for a in groups[word] if a in doc]
+            in_title = any(a in self._titles[i] for a in found)
+            rare = any(self._df[a] <= max(2, len(self._docs) * RARE_WORD_SHARE) for a in found)
+            return bool(found) and (in_title or rare)
         return len(matched) >= MIN_MATCHED_TERMS and len(matched) >= MIN_COVERAGE * len(words)
 
     def search(self, query: str, max_chars: int) -> list[Section]:
@@ -370,6 +385,7 @@ class DocsIndex:
             return []
         with self._lock:
             self._refresh()
+            groups = {t: self._synonyms.get(t, set()) | {t} for t in terms}
             count = len(self._docs)
             if not count:
                 return []
@@ -377,15 +393,23 @@ class DocsIndex:
             scored: list[tuple[float, int]] = []
             for i, doc in enumerate(self._docs):
                 score = 0.0
-                for term in terms:
-                    tf = doc.get(term, 0)
-                    if not tf:
-                        continue
-                    df = self._df[term]
-                    idf = math.log(1 + (count - df + 0.5) / (df + 0.5))
-                    norm = _K1 * (1 - _B + _B * self._lengths[i] / average)
-                    score += idf * tf * (_K1 + 1) / (tf + norm)
-                if score > 0 and self._relevant(i, terms):
+                norm = _K1 * (1 - _B + _B * self._lengths[i] / average)
+                for word, alternatives in groups.items():
+                    # A word scores as its best-matching form, so a synonym
+                    # can stand in for it but never counts twice -- and with
+                    # the asked word's own rarity when the notes use it, so a
+                    # rare synonym ("ajouter" for "add") cannot outweigh it.
+                    asked_df = self._df[word]
+                    best = 0.0
+                    for term in alternatives:
+                        tf = doc.get(term, 0)
+                        if not tf:
+                            continue
+                        df = asked_df or self._df[term]
+                        idf = math.log(1 + (count - df + 0.5) / (df + 0.5))
+                        best = max(best, idf * tf * (_K1 + 1) / (tf + norm))
+                    score += best
+                if score > 0 and self._relevant(i, groups):
                     scored.append((score, i))
             scored.sort(reverse=True)
             picked: list[Section] = []
@@ -406,6 +430,88 @@ class DocsIndex:
                 picked.append(section)
                 used += size
             return picked
+
+
+# Words that mean the same thing, one group per line, in the docs folder. The
+# operator's file: created once from the shipped starter list, never
+# overwritten, and re-read whenever it changes.
+SYNONYMS_FILE = "synonyms.txt"
+
+
+def load_synonyms(path: Path) -> dict[str, set[str]]:
+    """``word -> every other word in its groups``, folded like the notes.
+
+    One group per line, words separated by commas (or ``=``); ``#`` starts a
+    comment. Only single words count: an entry that is several words or a
+    stopword is skipped, because the search matches words, not phrases."""
+    synonyms: dict[str, set[str]] = {}
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return synonyms
+    for line in text.splitlines():
+        line = line.split("#", 1)[0]
+        group: set[str] = set()
+        for entry in re.split(r"[,=]", line):
+            tokens = _tokens(entry)
+            if len(tokens) == 1:
+                group.add(tokens[0])
+        if len(group) < 2:
+            continue
+        for word in group:
+            synonyms.setdefault(word, set()).update(group - {word})
+    return synonyms
+
+
+# Questions that found no notes, so the operator knows what to write next.
+# Kept in the bot's state; this file in the docs folder is just their view.
+MISSED_FILE = "missed-questions.txt"
+MISSED_MAX = 200
+
+
+def record_missed(missed: dict, question: str, now: float) -> bool:
+    """Count ``question`` in ``missed`` (``text -> [count, last_seen]``).
+
+    False when there is nothing to learn from it: small talk, or a question
+    with no searchable words."""
+    if not _tokens(question):
+        return False
+    text = " ".join(question.lower().split()).strip(" ?!.")[:120]
+    count, _ = missed.get(text, (0, 0))
+    missed[text] = [count + 1, int(now)]
+    if len(missed) > MISSED_MAX:
+        # Drop the least asked, oldest first.
+        for key, _ in sorted(missed.items(), key=lambda kv: (kv[1][0], kv[1][1]))[
+            : len(missed) - MISSED_MAX
+        ]:
+            del missed[key]
+    return True
+
+
+def top_missed(missed: dict, limit: int | None = None) -> list[tuple[str, int, int]]:
+    """``(question, count, last_seen)``, most asked first, then most recent."""
+    rows = sorted(
+        ((q, int(v[0]), int(v[1])) for q, v in missed.items()), key=lambda r: (-r[1], -r[2])
+    )
+    return rows[:limit] if limit else rows
+
+
+def write_missed_file(folder: Path, missed: dict) -> None:
+    lines = [
+        "# Questions the tinyllm bot was asked that found no reference notes,",
+        "# most asked first. Write a .md note that answers them (use the words",
+        "# people asked with), or add those words to synonyms.txt. Rewritten by",
+        "# the bot; DM it 'ask missed clear' (admins) to start over.",
+        "",
+    ]
+    for question, count, last_seen in top_missed(missed):
+        day = time.strftime("%Y-%m-%d", time.localtime(last_seen))
+        lines.append(f"{count}x  {question}  (last {day})")
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / MISSED_FILE).write_text("\n".join(lines) + "\n")
+    except OSError as exc:
+        logger.warning("tinyllm docs: cannot write %s: %s", MISSED_FILE, exc)
 
 
 def _shortened(section: Section, max_chars: int) -> Section | None:
@@ -446,6 +552,10 @@ def seed_docs(folder: Path) -> None:
                 target.write_bytes(content)
         for name in previous - shipped.keys():
             (folder / name).unlink(missing_ok=True)
+        # The synonyms list is the operator's to edit: only ever created.
+        starter = SHIPPED_DOCS_DIR / SYNONYMS_FILE
+        if starter.is_file() and not (folder / SYNONYMS_FILE).exists():
+            shutil.copyfile(starter, folder / SYNONYMS_FILE)
         manifest.write_text("".join(f"{name}\n" for name in sorted(shipped)))
     except OSError as exc:
         logger.warning("tinyllm docs: cannot seed %s: %s", folder, exc)

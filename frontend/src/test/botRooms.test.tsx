@@ -30,6 +30,7 @@ function makeBot(overrides: Partial<Bot> = {}): Bot {
     cooldown_seconds: 0,
     per_user_cooldown_seconds: 0,
     queue_threshold_seconds: 0,
+    timeout_seconds: 10,
     settings_schema: [],
     settings: {},
     ui_triggers: [],
@@ -171,6 +172,27 @@ describe('bots in rooms', () => {
 
     await waitFor(() => expect(updateBot).toHaveBeenCalled());
     expect(updateBot.mock.calls[0][1].private).toBe(true);
+  });
+
+  it('saves the time limit, kept between 1 and 120 seconds', async () => {
+    vi.spyOn(api, 'getBot').mockResolvedValue(makeBot());
+    const updateBot = vi.spyOn(api, 'updateBot').mockResolvedValue(makeBot());
+
+    render(
+      <BotEditor
+        botId="bot-1"
+        channels={[]}
+        contacts={[room]}
+        onBack={vi.fn()}
+        onDeleted={vi.fn()}
+      />
+    );
+
+    fireEvent.change(await screen.findByLabelText('Time limit (s)'), { target: { value: '500' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save/i }));
+
+    await waitFor(() => expect(updateBot).toHaveBeenCalled());
+    expect(updateBot.mock.calls[0][1].timeout_seconds).toBe(120);
   });
 
   it('answers no room at all when Only is left empty', async () => {

@@ -47,6 +47,7 @@ function makeBot(): Bot {
     cooldown_seconds: 0,
     per_user_cooldown_seconds: 0,
     queue_threshold_seconds: 0,
+    timeout_seconds: 10,
     settings_schema: schema,
     settings: {
       endpoint: 'https://api.example.test/incoming',

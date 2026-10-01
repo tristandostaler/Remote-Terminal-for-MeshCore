@@ -7,8 +7,9 @@ catalog in ``app/bots/bots_utils/tinyllm/llm.py``.
 
 The first question after enabling (or after switching models) starts a one-time
 download plus load in the background and says so; ``ask`` on its own reports
-progress. Bot runs are cut off at 10 s, so answers are generated against a
-deadline and whatever was produced by then is sent. One question is answered
+progress. A bot run is cut off at its Time limit (30 s for this bot by
+default, set under Limits), so answers are generated against a deadline that
+fits inside it and whatever was produced by then is sent. One question is answered
 at a time.
 
 Needs the optional ``llm`` extra: ``uv sync --extra llm``.
@@ -19,6 +20,7 @@ import re
 import time
 
 from app.bots.bots_utils.tinyllm.llm import (
+    ANSWER_GRACE_SECONDS,
     CONTEXT_CHOICES,
     CONTEXT_TOKENS,
     CUSTOM_MODEL,
@@ -33,23 +35,31 @@ from app.bots.bots_utils.tinyllm.llm import (
 from remoteterm import bot
 
 # How long a question waits for a reload before answering "warming up", and
-# the time a run may use before the engine's 10 s timeout, leaving room to send.
+# what the run keeps of the bot's Time limit for sending the reply.
 RELOAD_WAIT_SECONDS = 4
-RUN_BUDGET_SECONDS = 7.5
+SEND_RESERVE_SECONDS = 1.5
+# The engine stops a run at the bot's Time limit (Limits on its Settings tab).
+# A model on a Pi needs more than the 10 s every other bot gets.
+TIME_LIMIT_SECONDS = 30
 # DM memory is read back from the conversation itself (the messages table):
 # incoming messages that were questions to this bot, and the answers it sent
 # right after them. `ask reset` / `ask forget` is a message too, so history
 # simply stops there; so does an hour of silence.
 KEYWORDS = ("ask", "ai", "llm", "tinyllm")
 RESET_WORDS = frozenset({"reset", "forget"})
+# Admin DM: "ask missed" lists questions that found no notes, "ask missed
+# clear" empties the list. Anyone else asking "missed" just gets an answer.
+MISSED_WORD = "missed"
+MISSED_SHOWN = 5
+MISSED_STATE = "missed_questions"
 SESSION_IDLE_SECONDS = 3600
 # The most history text sent to the model: the context window is 512 tokens,
-# and on a Pi every token of prompt costs time out of the 10 s run.
+# and on a Pi every token of prompt costs time out of the run.
 HISTORY_MAX_CHARS = 1000
-# The bot answers inside its 10 s run (a multi-part answer adds ~2 s a part),
-# so only what was sent this soon after a question can be its answer -- not
-# something the operator typed into the same DM later.
-ANSWER_WINDOW_SECONDS = 30
+# The bot answers inside its run (Time limit at most 120 s; a multi-part
+# answer adds ~2 s a part), so only what was sent this soon after a question
+# can be its answer -- not something the operator typed into the DM later.
+ANSWER_WINDOW_SECONDS = 150
 # Rough prompt budgeting without a tokenizer in the server (only the model
 # process has one): ~3 characters per token is conservative for English, and
 # the chat template adds a little. What is left of the context after the
@@ -62,6 +72,9 @@ TEMPLATE_OVERHEAD_CHARS = 200
 # that must be left in the run to try it at all (the answer still follows).
 NOTES_CHECK_SECONDS = 2
 NOTES_CHECK_MIN_SECONDS = 4
+# Notes are capped well below what the context could hold: the model reads them
+# before answering, and on a Pi that reading is most of the wait.
+NOTES_MAX_CHARS = 700
 NOTES_HEADER = "\n\nReference notes (use them only if they answer the question):\n"
 _PLACEHOLDER_RE = re.compile(r"\{(radio_name|sender|time|date)\}")
 # A leading command prefix (!, ?, ...) or @[mention], then a trigger word.
@@ -90,9 +103,10 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.4.1",
+    "version": "1.5.0",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
+    "timeout_seconds": TIME_LIMIT_SECONDS,
     "settings_schema": [
         {
             "key": "_model",
@@ -211,10 +225,13 @@ BOT_META = {
             "type": "float",
             "default": 6,
             "min": 2,
-            "max": 7,
+            "max": 60,
             "help": (
-                "Generation stops here and the text so far is sent. Bot runs end at 10 s, and "
-                "the reply still has to go out, so this stays at 7 or less."
+                "How long the model may spend writing, counted from its first word; the "
+                "text so far is sent when it stops. Reading the question and notes comes "
+                "before that and is not counted. The whole run still has to fit in the "
+                "bot's Time limit (Limits; 30 s by default), and the bot stops early if "
+                "that is closer."
             ),
         },
         {
@@ -249,7 +266,9 @@ BOT_META = {
                 "page about this node's bots, private ones left out) and give the best "
                 "matches to the model with each question. Add your own .md files "
                 "there; the shipped ones are overwritten on restart. Each heading "
-                "starts a searchable section."
+                "starts a searchable section. synonyms.txt there groups words that mean "
+                "the same thing, and missed-questions.txt lists questions that found no "
+                "notes (admins can DM 'ask missed')."
             ),
         },
         {
@@ -264,6 +283,21 @@ BOT_META = {
                 "meaning. Costs one short extra model pass (under a second on a Pi 5 with a "
                 "tiny model, more with bigger ones), skipped when time is short. Worth it with "
                 "Qwen2.5 1.5B or Llama 3.2 1B; the tiny models judge this poorly."
+            ),
+        },
+        {
+            "key": "notes_max_chars",
+            "show_when": {"key": "use_docs", "value": "true"},
+            "label": "Most reference notes per question (characters)",
+            "type": "int",
+            "default": NOTES_MAX_CHARS,
+            "min": 200,
+            "max": 3000,
+            "help": (
+                "The model reads every character of the notes before it starts answering, "
+                "and reading is the slow part on a Pi: each 300 characters is about 100 "
+                "tokens, roughly 1 to 4 extra seconds there. 700 fits the best section or "
+                "two; raise it for fuller answers on faster hardware."
             ),
         },
         {
@@ -293,7 +327,7 @@ BOT_META = {
                     "label": "2048 tokens (~48 MB more memory)",
                     "description": (
                         "Plenty of room for notes and history; for a desktop-class CPU. On a "
-                        "Pi a long prompt may not finish inside the 10 s bot limit."
+                        "Pi a long prompt may not finish inside the bot's Time limit."
                     ),
                 },
             ],
@@ -353,6 +387,7 @@ BOT_META = {
         "history_messages": 10,
         "use_docs": True,
         "check_notes_with_model": False,
+        "notes_max_chars": NOTES_MAX_CHARS,
         "context_tokens": str(CONTEXT_TOKENS),
         "temperature": 0.7,
         "time_limit_seconds": 6,
@@ -405,6 +440,37 @@ def reference_notes(query, max_chars):
         return "", []
     text = NOTES_HEADER + "\n".join(s.render() for s in sections)
     return text, [s.title for s in sections]
+
+
+async def note_missed(ctx, question):
+    """Remember a question the notes could not answer, for the operator."""
+    from app.bots.bots_utils.tinyllm import llm_docs
+
+    missed = ctx.state.setdefault(MISSED_STATE, {})
+    if llm_docs.record_missed(missed, question, time.time()):
+        folder = llm_docs.docs_index().folder
+        await asyncio.to_thread(llm_docs.write_missed_file, folder, missed)
+
+
+async def show_missed(ctx, clear=False):
+    from app.bots.bots_utils.tinyllm import llm_docs
+
+    missed = ctx.state.setdefault(MISSED_STATE, {})
+    folder = llm_docs.docs_index().folder
+    if clear:
+        missed.clear()
+        await asyncio.to_thread(llm_docs.write_missed_file, folder, missed)
+        await ctx.reply("🤖 Missed questions cleared.")
+        return
+    rows = llm_docs.top_missed(missed, MISSED_SHOWN)
+    if not rows:
+        await ctx.reply("🤖 No missed questions yet: every question found notes.")
+        return
+    lines = [f"{count}x {question}" for question, count, _ in rows]
+    await ctx.reply_split(
+        f"🤖 Most asked without notes ({len(missed)} in all, see "
+        f"{llm_docs.MISSED_FILE}):\n" + "\n".join(lines)
+    )
 
 
 def notes_check_messages(question, titles):
@@ -528,6 +594,13 @@ def panel_history(transcript, limit, max_chars=HISTORY_MAX_CHARS):
     return _trimmed(conversation_turns(rows, now), limit, max_chars)
 
 
+def run_budget(ctx):
+    """Seconds this run may use, from the bot's Time limit, keeping room to
+    send the reply."""
+    limit = float(getattr(ctx, "time_limit_seconds", 10) or 10)
+    return max(2.0, limit - SEND_RESERVE_SECONDS)
+
+
 def _number(ctx, key, default, low, high):
     try:
         value = float(ctx.settings.get(key, default))
@@ -548,6 +621,10 @@ async def ask(ctx, msg):
     if msg.is_dm and msg.arg_text.strip().lower() in RESET_WORDS:
         # The reset message itself is the marker: history stops at it.
         await ctx.reply("🤖 Conversation forgotten; starting fresh.")
+        return
+    words = msg.arg_text.strip().lower().split()
+    if msg.is_dm and ctx.sender_is_admin and words[:1] == [MISSED_WORD]:
+        await show_missed(ctx, clear=words[1:] == ["clear"])
         return
     started = time.monotonic()
     if ctx.settings.get("use_docs", True):
@@ -622,14 +699,23 @@ async def ask(ctx, msg):
         earlier = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
         history_chars = sum(len(m["content"]) for m in history)
         room = free_chars - min(history_chars, free_chars // 2)
+        room = min(room, int(_number(ctx, "notes_max_chars", NOTES_MAX_CHARS, 200, 3000)))
+        searched = time.monotonic()
         notes, titles = await asyncio.to_thread(reference_notes, f"{question} {earlier}", room)
+        if not titles and not ctx.is_test:
+            await note_missed(ctx, question)
+        ctx.log(
+            f"notes: {len(notes)} chars from {len(titles)} section(s) "
+            f"in {(time.monotonic() - searched) * 1000:.0f} ms"
+            + (f": {'; '.join(titles)}" if titles else "")
+        )
         if notes:
             history = _trimmed(history, len(history), free_chars - len(notes))
         # Optional second opinion: the keyword gate matches words, not meaning
         # ("what time is it" matches a Clock section). A quick yes/no from the
         # model itself filters those -- only when there are notes to judge,
         # and only with time to spare.
-        time_left = RUN_BUDGET_SECONDS - (time.monotonic() - started)
+        time_left = run_budget(ctx) - (time.monotonic() - started)
         if (
             notes
             and ctx.settings.get("check_notes_with_model")
@@ -657,15 +743,14 @@ async def ask(ctx, msg):
             [system, *earlier, {"role": "user", "content": question}],
             max_tokens=max_tokens,
             temperature=_number(ctx, "temperature", 0.7, 0.0, 1.5),
-            # The whole run must end inside the engine's 10 s: time spent
-            # reloading comes out of the answer's budget.
+            # The whole run must end inside the bot's Time limit: what the
+            # run already used, and the grace the model process gets before
+            # it is presumed stuck, come out of the hard deadline.
             deadline_seconds=max(
                 1.5,
-                min(
-                    _number(ctx, "time_limit_seconds", 6, 2, 7),
-                    RUN_BUDGET_SECONDS - (time.monotonic() - started),
-                ),
+                run_budget(ctx) - (time.monotonic() - started) - ANSWER_GRACE_SECONDS,
             ),
+            answer_seconds=_number(ctx, "time_limit_seconds", 6, 2, 60),
         )
 
     # Budgeting is an estimate; if the prompt still overflows the context, drop
@@ -674,6 +759,7 @@ async def ask(ctx, msg):
     for attempt in ((history, bool(notes)), ([], bool(notes)), ([], False)):
         if attempt not in attempts:
             attempts.append(attempt)
+    asked = time.monotonic()
     try:
         for n, (earlier, with_notes) in enumerate(attempts):
             try:
@@ -699,6 +785,10 @@ async def ask(ctx, msg):
             await ctx.reply("🤖 Sorry, the model failed to answer.")
         return
 
+    ctx.log(
+        f"model answered in {time.monotonic() - asked:.1f} s "
+        f"(whole run {time.monotonic() - started:.1f} s)"
+    )
     answer = " ".join(answer.split()) or "(no answer)"
     if not msg.is_dm and msg.sender_name:
         # @[name] is the mention syntax mesh clients highlight.

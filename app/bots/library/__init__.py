@@ -22,6 +22,7 @@ dict (read by exec'ing the source through the normal loader):
         "cooldown_seconds": 0,         # optional
         "per_user_cooldown_seconds": 0,
         "queue_threshold_seconds": 0,
+        "timeout_seconds": 10,         # optional; how long one run may take
     }
 
 All seeded bots are scoped to the default bot channels (``app/bot_scope.py``)
@@ -49,6 +50,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 CODE_DIR = Path(__file__).parent / "code"
+# How long one bot run may take unless BOT_META or the operator says otherwise.
+DEFAULT_TIMEOUT_SECONDS = 10.0
 
 
 class LibraryError(ValueError):
@@ -247,6 +250,7 @@ async def ensure_seeded() -> int:
                 cooldown_seconds=float(entry.get("cooldown_seconds", 0)),
                 per_user_cooldown_seconds=float(entry.get("per_user_cooldown_seconds", 0)),
                 queue_threshold_seconds=float(entry.get("queue_threshold_seconds", 0)),
+                timeout_seconds=float(entry.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)),
                 settings_schema=entry.get("settings_schema") or [],
                 settings=entry.get("settings") or {},
                 builtin_key=entry["key"],
@@ -262,6 +266,14 @@ async def ensure_seeded() -> int:
                 category=entry["category"],
                 settings_schema=entry.get("settings_schema") or [],
                 builtin_version=entry["version"],
+                # A new library time limit reaches a bot still on the stock
+                # default; one the operator set is theirs.
+                **(
+                    {"timeout_seconds": float(entry["timeout_seconds"])}
+                    if "timeout_seconds" in entry
+                    and existing.timeout_seconds == DEFAULT_TIMEOUT_SECONDS
+                    else {}
+                ),
             )
             changed += 1
         elif not existing.long_description and entry.get("long_description"):

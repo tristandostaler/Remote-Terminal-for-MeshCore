@@ -95,9 +95,17 @@ operators).
   the process-wide `llm_runtime` singleton — bot code is re-exec'd on every
   settings save, so a model held in the bot's namespace would be reloaded each
   time. Download + load always run in a background thread (a first download
-  dwarfs the 10 s `BOT_EXECUTION_TIMEOUT`); a run only starts it and reports
-  progress. Generation streams tokens and stops at a deadline (≤ 7 s) so the
-  reply still goes out inside the timeout; one answer at a time.
+  dwarfs any run's time limit); a run only starts it and reports progress.
+  Each bot run is stopped at the bot's own `timeout_seconds` (column, migration
+  094; 10 s default, 1-120, editable under Limits, `BOT_META["timeout_seconds"]`
+  for a library default -- tinyllm ships 30 -- which a version refresh applies
+  only to a bot still on the stock 10). It reaches bot code as
+  `ctx.time_limit_seconds`. Generation streams tokens against two limits: a
+  hard deadline from that time limit (minus what the run used, the 1.5 s send
+  reserve and the model process's 3 s grace) that covers reading the prompt,
+  which llama.cpp cannot interrupt, and `answer_seconds` (the Answer time limit
+  setting) counted from the first token, so a slow prompt read does not cut the
+  answer to one word. One answer at a time.
   **Memory** (measured, SmolLM2 135M Q8: ~200 MB, ~45 MB unreclaimable): weights
   stay memory-mapped (reclaimable page cache), `n_ctx` 512 / `n_batch` 64, and
   `_check_memory` refuses a load when `available_memory_mb()` (min of
@@ -169,7 +177,22 @@ operators).
   `tests/test_bots_tinyllm.py` pins sample questions to their sections --
   rerun it after editing any shipped note. `this-node-bots.md` is not shipped:
   the bot writes it on every run from `ctx.get_enabled_bots()` (so private
-  bots never appear), only when it changed, and seeding never touches it. The bot budgets the context by characters (~3/token, no tokenizer
+  bots never appear), only when it changed, and seeding never touches it. Notes are capped by `notes_max_chars`
+  (default 700) well below what the context could hold: the model reads them
+  before answering, and on a Pi that prompt reading -- not the ~1 ms search --
+  is most of the wait. A rendered note carries only its last two heading
+  levels. The engine warms the index at startup (`_warm_tinyllm_notes`) when an
+  enabled tinyllm bot uses notes, and each run logs the notes size, search time
+  and model time. `synonyms.txt` in the docs folder (the operator's: created
+  once from `library/docs/synonyms.txt`, never overwritten, re-read when it
+  changes) groups single words; a question word matches through any word of
+  its group, scored with the asked word's own idf so a rare synonym cannot
+  outweigh it. Keep "reset"/"erase" out of the starter groups (they steer
+  restart/delete questions to factory reset; a test checks). Questions whose
+  search finds nothing (real runs only, not small talk) are counted in the
+  bot's state (`missed_questions`, capped at 200, least asked dropped) and
+  rendered to `missed-questions.txt` (not `.md`, never searched); an admin DM
+  `ask missed` lists the top 5 and `ask missed clear` empties it. The bot budgets the context by characters (~3/token, no tokenizer
   in the server): what is left after prompt, question and answer goes to
   history (up to half) and notes (the rest), searched with the question plus
   the previous one; overflow retries drop history, then notes. `context_tokens`
