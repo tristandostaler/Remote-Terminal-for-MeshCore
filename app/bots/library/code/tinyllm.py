@@ -41,6 +41,8 @@ SEND_RESERVE_SECONDS = 1.5
 # The engine stops a run at the bot's Time limit (Limits on its Settings tab).
 # A model on a Pi needs more than the 10 s every other bot gets.
 TIME_LIMIT_SECONDS = 30
+# Writing time, as a share of that limit (counted from the first word).
+ANSWER_TIME_PERCENT = 50
 # DM memory is read back from the conversation itself (the messages table):
 # incoming messages that were questions to this bot, and the answers it sent
 # right after them. `ask reset` / `ask forget` is a message too, so history
@@ -103,7 +105,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.5.0",
+    "version": "1.5.1",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "timeout_seconds": TIME_LIMIT_SECONDS,
@@ -220,18 +222,18 @@ BOT_META = {
             "help": "Lower is more predictable, higher more creative.",
         },
         {
-            "key": "time_limit_seconds",
-            "label": "Answer time limit (seconds)",
-            "type": "float",
-            "default": 6,
-            "min": 2,
-            "max": 60,
+            "key": "answer_time_percent",
+            "label": "Writing time (% of the bot's Time limit)",
+            "type": "int",
+            "default": ANSWER_TIME_PERCENT,
+            "min": 10,
+            "max": 100,
             "help": (
-                "How long the model may spend writing, counted from its first word; the "
-                "text so far is sent when it stops. Reading the question and notes comes "
-                "before that and is not counted. The whole run still has to fit in the "
-                "bot's Time limit (Limits; 30 s by default), and the bot stops early if "
-                "that is closer."
+                "How long the model may spend writing, as a share of the bot's Time limit "
+                "(Limits, 30 s by default): 50% of 30 s is up to 15 s. Counted from its "
+                "first word; the text so far is sent when it stops. Reading the question "
+                "and notes comes first and is not counted, and the whole run always ends "
+                "inside the Time limit, so writing stops sooner if that is closer."
             ),
         },
         {
@@ -390,7 +392,7 @@ BOT_META = {
         "notes_max_chars": NOTES_MAX_CHARS,
         "context_tokens": str(CONTEXT_TOKENS),
         "temperature": 0.7,
-        "time_limit_seconds": 6,
+        "answer_time_percent": ANSWER_TIME_PERCENT,
         "threads": 0,
         "unload_after_minutes": 5,
         "fast_arm_layout": False,
@@ -601,6 +603,12 @@ def run_budget(ctx):
     return max(2.0, limit - SEND_RESERVE_SECONDS)
 
 
+def answer_seconds(ctx):
+    """Writing time: the Writing time share of the bot's Time limit."""
+    share = _number(ctx, "answer_time_percent", ANSWER_TIME_PERCENT, 10, 100) / 100
+    return float(getattr(ctx, "time_limit_seconds", 10) or 10) * share
+
+
 def _number(ctx, key, default, low, high):
     try:
         value = float(ctx.settings.get(key, default))
@@ -750,7 +758,7 @@ async def ask(ctx, msg):
                 1.5,
                 run_budget(ctx) - (time.monotonic() - started) - ANSWER_GRACE_SECONDS,
             ),
-            answer_seconds=_number(ctx, "time_limit_seconds", 6, 2, 60),
+            answer_seconds=answer_seconds(ctx),
         )
 
     # Budgeting is an estimate; if the prompt still overflows the context, drop

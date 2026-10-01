@@ -58,6 +58,8 @@ def bot_time_limit(bot: Bot) -> float:
     except (TypeError, ValueError):
         return BOT_EXECUTION_TIMEOUT
     return min(BOT_TIMEOUT_MAX, max(BOT_TIMEOUT_MIN, value))
+
+
 SETTLE_DELAY_SECONDS = 2.0
 TICK_SECONDS = 15.0
 LOG_RING_SIZE = 500

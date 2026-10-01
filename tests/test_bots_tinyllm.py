@@ -759,6 +759,38 @@ class TestDmMemory:
         await _run(monkeypatch, runtime, BotTestRequest(text="ask hi", sender_key=ALICE))
         assert len(runtime.asked[1][0]) == 2
 
+    async def test_channels_and_rooms_never_get_past_messages(self, test_db, monkeypatch, tmp_path):
+        """Not from stored DMs, not from a transcript, not even to steer the
+        notes search: outside a DM the model sees only this question."""
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        (tmp_path / "radio.md").write_text(_NOTES)
+        index = llm_docs.DocsIndex(tmp_path)
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: index)
+        await _store(ALICE, [("ask tx power please", False, 60), ("Use set tx.", True, 59)])
+        transcript = [
+            {"text": "ask tx power please", "outgoing": False},
+            {"text": "Use set tx.", "outgoing": True},
+        ]
+        for where in ({}, {"is_room": True}):
+            runtime = _HistoryAwareRuntime()
+            await _run(
+                monkeypatch,
+                runtime,
+                BotTestRequest(
+                    text="ask and how do I raise it",
+                    sender_key=ALICE,
+                    transcript=transcript,
+                    **where,
+                ),
+            )
+            sent = runtime.asked[0][0]
+            assert [m["role"] for m in sent] == ["system", "user"], where
+            assert "Use set tx" not in sent[0]["content"]
+            assert "Transmit power" not in sent[0]["content"], (
+                "the earlier question must not steer the notes search"
+            )
+
     async def test_the_setting_limits_and_disables_it(self, test_db, monkeypatch):
         await _store(
             ALICE,
@@ -1754,7 +1786,23 @@ class TestTimeLimits:
         kwargs = runtime.asked[0][1]
         # 30 s, minus the send reserve and the model process's grace period.
         assert 24 < kwargs["deadline_seconds"] <= 30 - 1.5 - llm.ANSWER_GRACE_SECONDS
-        assert kwargs["answer_seconds"] == 6
+        assert kwargs["answer_seconds"] == 15, "50% of the bot's 30 s"
+
+    async def test_writing_time_is_a_share_of_the_bots_time_limit(self, test_db, monkeypatch):
+        from app.repository.bots import BotRepository
+
+        runtime = _FakeRuntime()
+        monkeypatch.setattr(llm, "llm_runtime", runtime)
+        entry = get_library_entry("tinyllm")
+        bot = await BotRepository.create(
+            name="tinyllm-share",
+            code=entry["code"],
+            timeout_seconds=60,
+            settings={"answer_time_percent": 20},
+        )
+        response = await BotEngine().test_run(bot, BotTestRequest(text="ask hi"))
+        assert response.error is None, response.error
+        assert runtime.asked[0][1]["answer_seconds"] == 12
 
     def test_writing_time_counts_from_the_first_word(self):
         """A slow prompt read must not cut the answer to its first word."""

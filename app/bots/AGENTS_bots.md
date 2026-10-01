@@ -103,8 +103,9 @@ operators).
   `ctx.time_limit_seconds`. Generation streams tokens against two limits: a
   hard deadline from that time limit (minus what the run used, the 1.5 s send
   reserve and the model process's 3 s grace) that covers reading the prompt,
-  which llama.cpp cannot interrupt, and `answer_seconds` (the Answer time limit
-  setting) counted from the first token, so a slow prompt read does not cut the
+  which llama.cpp cannot interrupt, and `answer_seconds` (the Writing time
+  setting, `answer_time_percent` of the bot's time limit, default 50) counted
+  from the first token, so a slow prompt read does not cut the
   answer to one word. One answer at a time.
   **Memory** (measured, SmolLM2 135M Q8: ~200 MB, ~45 MB unreclaimable): weights
   stay memory-mapped (reclaimable page cache), `n_ctx` 512 / `n_batch` 64, and
