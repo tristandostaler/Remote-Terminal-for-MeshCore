@@ -1838,3 +1838,112 @@ class TestTimeLimits:
         base = {"messages": [], "max_tokens": 10, "temperature": 0}
         assert llm._stream_answer(SlowReader(), {**base, "deadline": 5}) == "one two three "
         assert llm._stream_answer(SlowReader(), {**base, "deadline": 0.1}) == "one "
+
+
+class TestKeywordless:
+    """Contacts listed in ``keywordless_contacts`` DM questions without ``ask``.
+
+    The engine's ``on_unmatched`` fallback picks the run (tests/test_bots_unmatched.py);
+    these pin the bot's side: the answer, and DM memory reading old ``ask ...``
+    history and new keyword-free messages the same way.
+    """
+
+    LISTED = {"keywordless_contacts": ALICE}
+
+    def _turns(self, rows, keywordless):
+        now = max(r.received_at for r in rows) + 10
+        return _bot_namespace()["conversation_turns"](rows, now, keywordless)
+
+    async def _dm(self, monkeypatch, runtime, text, sender=ALICE, settings=LISTED):
+        await _store(sender, [(text, False, 0)])
+        return await _run(
+            monkeypatch,
+            runtime,
+            BotTestRequest(text=text, is_dm=True, sender_key=sender),
+            settings=settings,
+        )
+
+    def test_old_ask_history_and_plain_messages_read_the_same(self):
+        rows = [
+            _row("ask my name is Ada", False, 100),
+            _row("Nice to meet you, Ada.", True, 101),
+            _row("I live in Lyon", False, 200),
+            _row("Lyon is lovely.", True, 201),
+        ]
+        assert self._turns(rows, keywordless=True) == [
+            {"role": "user", "content": "my name is Ada"},
+            {"role": "assistant", "content": "Nice to meet you, Ada."},
+            {"role": "user", "content": "I live in Lyon"},
+            {"role": "assistant", "content": "Lyon is lovely."},
+        ]
+
+    def test_without_the_option_plain_chat_is_still_ignored(self):
+        rows = [
+            _row("ask my name is Ada", False, 100),
+            _row("Nice to meet you, Ada.", True, 101),
+            _row("I live in Lyon", False, 200),
+            _row("Lyon is lovely.", True, 201),
+        ]
+        assert [m["content"] for m in self._turns(rows, keywordless=False)] == [
+            "my name is Ada",
+            "Nice to meet you, Ada.",
+        ]
+
+    def test_bare_reset_clears_and_other_bots_are_remembered(self):
+        rows = [
+            _row("I am Ada", False, 100),
+            _row("Hi Ada.", True, 101),
+            _row("reset", False, 150),
+            _row("\U0001f916 Conversation forgotten; starting fresh.", True, 151),
+            _row("hello", False, 200),
+            _row("Hello there!", True, 201),  # the hello bot's answer
+        ]
+        assert self._turns(rows, keywordless=True) == [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "Hello there!"},
+        ]
+
+    async def test_answers_a_plain_dm_with_the_earlier_ask_turns(self, test_db, monkeypatch):
+        await _store(
+            ALICE, [("ask my name is Ada", False, 60), ("Nice to meet you, Ada.", True, 59)]
+        )
+        runtime = _HistoryAwareRuntime()
+        replies = await self._dm(monkeypatch, runtime, "what is my name")
+        assert replies == ["Answer 1."]
+        assert [m["content"] for m in runtime.asked[0][0][1:]] == [
+            "my name is Ada",
+            "Nice to meet you, Ada.",
+            "what is my name",
+        ]
+
+    async def test_ask_still_works_for_a_listed_contact(self, test_db, monkeypatch):
+        await _store(ALICE, [("I am Ada", False, 60), ("Hi Ada.", True, 59)])
+        runtime = _HistoryAwareRuntime()
+        await self._dm(monkeypatch, runtime, "ask who am I")
+        assert [m["content"] for m in runtime.asked[0][0][1:]] == [
+            "I am Ada",
+            "Hi Ada.",
+            "who am I",
+        ]
+
+    async def test_bare_reset_replies(self, test_db, monkeypatch):
+        replies = await self._dm(monkeypatch, _HistoryAwareRuntime(), "reset")
+        assert replies == ["🤖 Conversation forgotten; starting fresh."]
+
+    async def test_unlisted_contacts_keep_the_old_memory(self, test_db, monkeypatch):
+        await _store(BOB, [("I am Bob", False, 60), ("Hi Bob.", True, 59)])
+        runtime = _HistoryAwareRuntime()
+        await self._dm(monkeypatch, runtime, "ask who am I", sender=BOB)
+        assert len(runtime.asked[0][0]) == 2
+
+    async def test_a_plain_dm_from_an_unlisted_contact_is_not_answered(self, test_db):
+        from app.repository.bots import BotRepository
+
+        entry = get_library_entry("tinyllm")
+        bot = await BotRepository.create(
+            name="tinyllm-unlisted", code=entry["code"], settings=self.LISTED
+        )
+        response = await BotEngine().test_run(
+            bot, BotTestRequest(text="what is LoRa", is_dm=True, sender_key=BOB)
+        )
+        assert response.matched is False

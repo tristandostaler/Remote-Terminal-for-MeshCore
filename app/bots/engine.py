@@ -13,6 +13,10 @@ Ordering / limits (engine settings, Bots › Engine tab):
 * catch-all ``on_message`` handlers and legacy ``def bot(...)`` bots only pass
   moderation/scope gates — they see every in-scope message, exactly like the
   historical fanout bots, and do their own filtering;
+* ``on_unmatched`` fallbacks run only for a DM that no in-scope bot's keyword
+  matched (a match blocked by a limiter still counts), only from the contacts
+  the bot's own setting lists, and pass the same limiters as keywords — this is
+  how tinyllm answers listed contacts without ``ask``;
 * room-server posts are their own conversation kind (``msg.is_room``), gated by
   the bot's ``scope.rooms`` selection — the same shape as ``scope.channels``, so
   a bot can answer in one room and ignore another — and answered back into the
@@ -36,7 +40,7 @@ from datetime import datetime
 from typing import Any
 
 from app.bot_scope import no_rooms
-from app.bots.api import BotContext, BotMessage
+from app.bots.api import BotContext, BotMessage, contact_listed
 from app.bots.cron import CronSchedule, parse_cron
 from app.bots.moderation import apply_profanity_mode, is_banned_sender
 from app.bots.runtime import BotCodeError, LoadedCode, call_handler, call_legacy, load_bot_code
@@ -64,6 +68,9 @@ SETTLE_DELAY_SECONDS = 2.0
 TICK_SECONDS = 15.0
 LOG_RING_SIZE = 500
 MAX_TRACKED_USERS = 1000
+# Run trigger for ``@bot.on_unmatched``: a DM no bot's keyword claimed, from a
+# contact listed in the bot's settings.
+UNMATCHED_TRIGGER = "unmatched"
 
 # The #bots etiquette: every bot answers "!bots" and gives a way to reach its
 # author, so "!bots" and "!author" match even when the node's command prefix is
@@ -606,6 +613,11 @@ class BotEngine:
                 keyword_allowed = False
 
         user_id = msg.sender_key or msg.sender_name or "unknown"
+        # Did any in-scope bot's keyword match? A match counts even when a rate
+        # limit, cooldown or Admin users check then stops the run, and so does
+        # "!bots" / "!author": none of those may turn into a fallback answer.
+        claimed = self.is_universal_command(msg.text)
+        fallbacks: list[tuple[LoadedBot, Any]] = []
 
         for loaded in list(self.bots.values()):
             bot = loaded.record
@@ -623,8 +635,8 @@ class BotEngine:
 
             if not keyword_allowed or msg.is_outgoing:
                 continue
-            if bot.admin_only and not self._is_admin_sender(msg):
-                continue
+            for unmatched in loaded.code.collector.unmatched:
+                fallbacks.append((loaded, unmatched))
 
             matched_handler = None
             matched_keyword = None
@@ -638,55 +650,13 @@ class BotEngine:
                     break
             if not matched_handler or matched_keyword is None:
                 continue
-
-            now = time.monotonic()
-            if (
-                self.settings.global_reply_seconds > 0
-                and now - self._last_global_accept < self.settings.global_reply_seconds
-                and self._last_global_accept > 0
-            ):
-                self.log(
-                    "WARN",
-                    "rate-limit",
-                    f"global reply limit — skipped {bot.name} for {user_id[:16]}",
-                )
-                continue
-            last_user = self._per_user_accepts.get(user_id, 0.0)
-            if (
-                self.settings.per_user_seconds > 0
-                and last_user > 0
-                and now - last_user < self.settings.per_user_seconds
-            ):
-                self.log(
-                    "WARN", "rate-limit", f"per-user limit — skipped {bot.name} for {user_id[:16]}"
-                )
+            claimed = True
+            if bot.admin_only and not self._is_admin_sender(msg):
                 continue
 
-            delay = 0.0
-            if bot.cooldown_seconds > 0 and loaded.last_run_monotonic > 0:
-                remaining = bot.cooldown_seconds - (now - loaded.last_run_monotonic)
-                if remaining > 0:
-                    if (
-                        remaining <= bot.queue_threshold_seconds
-                        and user_id not in loaded.queued_users
-                    ):
-                        delay = remaining
-                        loaded.queued_users.add(user_id)
-                        self.log("INFO", bot.name, f"queued for {remaining:.1f}s cooldown")
-                    else:
-                        continue
-            if bot.per_user_cooldown_seconds > 0:
-                last_bot_user = loaded.user_cooldowns.get(user_id, 0.0)
-                if last_bot_user > 0 and now - last_bot_user < bot.per_user_cooldown_seconds:
-                    continue
-                loaded.user_cooldowns[user_id] = now
-                loaded.user_cooldowns.move_to_end(user_id)
-                while len(loaded.user_cooldowns) > MAX_TRACKED_USERS:
-                    loaded.user_cooldowns.popitem(last=False)
-
-            self._last_global_accept = now
-            self._touch_user_accept(user_id)
-            loaded.last_run_monotonic = now
+            delay = self._admit(loaded, user_id)
+            if delay is None:
+                continue
 
             remainder = match_text[len(matched_keyword) :].strip()
             run_msg = BotMessage(
@@ -700,6 +670,87 @@ class BotEngine:
                 delay=delay,
                 user_id=user_id,
             )
+
+        if claimed or not msg.is_dm:
+            return
+        for loaded, unmatched in fallbacks:
+            if loaded.record.admin_only and not self._is_admin_sender(msg):
+                continue
+            if not self._lists_contact(loaded.record, unmatched.contacts_setting, msg.sender_key):
+                continue
+            delay = self._admit(loaded, user_id)
+            if delay is None:
+                continue
+            run_msg = BotMessage(**{**msg.__dict__, "keyword": None, "args": match_text.split()})
+            self._spawn_run(
+                loaded,
+                UNMATCHED_TRIGGER,
+                run_msg,
+                handler=unmatched.handler,
+                delay=delay,
+                user_id=user_id,
+            )
+
+    @staticmethod
+    def _lists_contact(bot: Bot, setting_key: str, sender_key: str | None) -> bool:
+        """Is ``sender_key`` among the contacts the bot setting ``setting_key`` lists?"""
+        settings = bot.settings if isinstance(bot.settings, dict) else {}
+        return contact_listed(settings.get(setting_key), sender_key)
+
+    def _admit(self, loaded: LoadedBot, user_id: str) -> float | None:
+        """Pass a run through the global, per-user and per-bot limiters.
+
+        Returns the delay to start after (0, or the rest of a cooldown short
+        enough to queue behind), or None when the run is skipped. An admitted
+        run is booked against every limiter.
+        """
+        bot = loaded.record
+        now = time.monotonic()
+        if (
+            self.settings.global_reply_seconds > 0
+            and now - self._last_global_accept < self.settings.global_reply_seconds
+            and self._last_global_accept > 0
+        ):
+            self.log(
+                "WARN",
+                "rate-limit",
+                f"global reply limit — skipped {bot.name} for {user_id[:16]}",
+            )
+            return None
+        last_user = self._per_user_accepts.get(user_id, 0.0)
+        if (
+            self.settings.per_user_seconds > 0
+            and last_user > 0
+            and now - last_user < self.settings.per_user_seconds
+        ):
+            self.log(
+                "WARN", "rate-limit", f"per-user limit — skipped {bot.name} for {user_id[:16]}"
+            )
+            return None
+
+        delay = 0.0
+        if bot.cooldown_seconds > 0 and loaded.last_run_monotonic > 0:
+            remaining = bot.cooldown_seconds - (now - loaded.last_run_monotonic)
+            if remaining > 0:
+                if remaining <= bot.queue_threshold_seconds and user_id not in loaded.queued_users:
+                    delay = remaining
+                    loaded.queued_users.add(user_id)
+                    self.log("INFO", bot.name, f"queued for {remaining:.1f}s cooldown")
+                else:
+                    return None
+        if bot.per_user_cooldown_seconds > 0:
+            last_bot_user = loaded.user_cooldowns.get(user_id, 0.0)
+            if last_bot_user > 0 and now - last_bot_user < bot.per_user_cooldown_seconds:
+                return None
+            loaded.user_cooldowns[user_id] = now
+            loaded.user_cooldowns.move_to_end(user_id)
+            while len(loaded.user_cooldowns) > MAX_TRACKED_USERS:
+                loaded.user_cooldowns.popitem(last=False)
+
+        self._last_global_accept = now
+        self._touch_user_accept(user_id)
+        loaded.last_run_monotonic = now
+        return delay
 
     async def _handle_contact(self, data: dict) -> None:
         public_key = data.get("public_key")
@@ -809,7 +860,11 @@ class BotEngine:
             await asyncio.sleep(delay)
             if user_id:
                 loaded.queued_users.discard(user_id)
-        elif msg is not None and not legacy and trigger.startswith("kw "):
+        elif (
+            msg is not None
+            and not legacy
+            and (trigger.startswith("kw ") or trigger == UNMATCHED_TRIGGER)
+        ):
             # Let retransmissions dedupe before reacting (parity with fanout bots).
             await asyncio.sleep(SETTLE_DELAY_SECONDS)
         elif legacy:
@@ -1112,6 +1167,15 @@ class BotEngine:
         if handler is None and code.is_legacy:
             legacy = True
             trigger = "message (legacy)"
+        if handler is None and not legacy and is_dm:
+            # The Test tab runs this one bot, so "no other bot's keyword
+            # matched" is taken as given; the contact list still applies.
+            for unmatched in code.collector.unmatched:
+                if self._lists_contact(record, unmatched.contacts_setting, msg.sender_key):
+                    handler = unmatched.handler
+                    trigger = UNMATCHED_TRIGGER
+                    msg.args = match_text.split()
+                    break
         if handler is None and not legacy and code.collector.messages:
             handler = code.collector.messages[0].handler
             trigger = "message"

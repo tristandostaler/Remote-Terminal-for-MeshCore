@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -110,6 +111,43 @@ class MessageTrigger:
     handler: Callable[..., Any]
 
 
+# Contact-list entries shorter than this many hex characters are ignored rather
+# than matched as prefixes: one stray character would match a sixteenth of the mesh.
+MIN_CONTACT_PREFIX = 6
+
+
+def contact_listed(raw: Any, sender_key: str | None) -> bool:
+    """Does a contact-list setting value name ``sender_key``?
+
+    Entries are public keys or key prefixes (at least ``MIN_CONTACT_PREFIX`` hex
+    characters), separated by commas, semicolons or whitespace; ``*`` lists
+    every contact. A list value is accepted as well as text.
+    """
+    if isinstance(raw, list):
+        raw = " ".join(str(item) for item in raw)
+    entries = re.split(r"[\s,;]+", str(raw or "").strip().lower())
+    if "*" in entries:
+        return True
+    if not sender_key:
+        return False
+    wanted = sender_key.lower()
+    return any(len(entry) >= MIN_CONTACT_PREFIX and wanted.startswith(entry) for entry in entries)
+
+
+@dataclass(frozen=True)
+class UnmatchedTrigger:
+    """Fallback: a DM no bot's keyword claimed, from a contact the bot lists.
+
+    ``contacts_setting`` names the bot setting holding those contacts (public
+    keys or key prefixes, separated by commas or whitespace; ``*`` = everyone).
+    The engine checks it before the rate limits, so a DM from anyone else
+    never spends a reply slot.
+    """
+
+    contacts_setting: str
+    handler: Callable[..., Any]
+
+
 @dataclass(frozen=True)
 class CronTrigger:
     expression: str  # empty string = expressions come from the bot's UI trigger list
@@ -134,12 +172,20 @@ class HandlerCollector:
 
     keywords: list[KeywordTrigger] = field(default_factory=list)
     messages: list[MessageTrigger] = field(default_factory=list)
+    unmatched: list[UnmatchedTrigger] = field(default_factory=list)
     crons: list[CronTrigger] = field(default_factory=list)
     events: list[EventTrigger] = field(default_factory=list)
     webhooks: list[WebhookTrigger] = field(default_factory=list)
 
     def is_empty(self) -> bool:
-        return not (self.keywords or self.messages or self.crons or self.events or self.webhooks)
+        return not (
+            self.keywords
+            or self.messages
+            or self.unmatched
+            or self.crons
+            or self.events
+            or self.webhooks
+        )
 
 
 _collector_lock = threading.Lock()
@@ -176,6 +222,23 @@ class _BotDecorators:
 
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             self._collector().messages.append(MessageTrigger(fn))
+            return fn
+
+        return decorator
+
+    def on_unmatched(
+        self, contacts_setting: str
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Trigger on a DM that no enabled bot's keyword matched.
+
+        Only DMs from the contacts listed in the bot setting ``contacts_setting``
+        reach it, so other bots keep their keywords (``hello`` still goes to the
+        hello bot) and everyone else still needs a keyword. ``msg.keyword`` is
+        None and ``msg.args`` is the whole message.
+        """
+
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            self._collector().unmatched.append(UnmatchedTrigger(contacts_setting.strip(), fn))
             return fn
 
         return decorator

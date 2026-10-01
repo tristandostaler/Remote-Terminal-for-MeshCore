@@ -65,7 +65,20 @@ operators).
   triggers pass banned/hops/scope/prefix/mention/admin gates plus global,
   per-user, and per-bot cooldown limiters (with a queue window); catch-all
   `on_message` handlers and legacy bots see every in-scope message and filter
-  themselves. One 15s ticker drives bot cron triggers, the `bot_schedules`
+  themselves. `@bot.on_unmatched("<setting key>")` is the fallback: it runs
+  only for a DM that **no** in-scope bot's keyword matched (a match that a
+  limiter, cooldown or Admin users check then stopped still counts, and so do
+  `!bots` / `!author`), only when the sender is listed in that bot setting
+  (`api.contact_listed`: public keys or prefixes of 6+ hex chars, comma or
+  space separated, `*` = everyone -- checked before the limiters so other
+  senders never spend a reply slot), and then through the same limiters as a
+  keyword (`_admit`). `msg.keyword` is None and `msg.args` is the whole text.
+  tinyllm uses it (`keywordless_contacts`) so listed contacts can DM a
+  question without `ask` while `hello` still reaches the hello bot; for them
+  its DM memory counts every incoming message as a question (keyword stripped
+  when present), so history from before the switch reads the same. The Test
+  tab runs one bot, so it takes "no other bot matched" as given but still
+  applies the contact list. One 15s ticker drives bot cron triggers, the `bot_schedules`
   table, and `bot_feeds` polling. All sends serialize behind one TX-spacing
   lock (engine settings). Runs are recorded to `bot_runs`; logs go to a ring
   buffer + `bot_log` WS events.
