@@ -20,7 +20,6 @@ import re
 import time
 
 from app.bots.bots_utils.tinyllm.llm import (
-    ANSWER_GRACE_SECONDS,
     CONTEXT_CHOICES,
     CONTEXT_TOKENS,
     CUSTOM_MODEL,
@@ -37,12 +36,13 @@ from remoteterm import bot
 # How long a question waits for a reload before answering "warming up", and
 # what the run keeps of the bot's Time limit for sending the reply.
 RELOAD_WAIT_SECONDS = 4
-SEND_RESERVE_SECONDS = 1.5
+SEND_RESERVE_SECONDS = 1.0
 # The engine stops a run at the bot's Time limit (Limits on its Settings tab).
 # A model on a Pi needs more than the 10 s every other bot gets.
 TIME_LIMIT_SECONDS = 30
-# Writing time, as a share of that limit (counted from the first word).
-ANSWER_TIME_PERCENT = 50
+# The answer must be finished this many seconds before that limit; the margin
+# covers sending the reply and stopping a model process that hangs.
+STOP_BEFORE_LIMIT_SECONDS = 3
 # DM memory is read back from the conversation itself (the messages table):
 # incoming messages that were questions to this bot, and the answers it sent
 # right after them. `ask reset` / `ask forget` is a message too, so history
@@ -222,18 +222,18 @@ BOT_META = {
             "help": "Lower is more predictable, higher more creative.",
         },
         {
-            "key": "answer_time_percent",
-            "label": "Writing time (% of the bot's Time limit)",
-            "type": "int",
-            "default": ANSWER_TIME_PERCENT,
-            "min": 10,
-            "max": 100,
+            "key": "stop_before_limit_seconds",
+            "label": "Finish answering this many seconds before the Time limit",
+            "type": "float",
+            "default": STOP_BEFORE_LIMIT_SECONDS,
+            "min": 1.5,
+            "max": 60,
             "help": (
-                "How long the model may spend writing, as a share of the bot's Time limit "
-                "(Limits, 30 s by default): 50% of 30 s is up to 15 s. Counted from its "
-                "first word; the text so far is sent when it stops. Reading the question "
-                "and notes comes first and is not counted, and the whole run always ends "
-                "inside the Time limit, so writing stops sooner if that is closer."
+                "The bot keeps track of its Time limit (Limits, 30 s by default) from the "
+                "moment the question arrives: loading, looking up notes and reading the "
+                "question all count. The answer must be done this many seconds before the "
+                "limit, and whatever was written by then is sent. With 2 and a 30 s limit, "
+                "the answer has at most 28 s. The margin covers sending the reply."
             ),
         },
         {
@@ -392,7 +392,7 @@ BOT_META = {
         "notes_max_chars": NOTES_MAX_CHARS,
         "context_tokens": str(CONTEXT_TOKENS),
         "temperature": 0.7,
-        "answer_time_percent": ANSWER_TIME_PERCENT,
+        "stop_before_limit_seconds": STOP_BEFORE_LIMIT_SECONDS,
         "threads": 0,
         "unload_after_minutes": 5,
         "fast_arm_layout": False,
@@ -596,17 +596,26 @@ def panel_history(transcript, limit, max_chars=HISTORY_MAX_CHARS):
     return _trimmed(conversation_turns(rows, now), limit, max_chars)
 
 
+def time_limit(ctx):
+    """The bot's Time limit: the engine stops the run there."""
+    return float(getattr(ctx, "time_limit_seconds", 10) or 10)
+
+
+def stop_margin(ctx):
+    """Seconds before the Time limit by which the answer must be done."""
+    return _number(ctx, "stop_before_limit_seconds", STOP_BEFORE_LIMIT_SECONDS, 1.5, 60)
+
+
 def run_budget(ctx):
-    """Seconds this run may use, from the bot's Time limit, keeping room to
-    send the reply."""
-    limit = float(getattr(ctx, "time_limit_seconds", 10) or 10)
-    return max(2.0, limit - SEND_RESERVE_SECONDS)
+    """Seconds after the run started by which the answer must be done."""
+    return max(1.5, time_limit(ctx) - stop_margin(ctx))
 
 
-def answer_seconds(ctx):
-    """Writing time: the Writing time share of the bot's Time limit."""
-    share = _number(ctx, "answer_time_percent", ANSWER_TIME_PERCENT, 10, 100) / 100
-    return float(getattr(ctx, "time_limit_seconds", 10) or 10) * share
+def stuck_grace(ctx):
+    """How long a silent model process may overrun the deadline before it is
+    stopped: what the margin leaves after sending, so the run still ends inside
+    the Time limit."""
+    return max(0.5, stop_margin(ctx) - SEND_RESERVE_SECONDS)
 
 
 def _number(ctx, key, default, low, high):
@@ -735,6 +744,7 @@ async def ask(ctx, msg):
                     notes_check_messages(question, titles),
                     ("yes", "no"),
                     NOTES_CHECK_SECONDS,
+                    stuck_grace(ctx),
                 )
                 if verdict != "yes":
                     notes = ""
@@ -751,14 +761,14 @@ async def ask(ctx, msg):
             [system, *earlier, {"role": "user", "content": question}],
             max_tokens=max_tokens,
             temperature=_number(ctx, "temperature", 0.7, 0.0, 1.5),
-            # The whole run must end inside the bot's Time limit: what the
-            # run already used, and the grace the model process gets before
-            # it is presumed stuck, come out of the hard deadline.
+            # Timed from the start of the run, on the same clock as the
+            # engine's Time limit: the answer is done the configured margin
+            # before it, and a hung model process is stopped inside it.
             deadline_seconds=max(
                 1.5,
-                run_budget(ctx) - (time.monotonic() - started) - ANSWER_GRACE_SECONDS,
+                run_budget(ctx) - (time.monotonic() - started),
             ),
-            answer_seconds=answer_seconds(ctx),
+            grace_seconds=stuck_grace(ctx),
         )
 
     # Budgeting is an estimate; if the prompt still overflows the context, drop
@@ -768,6 +778,10 @@ async def ask(ctx, msg):
         if attempt not in attempts:
             attempts.append(attempt)
     asked = time.monotonic()
+    ctx.log(
+        f"answer must be done {run_budget(ctx) - (asked - started):.1f} s from now "
+        f"({stop_margin(ctx):.1f} s before the {time_limit(ctx):.0f} s Time limit)"
+    )
     try:
         for n, (earlier, with_notes) in enumerate(attempts):
             try:

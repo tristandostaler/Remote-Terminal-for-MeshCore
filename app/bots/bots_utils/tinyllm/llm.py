@@ -591,7 +591,7 @@ class _ModelProcess:
         max_tokens: int,
         temperature: float,
         deadline: float,
-        answer_seconds: float | None = None,
+        grace: float = ANSWER_GRACE_SECONDS,
     ) -> dict[str, Any]:
         return self._request(
             {
@@ -600,17 +600,21 @@ class _ModelProcess:
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "deadline": deadline,
-                "answer_seconds": answer_seconds,
             },
-            deadline + ANSWER_GRACE_SECONDS,
+            deadline + grace,
         )
 
     def choose(
-        self, messages: list[dict[str, str]], choices: tuple[str, ...], *, deadline: float
+        self,
+        messages: list[dict[str, str]],
+        choices: tuple[str, ...],
+        *,
+        deadline: float,
+        grace: float = ANSWER_GRACE_SECONDS,
     ) -> dict[str, Any]:
         return self._request(
             {"cmd": "choose", "messages": messages, "choices": list(choices)},
-            deadline + ANSWER_GRACE_SECONDS,
+            deadline + grace,
         )
 
     def close(self) -> None:
@@ -927,10 +931,12 @@ class LlmRuntime:
         max_tokens: int,
         temperature: float,
         deadline_seconds: float,
-        answer_seconds: float | None = None,
+        grace_seconds: float = ANSWER_GRACE_SECONDS,
     ) -> str:
-        """Answer ``messages`` (blocking). Stops at ``deadline_seconds`` (prompt
-        reading included), or after ``answer_seconds`` of writing.
+        """Answer ``messages`` (blocking). Stops at ``deadline_seconds``, prompt
+        reading included; a model process still silent ``grace_seconds`` after
+        that is presumed stuck and stopped. A caller with a hard end of its own
+        (a bot's Time limit) keeps deadline plus grace inside it.
 
         Tokens are streamed in the model process so a slow host still returns
         what it produced in time rather than nothing. Raises
@@ -945,14 +951,18 @@ class LlmRuntime:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 deadline=deadline_seconds,
-                answer_seconds=answer_seconds,
+                grace=grace_seconds,
             ),
             final=True,
         )
         return str(reply.get("text", "")).strip()
 
     def choose(
-        self, messages: list[dict[str, str]], choices: tuple[str, ...], deadline_seconds: float
+        self,
+        messages: list[dict[str, str]],
+        choices: tuple[str, ...],
+        deadline_seconds: float,
+        grace_seconds: float = ANSWER_GRACE_SECONDS,
     ) -> str:
         """Which of ``choices`` the model picks as its next word (blocking).
 
@@ -964,7 +974,10 @@ class LlmRuntime:
         :meth:`generate`.
         """
         reply = self._call(
-            lambda proc: proc.choose(messages, choices, deadline=deadline_seconds), final=False
+            lambda proc: proc.choose(
+                messages, choices, deadline=deadline_seconds, grace=grace_seconds
+            ),
+            final=False,
         )
         return str(reply.get("text", "")).strip()
 
@@ -1015,13 +1028,9 @@ llm_runtime = LlmRuntime()
 
 
 def _stream_answer(llm: Any, request: dict[str, Any]) -> str:
-    """Stream the answer, stopping at the hard ``deadline`` (counted from the
-    request, prompt reading included) or after ``answer_seconds`` of writing
-    (counted from the first token, so a long prompt read on a slow CPU does not
-    eat the writing time and cut the answer to a word)."""
+    """Stream the answer, stopping at ``deadline`` (counted from the request,
+    prompt reading included)."""
     started = time.monotonic()
-    first_token_at: float | None = None
-    answer_seconds = request.get("answer_seconds")
     pieces: list[str] = []
     try:
         # llama-cpp-python checks the prompt length on the first read; other
@@ -1035,13 +1044,9 @@ def _stream_answer(llm: Any, request: dict[str, Any]) -> str:
         )
         for chunk in stream:
             delta = chunk["choices"][0].get("delta", {}).get("content")
-            now = time.monotonic()
             if delta:
                 pieces.append(delta)
-                first_token_at = first_token_at or now
-            if now - started > request["deadline"]:
-                break
-            if answer_seconds and first_token_at and now - first_token_at > answer_seconds:
+            if time.monotonic() - started > request["deadline"]:
                 break
     except ValueError as exc:
         if "context window" in str(exc):

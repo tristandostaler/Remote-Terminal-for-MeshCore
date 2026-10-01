@@ -95,7 +95,7 @@ class _FakeRuntime:
         self.verdict = "yes"
         self.checked = None
 
-    def choose(self, messages, choices, deadline_seconds):
+    def choose(self, messages, choices, deadline_seconds, grace_seconds=None):
         self.checked = messages
         if isinstance(self.verdict, Exception):
             raise self.verdict
@@ -1772,50 +1772,44 @@ class TestMissedQuestions:
 
 
 class TestTimeLimits:
-    async def test_the_deadline_follows_the_bots_time_limit(self, test_db, monkeypatch):
+    async def _ask(self, monkeypatch, timeout, settings=None):
         from app.repository.bots import BotRepository
 
         runtime = _FakeRuntime()
         monkeypatch.setattr(llm, "llm_runtime", runtime)
         entry = get_library_entry("tinyllm")
         bot = await BotRepository.create(
-            name="tinyllm-limit", code=entry["code"], timeout_seconds=30
-        )
-        response = await BotEngine().test_run(bot, BotTestRequest(text="ask hi"))
-        assert response.error is None, response.error
-        kwargs = runtime.asked[0][1]
-        # 30 s, minus the send reserve and the model process's grace period.
-        assert 24 < kwargs["deadline_seconds"] <= 30 - 1.5 - llm.ANSWER_GRACE_SECONDS
-        assert kwargs["answer_seconds"] == 15, "50% of the bot's 30 s"
-
-    async def test_writing_time_is_a_share_of_the_bots_time_limit(self, test_db, monkeypatch):
-        from app.repository.bots import BotRepository
-
-        runtime = _FakeRuntime()
-        monkeypatch.setattr(llm, "llm_runtime", runtime)
-        entry = get_library_entry("tinyllm")
-        bot = await BotRepository.create(
-            name="tinyllm-share",
+            name=f"tinyllm-limit-{timeout}-{len(settings or {})}",
             code=entry["code"],
-            timeout_seconds=60,
-            settings={"answer_time_percent": 20},
+            timeout_seconds=timeout,
+            settings=settings or {},
         )
         response = await BotEngine().test_run(bot, BotTestRequest(text="ask hi"))
         assert response.error is None, response.error
-        assert runtime.asked[0][1]["answer_seconds"] == 12
+        return runtime.asked[0][1], response
 
-    def test_writing_time_counts_from_the_first_word(self):
-        """A slow prompt read must not cut the answer to its first word."""
+    async def test_the_answer_ends_the_margin_before_the_time_limit(self, test_db, monkeypatch):
+        kwargs, response = await self._ask(monkeypatch, 30, {"stop_before_limit_seconds": 2})
+        # At most 28 s from the start of the run, minus what it already used.
+        assert 27 < kwargs["deadline_seconds"] <= 28
+        # A hung model process is stopped inside the margin, after sending room.
+        assert kwargs["grace_seconds"] == 1
+        assert kwargs["deadline_seconds"] + kwargs["grace_seconds"] < 30
+        assert any("2.0 s before the 30 s Time limit" in line for line in response.logs)
+
+    async def test_the_default_margin_follows_the_time_limit(self, test_db, monkeypatch):
+        kwargs, _ = await self._ask(monkeypatch, 60)
+        assert 56 < kwargs["deadline_seconds"] <= 60 - 3
+
+    def test_the_deadline_covers_reading_the_prompt(self):
+        """Timed from the request: a slow prompt read counts against it."""
 
         class SlowReader:
             def create_chat_completion(self, **kwargs):
-                time.sleep(0.3)  # reading the prompt
-                for word in ["one ", "two ", "three ", "four "]:
+                time.sleep(0.2)  # reading the prompt
+                for word in ["one ", "two ", "three "]:
                     yield {"choices": [{"delta": {"content": word}}]}
-                    time.sleep(0.02)
 
         base = {"messages": [], "max_tokens": 10, "temperature": 0}
-        written = llm._stream_answer(SlowReader(), {**base, "deadline": 5, "answer_seconds": 0.2})
-        assert written == "one two three four "
-        cut = llm._stream_answer(SlowReader(), {**base, "deadline": 0.1})
-        assert cut == "one ", "the hard deadline still stops it"
+        assert llm._stream_answer(SlowReader(), {**base, "deadline": 5}) == "one two three "
+        assert llm._stream_answer(SlowReader(), {**base, "deadline": 0.1}) == "one "
