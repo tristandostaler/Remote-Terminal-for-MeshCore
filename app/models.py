@@ -2084,7 +2084,9 @@ class LiveFeedStatus(BaseModel):
         description=(
             "'packets' when remote GRP_TXT packets are decrypted locally (any channel "
             "this node has a key for); 'channel_messages' when only the remote "
-            "instance's own decryption of Public/hashtag channels was available"
+            "instance's own decryption of Public/hashtag channels was available; "
+            "'beacon' for a MeshCore Beacon instance: its own decryption where it holds "
+            "the key, its packet details decrypted locally for the other channels"
         ),
     )
 

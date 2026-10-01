@@ -33,7 +33,15 @@ from app.repository.contacts import ContactRepository
 from app.repository.live_feed import LiveFeedRepository
 from app.repository.messages import MessageRepository
 from app.repository.settings import AppSettingsRepository
-from app.services.live_feed import LiveFeedClient, LiveFeedError, _coerce_float, _parse_iso
+from app.services.live_feed import (
+    FLAVOR_BEACON,
+    LiveFeedClient,
+    LiveFeedError,
+    _coerce_float,
+    _coerce_int,
+    _parse_iso,
+    instance_base_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +159,25 @@ class _RemoteHop:
             public_key=pubkey.lower() if isinstance(pubkey, str) and pubkey else None,
             name=str(raw["name"]) if raw.get("name") else None,
             ambiguous=bool(raw.get("ambiguous")),
+            candidates=candidates,
+        )
+
+    @classmethod
+    def from_beacon(cls, raw: dict[str, Any]) -> _RemoteHop:
+        """One Beacon ``ResolvedHop``: a confidence plus the node(s) it matched."""
+        candidates: list[dict[str, Any]] = []
+        for item in raw.get("nodes") or []:
+            if not isinstance(item, dict) or not isinstance(item.get("publicKey"), str):
+                continue
+            lat, lon = _coerce_float(item.get("latitude")), _coerce_float(item.get("longitude"))
+            if not _valid_location(lat, lon):
+                lat = lon = None
+            candidates.append(_node_dict(item["publicKey"], item.get("name"), lat, lon))
+        best = candidates[0] if raw.get("confidence") == "high" and candidates else None
+        return cls(
+            public_key=best["public_key"] if best else None,
+            name=best["name"] if best else None,
+            ambiguous=raw.get("confidence") == "ambiguous",
             candidates=candidates,
         )
 
@@ -321,6 +348,60 @@ def _observations(detail: dict[str, Any]) -> list[dict[str, Any]]:
     return [o for o in observations if isinstance(o, dict)]
 
 
+def _beacon_hops(observation: dict[str, Any]) -> tuple[str, ...]:
+    """Split a Beacon observation's ``pathBytes`` into hop prefixes."""
+    path_bytes = observation.get("pathBytes")
+    if not isinstance(path_bytes, str) or not path_bytes:
+        return ()
+    path_length = observation.get("pathLength")
+    hash_size = _coerce_int(path_length.get("hashSize")) if isinstance(path_length, dict) else None
+    width = max(1, hash_size or 1) * 2
+    return tuple(
+        path_bytes[i : i + width].upper() for i in range(0, len(path_bytes) - width + 1, width)
+    )
+
+
+def _beacon_observer_routes(detail: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every observation of a Beacon packet detail, as trace routes.
+
+    Beacon resolves each observation's path itself (``resolvedPath``), so the
+    routes carry their own remote hop identities and need no hop lookup.
+    Observers are identified by a UUID, not a node key, and carry no location.
+    """
+    routes: list[dict[str, Any]] = []
+    for observation in detail.get("observations") or []:
+        if not isinstance(observation, dict):
+            continue
+        hops = _beacon_hops(observation)
+        resolved = [r for r in observation.get("resolvedPath") or [] if isinstance(r, dict)]
+        remote = {
+            prefix: _RemoteHop.from_beacon(resolved[i])
+            for i, prefix in enumerate(hops)
+            if i < len(resolved)
+        }
+        heard_at = _coerce_int(observation.get("heardAt"))
+        routes.append(
+            {
+                "kind": "observer",
+                "receiver": _node_dict(
+                    None,
+                    observation.get("observerName") or observation.get("observerId"),
+                    None,
+                    None,
+                ),
+                "region": observation.get("iata") or None,
+                "heard_at": heard_at // 1000 if heard_at is not None else None,
+                "snr": _coerce_float(observation.get("snr")),
+                "rssi": _coerce_float(observation.get("rssi")),
+                "hops": hops,
+                "live_url": None,
+                "_server_keys": [],
+                "_remote": remote,
+            }
+        )
+    return routes
+
+
 async def _remote_resolutions(
     client: LiveFeedClient, paths: list[tuple[tuple[str, ...], str | None]]
 ) -> tuple[dict[tuple[str, ...], dict[str, _RemoteHop]], str | None]:
@@ -426,13 +507,28 @@ async def get_trace(
     live_warning: str | None = None
     observer_routes: list[dict[str, Any]] = []
     remote_hash = packet_hash or (live_row or {}).get("packet_hash")
-    url = settings.live_feed_url.rstrip("/")
+    url = instance_base_url(settings.live_feed_url)
     is_remote_hash = bool(remote_hash) and not str(remote_hash).startswith("syn:")
     packet_url = f"{url}/#/packets/{remote_hash}" if is_remote_hash else None
 
     resolutions: dict[tuple[str, ...], dict[str, _RemoteHop]] = {}
     async with LiveFeedClient(url, settings.live_feed_region) as client:
+        beacon = False
         if is_remote_hash:
+            try:
+                beacon = await client.flavor() == FLAVOR_BEACON
+            except LiveFeedError as exc:
+                live_error = str(exc)
+        if beacon:
+            # Beacon's web UI routes are not part of its API contract; link nothing.
+            packet_url = None
+            try:
+                detail = await client.fetch_beacon_packet(str(remote_hash))
+            except LiveFeedError as exc:
+                live_error = str(exc)
+            else:
+                observer_routes = _beacon_observer_routes(detail)
+        elif is_remote_hash and live_error is None:
             try:
                 detail = await client.fetch_packet_detail(str(remote_hash))
             except LiveFeedError as exc:
@@ -494,7 +590,7 @@ async def get_trace(
             for hops, observer in wanted
             if any(len(local.matches(h)) != 1 for h in hops)
         ]
-        if needs_remote and is_remote_hash and live_error is None:
+        if needs_remote and is_remote_hash and live_error is None and not beacon:
             resolutions, resolve_warning = await _remote_resolutions(client, needs_remote)
             live_warning = live_warning or resolve_warning
 
@@ -503,7 +599,8 @@ async def get_trace(
     for route in all_routes:
         hops: tuple[str, ...] = route.pop("hops")
         server_keys = route.pop("_server_keys", [])
-        remote_for_path = resolutions.get(hops, {})
+        own_remote = route.pop("_remote", None)
+        remote_for_path = own_remote if own_remote is not None else resolutions.get(hops, {})
         route["hops"] = [
             resolve_hop(
                 prefix,

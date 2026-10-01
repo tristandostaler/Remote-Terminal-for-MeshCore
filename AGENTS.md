@@ -88,7 +88,7 @@ Ancillary AGENTS.md files which should generally not be reviewed unless specific
 - Raw packet feed — a debug/observation tool ("radio aquarium"); interesting to watch or copy packets from, but not critical infrastructure
 - Map view — visual display of node locations from advertisements
 - Network visualizer — force-directed graph of mesh topology
-- Live feed comparison — decrypts the channel packets a public CoreScope instance (live.meshcore.ca) observed with this node's own keys (any channel, private ones included) and shows what this node heard vs missed; see `app/AGENTS.md` § "Live feed comparison"
+- Live feed comparison — compares against a public MeshCore Beacon (live.meshcore.ca) or CoreScope instance: its own decryption where it holds the key, otherwise its channel packets decrypted with this node's own keys (any channel, private ones included) and shows what this node heard vs missed; see `app/AGENTS.md` § "Live feed comparison"
 - Fanout integrations (MQTT, bots, webhooks, Apprise, SQS) — see `app/fanout/AGENTS_fanout.md`
 - Read state tracking / mark-all-read — convenience feature for unread badges; no need for transactional atomicity or race-condition hardening
 
@@ -433,7 +433,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | GET | `/api/statistics` | Aggregated mesh network statistics, including `region_scope_24h` regional flood-scope adoption and the `live_compare` section |
 | GET | `/api/live-feed/status` | Live feed comparison: config in effect plus the sync loop's last outcome |
 | POST | `/api/live-feed/sync` | Run one live feed sync now |
-| GET | `/api/live-feed/regions` | Regions (observer IATA codes) the configured CoreScope instance knows |
+| GET | `/api/live-feed/regions` | Regions (observer IATA codes) the configured Beacon or CoreScope instance knows |
 | GET | `/api/live-feed/stats` | Both / node-only / live-only counts for a `window` |
 | GET | `/api/live-feed/messages` | Node + live feed channel messages merged without duplicates, each marked with its source |
 | GET | `/api/live-feed/trace` | Where one message travelled: every observer's reception and this node's, relay hashes resolved to nodes (`packet_hash` and/or `message_id`) |
