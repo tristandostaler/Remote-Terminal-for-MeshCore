@@ -473,8 +473,11 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    background; `ask` alone reports progress. Each bot run is limited by the
    bot's **Time limit** (Settings tab, Limits; 30 s for `tinyllm`, 10 s for
    other bots, up to 120 s), and the answer is fitted inside it: reading the
-   question and notes first, then writing for at most **Answer time limit**
-   seconds, after which whatever was produced is sent.
+   question and notes first, then writing until **Finish answering this many
+   seconds before the Time limit** (3 s by default: with 2 and a 30 s limit the
+   answer has at most 28 s), counted from the moment the question arrived,
+   after which whatever was produced is sent. Only DMs remember earlier messages; in a
+   channel or room every question is answered on its own.
 
 Tiny models are chatty and often wrong. Treat the answers as entertainment.
 

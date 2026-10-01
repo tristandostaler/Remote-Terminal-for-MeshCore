@@ -95,8 +95,9 @@ class _FakeRuntime:
         self.verdict = "yes"
         self.checked = None
 
-    def choose(self, messages, choices, deadline_seconds):
+    def choose(self, messages, choices, deadline_seconds, grace_seconds=None):
         self.checked = messages
+        self.check_time = (deadline_seconds, grace_seconds)
         if isinstance(self.verdict, Exception):
             raise self.verdict
         return self.verdict
@@ -758,6 +759,38 @@ class TestDmMemory:
         assert len(runtime.asked[0][0]) == 2
         await _run(monkeypatch, runtime, BotTestRequest(text="ask hi", sender_key=ALICE))
         assert len(runtime.asked[1][0]) == 2
+
+    async def test_channels_and_rooms_never_get_past_messages(self, test_db, monkeypatch, tmp_path):
+        """Not from stored DMs, not from a transcript, not even to steer the
+        notes search: outside a DM the model sees only this question."""
+        from app.bots.bots_utils.tinyllm import llm_docs
+
+        (tmp_path / "radio.md").write_text(_NOTES)
+        index = llm_docs.DocsIndex(tmp_path)
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: index)
+        await _store(ALICE, [("ask tx power please", False, 60), ("Use set tx.", True, 59)])
+        transcript = [
+            {"text": "ask tx power please", "outgoing": False},
+            {"text": "Use set tx.", "outgoing": True},
+        ]
+        for where in ({}, {"is_room": True}):
+            runtime = _HistoryAwareRuntime()
+            await _run(
+                monkeypatch,
+                runtime,
+                BotTestRequest(
+                    text="ask and how do I raise it",
+                    sender_key=ALICE,
+                    transcript=transcript,
+                    **where,
+                ),
+            )
+            sent = runtime.asked[0][0]
+            assert [m["role"] for m in sent] == ["system", "user"], where
+            assert "Use set tx" not in sent[0]["content"]
+            assert "Transmit power" not in sent[0]["content"], (
+                "the earlier question must not steer the notes search"
+            )
 
     async def test_the_setting_limits_and_disables_it(self, test_db, monkeypatch):
         await _store(
@@ -1427,6 +1460,30 @@ class TestModelCheck:
         system = await self._ask(monkeypatch, runtime, check_notes_with_model=True)
         assert "Reference notes" in system
 
+    async def test_the_check_gets_its_setting_within_the_runs_deadline(
+        self, test_db, monkeypatch, notes
+    ):
+        # The test bot has the stock 10 s Time limit and a 3 s margin: 7 s for
+        # the run, of which the answer keeps at least 3.
+        runtime = _FakeRuntime()
+        await self._ask(monkeypatch, runtime, check_notes_with_model=True, notes_check_seconds=2)
+        assert runtime.check_time == (2, 2)
+        runtime = _FakeRuntime()
+        await self._ask(monkeypatch, runtime, check_notes_with_model=True, notes_check_seconds=30)
+        deadline, grace = runtime.check_time
+        assert 3.5 < deadline <= 10 - 3 - 3, "capped to leave the answer its time"
+
+    async def test_no_time_left_skips_the_check_and_keeps_the_notes(
+        self, test_db, monkeypatch, notes
+    ):
+        runtime = _FakeRuntime()
+        runtime.verdict = "no"
+        system = await self._ask(
+            monkeypatch, runtime, check_notes_with_model=True, stop_before_limit_seconds=7
+        )
+        assert runtime.checked is None
+        assert "Reference notes" in system
+
     async def test_the_check_is_generic_and_shows_the_headings(self, test_db, monkeypatch, notes):
         runtime = _FakeRuntime()
         await self._ask(monkeypatch, runtime, check_notes_with_model=True)
@@ -1740,34 +1797,44 @@ class TestMissedQuestions:
 
 
 class TestTimeLimits:
-    async def test_the_deadline_follows_the_bots_time_limit(self, test_db, monkeypatch):
+    async def _ask(self, monkeypatch, timeout, settings=None):
         from app.repository.bots import BotRepository
 
         runtime = _FakeRuntime()
         monkeypatch.setattr(llm, "llm_runtime", runtime)
         entry = get_library_entry("tinyllm")
         bot = await BotRepository.create(
-            name="tinyllm-limit", code=entry["code"], timeout_seconds=30
+            name=f"tinyllm-limit-{timeout}-{len(settings or {})}",
+            code=entry["code"],
+            timeout_seconds=timeout,
+            settings=settings or {},
         )
         response = await BotEngine().test_run(bot, BotTestRequest(text="ask hi"))
         assert response.error is None, response.error
-        kwargs = runtime.asked[0][1]
-        # 30 s, minus the send reserve and the model process's grace period.
-        assert 24 < kwargs["deadline_seconds"] <= 30 - 1.5 - llm.ANSWER_GRACE_SECONDS
-        assert kwargs["answer_seconds"] == 6
+        return runtime.asked[0][1], response
 
-    def test_writing_time_counts_from_the_first_word(self):
-        """A slow prompt read must not cut the answer to its first word."""
+    async def test_the_answer_ends_the_margin_before_the_time_limit(self, test_db, monkeypatch):
+        kwargs, response = await self._ask(monkeypatch, 30, {"stop_before_limit_seconds": 2})
+        # At most 28 s from the start of the run, minus what it already used.
+        assert 27 < kwargs["deadline_seconds"] <= 28
+        # A hung model process is stopped inside the margin, after sending room.
+        assert kwargs["grace_seconds"] == 1
+        assert kwargs["deadline_seconds"] + kwargs["grace_seconds"] < 30
+        assert any("2.0 s before the 30 s Time limit" in line for line in response.logs)
+
+    async def test_the_default_margin_follows_the_time_limit(self, test_db, monkeypatch):
+        kwargs, _ = await self._ask(monkeypatch, 60)
+        assert 56 < kwargs["deadline_seconds"] <= 60 - 3
+
+    def test_the_deadline_covers_reading_the_prompt(self):
+        """Timed from the request: a slow prompt read counts against it."""
 
         class SlowReader:
             def create_chat_completion(self, **kwargs):
-                time.sleep(0.3)  # reading the prompt
-                for word in ["one ", "two ", "three ", "four "]:
+                time.sleep(0.2)  # reading the prompt
+                for word in ["one ", "two ", "three "]:
                     yield {"choices": [{"delta": {"content": word}}]}
-                    time.sleep(0.02)
 
         base = {"messages": [], "max_tokens": 10, "temperature": 0}
-        written = llm._stream_answer(SlowReader(), {**base, "deadline": 5, "answer_seconds": 0.2})
-        assert written == "one two three four "
-        cut = llm._stream_answer(SlowReader(), {**base, "deadline": 0.1})
-        assert cut == "one ", "the hard deadline still stops it"
+        assert llm._stream_answer(SlowReader(), {**base, "deadline": 5}) == "one two three "
+        assert llm._stream_answer(SlowReader(), {**base, "deadline": 0.1}) == "one "

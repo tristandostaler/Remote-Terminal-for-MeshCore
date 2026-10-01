@@ -100,12 +100,13 @@ operators).
   094; 10 s default, 1-120, editable under Limits, `BOT_META["timeout_seconds"]`
   for a library default -- tinyllm ships 30 -- which a version refresh applies
   only to a bot still on the stock 10). It reaches bot code as
-  `ctx.time_limit_seconds`. Generation streams tokens against two limits: a
-  hard deadline from that time limit (minus what the run used, the 1.5 s send
-  reserve and the model process's 3 s grace) that covers reading the prompt,
-  which llama.cpp cannot interrupt, and `answer_seconds` (the Answer time limit
-  setting) counted from the first token, so a slow prompt read does not cut the
-  answer to one word. One answer at a time.
+  `ctx.time_limit_seconds`. tinyllm times its answer on that clock, from the
+  start of the run: the deadline is the Time limit minus
+  `stop_before_limit_seconds` (default 3, min 1.5) minus what the run already
+  used (loading, notes, the optional check), and it covers reading the prompt,
+  which llama.cpp cannot interrupt. A model process still silent after the
+  deadline gets `stuck_grace` (the margin minus the 1 s send reserve, at least
+  0.5 s) before it is stopped, so even a hang ends inside the Time limit. One answer at a time.
   **Memory** (measured, SmolLM2 135M Q8: ~200 MB, ~45 MB unreclaimable): weights
   stay memory-mapped (reclaimable page cache), `n_ctx` 512 / `n_batch` 64, and
   `_check_memory` refuses a load when `available_memory_mb()` (min of
@@ -153,7 +154,10 @@ operators).
   (`check_notes_with_model`): `LlmRuntime.choose` asks a generic yes/no ("do
   these notes help?", with the section headings) and the model process forces
   the reply to exactly "yes"/"no" with a llama.cpp grammar at temperature 0;
-  only when there are notes and >= 4 s left; a failed check keeps the notes;
+  only when there are notes; it gets `notes_check_seconds` (default 8) capped
+  to the run's deadline minus 3 s kept for the answer, and the same stuck
+  grace as the answer, and is skipped (notes kept) below 1 s; a failed check
+  keeps the notes;
   it never triggers the unload-after-every-answer unload. The folder is synced
   from `library/docs/` on the bot's first run after each start: shipped files
   are rewritten whenever they differ (edits are lost, deletions come back), a

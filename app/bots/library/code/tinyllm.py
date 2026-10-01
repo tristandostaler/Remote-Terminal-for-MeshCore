@@ -20,7 +20,6 @@ import re
 import time
 
 from app.bots.bots_utils.tinyllm.llm import (
-    ANSWER_GRACE_SECONDS,
     CONTEXT_CHOICES,
     CONTEXT_TOKENS,
     CUSTOM_MODEL,
@@ -37,10 +36,13 @@ from remoteterm import bot
 # How long a question waits for a reload before answering "warming up", and
 # what the run keeps of the bot's Time limit for sending the reply.
 RELOAD_WAIT_SECONDS = 4
-SEND_RESERVE_SECONDS = 1.5
+SEND_RESERVE_SECONDS = 1.0
 # The engine stops a run at the bot's Time limit (Limits on its Settings tab).
 # A model on a Pi needs more than the 10 s every other bot gets.
 TIME_LIMIT_SECONDS = 30
+# The answer must be finished this many seconds before that limit; the margin
+# covers sending the reply and stopping a model process that hangs.
+STOP_BEFORE_LIMIT_SECONDS = 3
 # DM memory is read back from the conversation itself (the messages table):
 # incoming messages that were questions to this bot, and the answers it sent
 # right after them. `ask reset` / `ask forget` is a message too, so history
@@ -68,10 +70,11 @@ ANSWER_WINDOW_SECONDS = 150
 # then without notes.
 CHARS_PER_TOKEN = 3
 TEMPLATE_OVERHEAD_CHARS = 200
-# The optional model check of the notes: its own time cap, and the least time
-# that must be left in the run to try it at all (the answer still follows).
-NOTES_CHECK_SECONDS = 2
-NOTES_CHECK_MIN_SECONDS = 4
+# The optional model check of the notes: the most it may take (a setting), the
+# least worth trying, and what it must leave of the run for the answer.
+NOTES_CHECK_SECONDS = 8
+NOTES_CHECK_MIN_SECONDS = 1
+ANSWER_MIN_SECONDS = 3
 # Notes are capped well below what the context could hold: the model reads them
 # before answering, and on a Pi that reading is most of the wait.
 NOTES_MAX_CHARS = 700
@@ -103,7 +106,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.5.0",
+    "version": "1.6.0",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "timeout_seconds": TIME_LIMIT_SECONDS,
@@ -220,18 +223,18 @@ BOT_META = {
             "help": "Lower is more predictable, higher more creative.",
         },
         {
-            "key": "time_limit_seconds",
-            "label": "Answer time limit (seconds)",
+            "key": "stop_before_limit_seconds",
+            "label": "Finish answering this many seconds before the Time limit",
             "type": "float",
-            "default": 6,
-            "min": 2,
+            "default": STOP_BEFORE_LIMIT_SECONDS,
+            "min": 1.5,
             "max": 60,
             "help": (
-                "How long the model may spend writing, counted from its first word; the "
-                "text so far is sent when it stops. Reading the question and notes comes "
-                "before that and is not counted. The whole run still has to fit in the "
-                "bot's Time limit (Limits; 30 s by default), and the bot stops early if "
-                "that is closer."
+                "The bot keeps track of its Time limit (Limits, 30 s by default) from the "
+                "moment the question arrives: loading, looking up notes and reading the "
+                "question all count. The answer must be done this many seconds before the "
+                "limit, and whatever was written by then is sent. With 2 and a 30 s limit, "
+                "the answer has at most 28 s. The margin covers sending the reply."
             ),
         },
         {
@@ -283,6 +286,21 @@ BOT_META = {
                 "meaning. Costs one short extra model pass (under a second on a Pi 5 with a "
                 "tiny model, more with bigger ones), skipped when time is short. Worth it with "
                 "Qwen2.5 1.5B or Llama 3.2 1B; the tiny models judge this poorly."
+            ),
+        },
+        {
+            "key": "notes_check_seconds",
+            "show_when": {"key": "check_notes_with_model", "value": "true"},
+            "label": "Most seconds for the notes check",
+            "type": "float",
+            "default": NOTES_CHECK_SECONDS,
+            "min": 1,
+            "max": 60,
+            "help": (
+                "How long the yes/no check may take. It runs on the same clock as the "
+                "answer: it never goes past the Finish-answering margin before the Time "
+                "limit, and always leaves the answer at least 3 s, so on a slow model it "
+                "gets less, or is skipped and the notes are kept."
             ),
         },
         {
@@ -387,10 +405,11 @@ BOT_META = {
         "history_messages": 10,
         "use_docs": True,
         "check_notes_with_model": False,
+        "notes_check_seconds": NOTES_CHECK_SECONDS,
         "notes_max_chars": NOTES_MAX_CHARS,
         "context_tokens": str(CONTEXT_TOKENS),
         "temperature": 0.7,
-        "time_limit_seconds": 6,
+        "stop_before_limit_seconds": STOP_BEFORE_LIMIT_SECONDS,
         "threads": 0,
         "unload_after_minutes": 5,
         "fast_arm_layout": False,
@@ -594,11 +613,26 @@ def panel_history(transcript, limit, max_chars=HISTORY_MAX_CHARS):
     return _trimmed(conversation_turns(rows, now), limit, max_chars)
 
 
+def time_limit(ctx):
+    """The bot's Time limit: the engine stops the run there."""
+    return float(getattr(ctx, "time_limit_seconds", 10) or 10)
+
+
+def stop_margin(ctx):
+    """Seconds before the Time limit by which the answer must be done."""
+    return _number(ctx, "stop_before_limit_seconds", STOP_BEFORE_LIMIT_SECONDS, 1.5, 60)
+
+
 def run_budget(ctx):
-    """Seconds this run may use, from the bot's Time limit, keeping room to
-    send the reply."""
-    limit = float(getattr(ctx, "time_limit_seconds", 10) or 10)
-    return max(2.0, limit - SEND_RESERVE_SECONDS)
+    """Seconds after the run started by which the answer must be done."""
+    return max(1.5, time_limit(ctx) - stop_margin(ctx))
+
+
+def stuck_grace(ctx):
+    """How long a silent model process may overrun the deadline before it is
+    stopped: what the margin leaves after sending, so the run still ends inside
+    the Time limit."""
+    return max(0.5, stop_margin(ctx) - SEND_RESERVE_SECONDS)
 
 
 def _number(ctx, key, default, low, high):
@@ -715,26 +749,36 @@ async def ask(ctx, msg):
         # ("what time is it" matches a Clock section). A quick yes/no from the
         # model itself filters those -- only when there are notes to judge,
         # and only with time to spare.
-        time_left = run_budget(ctx) - (time.monotonic() - started)
-        if (
-            notes
-            and ctx.settings.get("check_notes_with_model")
-            and time_left >= NOTES_CHECK_MIN_SECONDS
-        ):
-            try:
-                verdict = await asyncio.to_thread(
-                    llm_runtime.choose,
-                    notes_check_messages(question, titles),
-                    ("yes", "no"),
-                    NOTES_CHECK_SECONDS,
-                )
-                if verdict != "yes":
-                    notes = ""
-            except LlmWorkerDiedError as exc:
-                await ctx.reply_split(f"🤖 Sorry, {exc}. Try again, or pick a smaller model.")
-                return
-            except Exception as exc:  # noqa: BLE001 - a failed check keeps the notes
-                ctx.log(f"notes check skipped: {exc}", "WARNING")
+        # Same clock as the answer: inside the run's deadline, leaving the
+        # answer its minimum.
+        check_seconds = min(
+            _number(ctx, "notes_check_seconds", NOTES_CHECK_SECONDS, 1, 60),
+            run_budget(ctx) - (time.monotonic() - started) - ANSWER_MIN_SECONDS,
+        )
+        if notes and ctx.settings.get("check_notes_with_model"):
+            if check_seconds < NOTES_CHECK_MIN_SECONDS:
+                ctx.log("notes check skipped: not enough time left; notes kept")
+            else:
+                checked = time.monotonic()
+                try:
+                    verdict = await asyncio.to_thread(
+                        llm_runtime.choose,
+                        notes_check_messages(question, titles),
+                        ("yes", "no"),
+                        check_seconds,
+                        stuck_grace(ctx),
+                    )
+                    ctx.log(
+                        f"notes check: {verdict} in {time.monotonic() - checked:.1f} s "
+                        f"(allowed {check_seconds:.1f} s)"
+                    )
+                    if verdict != "yes":
+                        notes = ""
+                except LlmWorkerDiedError as exc:
+                    await ctx.reply_split(f"🤖 Sorry, {exc}. Try again, or pick a smaller model.")
+                    return
+                except Exception as exc:  # noqa: BLE001 - a failed check keeps the notes
+                    ctx.log(f"notes check skipped: {exc}", "WARNING")
 
     def ask_model(earlier, with_notes):
         system = {"role": "system", "content": prompt + (notes if with_notes else "")}
@@ -743,14 +787,14 @@ async def ask(ctx, msg):
             [system, *earlier, {"role": "user", "content": question}],
             max_tokens=max_tokens,
             temperature=_number(ctx, "temperature", 0.7, 0.0, 1.5),
-            # The whole run must end inside the bot's Time limit: what the
-            # run already used, and the grace the model process gets before
-            # it is presumed stuck, come out of the hard deadline.
+            # Timed from the start of the run, on the same clock as the
+            # engine's Time limit: the answer is done the configured margin
+            # before it, and a hung model process is stopped inside it.
             deadline_seconds=max(
                 1.5,
-                run_budget(ctx) - (time.monotonic() - started) - ANSWER_GRACE_SECONDS,
+                run_budget(ctx) - (time.monotonic() - started),
             ),
-            answer_seconds=_number(ctx, "time_limit_seconds", 6, 2, 60),
+            grace_seconds=stuck_grace(ctx),
         )
 
     # Budgeting is an estimate; if the prompt still overflows the context, drop
@@ -760,6 +804,10 @@ async def ask(ctx, msg):
         if attempt not in attempts:
             attempts.append(attempt)
     asked = time.monotonic()
+    ctx.log(
+        f"answer must be done {run_budget(ctx) - (asked - started):.1f} s from now "
+        f"({stop_margin(ctx):.1f} s before the {time_limit(ctx):.0f} s Time limit)"
+    )
     try:
         for n, (earlier, with_notes) in enumerate(attempts):
             try:
