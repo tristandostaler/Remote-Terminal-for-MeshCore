@@ -205,6 +205,8 @@ async def _store_direct_message(
                         rssi=rssi,
                         snr=snr,
                         broadcast_fn=broadcast_fn,
+                        transport_code=transport_code,
+                        region=region,
                     )
                     return None
 
@@ -226,6 +228,8 @@ async def _store_direct_message(
                     rssi=rssi,
                     snr=snr,
                     broadcast_fn=broadcast_fn,
+                    transport_code=transport_code,
+                    region=region,
                 )
                 return None
 
@@ -264,6 +268,8 @@ async def _store_direct_message(
                 rssi=rssi,
                 snr=snr,
                 broadcast_fn=broadcast_fn,
+                transport_code=transport_code,
+                region=region,
             )
             return None
 

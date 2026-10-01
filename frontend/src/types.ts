@@ -124,6 +124,16 @@ export interface ImportRegionsResponse {
   already_known: string[];
 }
 
+/** Counts from re-resolving stored channel messages against the saved region list. */
+export interface RegionBackfillResponse {
+  /** Channel messages that still have their raw packet. */
+  scanned: number;
+  /** Of those, region-scoped (transport-routed) ones. */
+  scoped: number;
+  /** Of those, ones that matched a known region name. */
+  named: number;
+}
+
 export interface RadioRegionDiscoveryResponse {
   repeaters_queried: number;
   repeaters_answered: number;

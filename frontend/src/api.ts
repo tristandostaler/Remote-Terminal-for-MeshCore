@@ -23,6 +23,7 @@ import type {
   RadioConfigUpdate,
   RadioDiscoveryResponse,
   RadioRegionDiscoveryResponse,
+  RegionBackfillResponse,
   GuessRegionsJob,
   ImportRegionsResponse,
   RadioTraceHopRequest,
@@ -390,6 +391,8 @@ export const api = {
   getGuessRegionsJob: () => fetchJson<GuessRegionsJob | null>('/settings/regions/guess'),
   cancelGuessRegions: (jobId: string) =>
     fetchJson<GuessRegionsJob>(`/settings/regions/guess/${jobId}/cancel`, { method: 'POST' }),
+  backfillRegions: () =>
+    fetchJson<RegionBackfillResponse>('/packets/region-backfill', { method: 'POST' }),
   importRegions: (url: string) =>
     fetchJson<ImportRegionsResponse>('/settings/regions/import', {
       method: 'POST',

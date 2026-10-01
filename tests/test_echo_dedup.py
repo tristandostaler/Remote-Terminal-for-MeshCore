@@ -236,6 +236,51 @@ class TestChannelEchoDetection:
         ack_broadcasts = [b for b in broadcasts if b["type"] == "message_acked"]
         assert len(ack_broadcasts) == 0
 
+    @pytest.mark.asyncio
+    async def test_scoped_duplicate_fills_region_on_unscoped_first_copy(
+        self, test_db, captured_broadcasts
+    ):
+        """A scoped copy collapsing onto a copy stored without scope fills in region.
+
+        The radio's queued copy of a resident channel's message carries no
+        transport code; when it is stored before the raw RX-log frame, the
+        scoped frame dedups onto it and must not leave it reading "region: none".
+        """
+        from app.packet_processor import create_message_from_decrypted
+
+        pkt1, _ = await RawPacketRepository.create(b"scope_fill_1", SENDER_TIMESTAMP)
+        _, mock_broadcast = captured_broadcasts
+
+        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+            msg_id = await create_message_from_decrypted(
+                packet_id=pkt1,
+                channel_key=CHANNEL_KEY,
+                sender="OtherUser",
+                message_text="Scoped later",
+                timestamp=SENDER_TIMESTAMP,
+                received_at=SENDER_TIMESTAMP,
+            )
+            assert msg_id is not None
+
+            pkt2, _ = await RawPacketRepository.create(b"scope_fill_2", SENDER_TIMESTAMP + 1)
+            result = await create_message_from_decrypted(
+                packet_id=pkt2,
+                channel_key=CHANNEL_KEY,
+                sender="OtherUser",
+                message_text="Scoped later",
+                timestamp=SENDER_TIMESTAMP,
+                received_at=SENDER_TIMESTAMP + 1,
+                path="aa",
+                transport_code=0x1234,
+                region="QC",
+            )
+
+        assert result is None
+        stored = await MessageRepository.get_by_id(msg_id)
+        assert stored is not None
+        assert stored.transport_code == 0x1234
+        assert stored.region == "QC"
+
 
 class TestDMEchoDetection:
     """Test echo detection for direct messages."""

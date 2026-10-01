@@ -513,6 +513,13 @@ export function App() {
     setVisibilityVersion((current) => current + 1);
   }, [clearConversationMessages, refreshUnreads, reloadCurrentConversation]);
 
+  // Region re-tagging changes stored messages in place; drop cached
+  // conversations so the next view (and the open one) refetch the new labels.
+  const handleMessagesRetagged = useCallback(() => {
+    clearConversationMessages();
+    reloadCurrentConversation();
+  }, [clearConversationMessages, reloadCurrentConversation]);
+
   const handleBlockKey = useCallback(
     async (key: string) => {
       await handleToggleBlockedKey(key);
@@ -820,6 +827,7 @@ export function App() {
     regionDiscovery,
     regionDiscoveryLoading,
     onDiscoverRegions: handleDiscoverRegions,
+    onMessagesRetagged: handleMessagesRetagged,
     onHealthRefresh: handleHealthRefresh,
     onRefreshAppSettings: fetchAppSettings,
     blockedKeys: appSettings?.blocked_keys,
