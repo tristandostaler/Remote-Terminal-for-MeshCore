@@ -12,6 +12,11 @@ default, set under Limits), so answers are generated against a deadline that
 fits inside it and whatever was produced by then is sent. One question is answered
 at a time.
 
+Contacts listed under "Answer DMs without a keyword" can just DM a question:
+a DM that no bot's keyword matched is answered as if it started with ``ask``
+(``hello`` still goes to the hello bot), and every message of their DM counts
+toward the model's memory, other bots' exchanges included.
+
 Needs the optional ``llm`` extra: ``uv sync --extra llm``.
 """
 
@@ -19,6 +24,7 @@ import asyncio
 import re
 import time
 
+from app.bots.api import contact_listed
 from app.bots.bots_utils.tinyllm.llm import (
     CONTEXT_CHOICES,
     CONTEXT_TOKENS,
@@ -49,6 +55,9 @@ STOP_BEFORE_LIMIT_SECONDS = 3
 # simply stops there; so does an hour of silence.
 KEYWORDS = ("ask", "ai", "llm", "tinyllm")
 RESET_WORDS = frozenset({"reset", "forget"})
+# The setting naming the contacts whose DMs need no keyword (engine fallback,
+# ``@bot.on_unmatched``): public keys or prefixes, or ``*`` for everyone.
+KEYWORDLESS_SETTING = "keywordless_contacts"
 # Admin DM: "ask missed" lists questions that found no notes, "ask missed
 # clear" empties the list. Anyone else asking "missed" just gets an answer.
 MISSED_WORD = "missed"
@@ -106,7 +115,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.6.0",
+    "version": "1.7.0",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "timeout_seconds": TIME_LIMIT_SECONDS,
@@ -259,6 +268,20 @@ BOT_META = {
             ),
         },
         {
+            "key": KEYWORDLESS_SETTING,
+            "label": "Answer DMs without a keyword from",
+            "type": "text",
+            "default": "",
+            "help": (
+                "Public keys (or prefixes of at least 6 characters) separated by commas or "
+                "spaces; `*` for every contact. Their DMs are answered without `ask` "
+                "whenever no other bot's keyword matched, so `hello` still goes to the "
+                "hello bot. `ask ...` keeps working, and `reset` alone clears the "
+                "memory. All of their DM -- other bots' answers too -- counts toward "
+                "DM memory. Empty: everyone needs a keyword."
+            ),
+        },
+        {
             "key": "use_docs",
             "label": "Look up reference notes",
             "type": "bool",
@@ -403,6 +426,7 @@ BOT_META = {
         "max_tokens": 40,
         "max_messages": 1,
         "history_messages": 10,
+        KEYWORDLESS_SETTING: "",
         "use_docs": True,
         "check_notes_with_model": False,
         "notes_check_seconds": NOTES_CHECK_SECONDS,
@@ -530,16 +554,20 @@ def fit_messages(text, budget_bytes, max_messages):
     return (cut[:space] if space > 0 else cut).rstrip(" ,;:") + "\u2026"
 
 
-def conversation_turns(messages, now):
+def conversation_turns(messages, now, keywordless=False):
     """Rebuild question/answer turns from a DM conversation, oldest first.
 
     ``messages`` are the conversation's stored rows (any order). A turn is an
     incoming question to this bot plus the answer sent right after it: the
     bot's own notices (they start with the robot emoji) are not answers, and a
     multi-part answer's "(i/n)" parts are joined. Messages that were not
-    questions to the bot -- ordinary chat with this contact -- are ignored.
-    History starts after the last `ask reset` and after any gap of an hour.
-    The question being answered right now is already stored; it is left out.
+    questions to the bot -- ordinary chat with this contact -- are ignored,
+    unless ``keywordless`` (the contact needs no keyword): then every incoming
+    message is a question, its keyword stripped when it has one, so `ask x`
+    and `x` read the same and other bots' exchanges are remembered too.
+    History starts after the last `ask reset` (or bare `reset` when
+    keywordless) and after any gap of an hour. The question being answered
+    right now is already stored; it is left out.
     """
     turns = []  # [question, [answer parts], received_at]
     answering = False  # still collecting the latest question's answer
@@ -552,9 +580,12 @@ def conversation_turns(messages, now):
             # Any incoming message ends the previous answer, question or not.
             answering = False
             match = _COMMAND_RE.match(message.text or "")
-            if not match:
+            if match:
+                question = match.group(2).strip()
+            elif keywordless:
+                question = (message.text or "").strip()
+            else:
                 continue
-            question = match.group(2).strip()
             if question.lower() in RESET_WORDS:
                 turns = []
             elif question:
@@ -587,7 +618,7 @@ def _trimmed(history, limit, max_chars):
     return history
 
 
-async def dm_history(sender_key, limit, max_chars=HISTORY_MAX_CHARS):
+async def dm_history(sender_key, limit, max_chars=HISTORY_MAX_CHARS, keywordless=False):
     """The last ``limit`` messages of this DM conversation with the bot, read
     back from the stored messages."""
     from app.repository import MessageRepository
@@ -595,10 +626,10 @@ async def dm_history(sender_key, limit, max_chars=HISTORY_MAX_CHARS):
     rows = await MessageRepository.get_all(
         limit=min(200, limit * 4 + 10), msg_type="PRIV", conversation_key=sender_key
     )
-    return _trimmed(conversation_turns(rows, time.time()), limit, max_chars)
+    return _trimmed(conversation_turns(rows, time.time(), keywordless), limit, max_chars)
 
 
-def panel_history(transcript, limit, max_chars=HISTORY_MAX_CHARS):
+def panel_history(transcript, limit, max_chars=HISTORY_MAX_CHARS, keywordless=False):
     """The same, from the Bots › Test tab's own transcript: test runs store no
     messages, so the panel sends its earlier exchanges with each run."""
     from types import SimpleNamespace
@@ -610,7 +641,7 @@ def panel_history(transcript, limit, max_chars=HISTORY_MAX_CHARS):
         )
         for n, m in enumerate(transcript)
     ]
-    return _trimmed(conversation_turns(rows, now), limit, max_chars)
+    return _trimmed(conversation_turns(rows, now, keywordless), limit, max_chars)
 
 
 def time_limit(ctx):
@@ -643,8 +674,14 @@ def _number(ctx, key, default, low, high):
     return min(high, max(low, value))
 
 
+def is_keywordless(ctx, msg):
+    """Does this DM's sender need no keyword (listed under KEYWORDLESS_SETTING)?"""
+    return bool(msg.is_dm and contact_listed(ctx.settings.get(KEYWORDLESS_SETTING), msg.sender_key))
+
+
 @bot.on_keyword()
 @bot.on_keyword("ask", "ai", "llm", "tinyllm")
+@bot.on_unmatched(KEYWORDLESS_SETTING)
 async def ask(ctx, msg):
     try:
         spec = resolve_spec(ctx.settings)
@@ -723,9 +760,13 @@ async def ask(ctx, msg):
     history = []
     if msg.is_dm and history_limit and history_room > 0:
         if ctx.is_test and ctx.test_transcript:
-            history = panel_history(ctx.test_transcript, history_limit, history_room)
+            history = panel_history(
+                ctx.test_transcript, history_limit, history_room, is_keywordless(ctx, msg)
+            )
         elif session:
-            history = await dm_history(session, history_limit, history_room)
+            history = await dm_history(
+                session, history_limit, history_room, is_keywordless(ctx, msg)
+            )
     notes = ""
     if use_docs:
         # The previous question too, so a follow-up ("and how do I set it?")

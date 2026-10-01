@@ -3,8 +3,8 @@
 Two authoring styles are supported:
 
 * **Decorated** (the native style): ``from remoteterm import bot`` +
-  ``@bot.on_keyword(...)`` / ``on_message`` / ``on_cron`` / ``on_event`` /
-  ``on_webhook`` handlers taking ``(ctx, msg)`` or ``(ctx)``.
+  ``@bot.on_keyword(...)`` / ``on_message`` / ``on_unmatched`` / ``on_cron`` /
+  ``on_event`` / ``on_webhook`` handlers taking ``(ctx, msg)`` or ``(ctx)``.
 
 * **Legacy** (migrated fanout bots): a module-level ``def bot(**kwargs)`` (any
   of the historical signatures). It is auto-wrapped as a catch-all message
@@ -105,7 +105,7 @@ def load_bot_code(code: str) -> LoadedCode:
         else:
             raise BotCodeError(
                 "bot code declares no triggers — add a @bot.on_keyword / on_message / "
-                "on_cron / on_event / on_webhook handler (or a legacy def bot(**kwargs))"
+                "on_unmatched / on_cron / on_event / on_webhook handler (or a legacy def bot(**kwargs))"
             )
 
     # Validate code-declared cron expressions eagerly so a typo fails at save
