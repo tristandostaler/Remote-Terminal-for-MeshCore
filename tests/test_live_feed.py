@@ -141,6 +141,9 @@ class FakeCoreScope:
         return packets
 
     def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/api/v1/"):
+            # The Beacon probe: a CoreScope instance has no /api/v1.
+            return httpx.Response(404, json={"error": "not found"})
         self.requests.append(request)
         if self.fail_with is not None:
             return httpx.Response(self.fail_with, text="nope")

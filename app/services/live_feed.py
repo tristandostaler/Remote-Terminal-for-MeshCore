@@ -19,6 +19,23 @@ Either way the message is re-keyed to the local ``(conversation_key, text,
 sender_timestamp)`` dedup identity and the SQL in ``LiveFeedRepository`` does
 the rest.
 
+MeshCore Beacon: live.meshcore.ca moved from CoreScope to Beacon, whose API
+lives under ``/api/v1`` and is shaped differently. Each instance URL is probed
+once (``GET /api/v1/channels``) and the matching client path is used:
+
+* ``GET /api/v1/channels?hash=XX`` finds the remote channel(s) behind a hash
+  byte (paged with ``pageCursor``); a match is confirmed by key fingerprint,
+  hashtag name or, for keyed non-hashtag channels such as Public, by name.
+* ``GET /api/v1/channels/{id}/messages?since=&iatas=&cursor=`` is Beacon's own
+  decryption of a channel it holds a key for. ``since`` is on the *sender's*
+  timestamp, so incremental polls re-read ``BEACON_SENT_AT_SLACK_SECONDS``
+  further back to cover senders whose clock runs behind.
+* Channels Beacon cannot decrypt (private ones) fall back to the packet feed:
+  ``GET /api/v1/packets?payloadType=5`` lists GRP_TXT summaries without their
+  ciphertext, so each unseen packet costs one ``GET /api/v1/packets/{hash}``
+  for ``rawPayload``. That is budgeted per sync (``MAX_DETAIL_FETCHES_PER_SYNC``)
+  and remembered (``_inspected``), so a busy week drains over a few polls.
+
 Region: CoreScope tags every observation with the observer's IATA region code
 (``meshcore/{IATA}/{PUBKEY}/packets``). ``region=YUL,YQB`` restricts the feed
 to messages heard by observers in those regions. This is a geographic filter
@@ -96,6 +113,21 @@ RECENT_LOG_ENTRIES = 40
 # How long POST /live-feed/sync waits for the sync it started before answering
 # with "still syncing" -- short of common reverse-proxy timeouts.
 SYNC_REQUEST_WAIT_SECONDS = 20.0
+# MeshCore Beacon (see module docstring).
+BEACON_API = "/api/v1"
+FLAVOR_BEACON = "beacon"
+FLAVOR_CORESCOPE = "corescope"
+FLAVOR_CACHE_SECONDS = 3600
+# Pages of /channels?hash= walked per hash byte; collisions are a handful.
+MAX_BEACON_CHANNEL_PAGES = 5
+BEACON_SENT_AT_SLACK_SECONDS = 3600
+# Packet-detail fetches (one per unseen GRP_TXT packet) for channels Beacon
+# cannot decrypt, per sync, and how many run at once.
+MAX_DETAIL_FETCHES_PER_SYNC = 300
+DETAIL_CONCURRENCY = 4
+# Packets already inspected for private channels: hash -> mirrored row, or
+# ``None`` when no compared key opens it. Bounded, oldest dropped first.
+MAX_INSPECTED_PACKETS = 50_000
 
 
 def _log(message: str) -> None:
@@ -134,6 +166,9 @@ class LiveFeedState:
     feed_scope: str | None = None
     # Last few sync events, newest last, for the settings page's activity view.
     recent_log: deque[str] = field(default_factory=lambda: deque(maxlen=RECENT_LOG_ENTRIES))
+    # Beacon only: the per-sync packet-detail budget ran out before the private
+    # channels' packet walk was done, so the next sync walks the week again.
+    private_backlog: bool = False
 
 
 _state = LiveFeedState()
@@ -144,6 +179,8 @@ _task: asyncio.Task | None = None
 _wake: asyncio.Event | None = None
 _sync_lock = asyncio.Lock()
 _regions_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
+_flavor_cache: dict[str, tuple[float, str]] = {}
+_inspected: dict[str, dict[str, Any] | None] = {}
 # Test seam: an ``httpx`` transport swapped in for the real network.
 _transport: Any = None
 
@@ -296,8 +333,23 @@ def normalize_live_message(
     }
 
 
+def instance_base_url(url: str) -> str:
+    """The instance root, tolerating a pasted API URL (``.../api/v1`` or ``.../api``)."""
+    base = (url or "").strip().rstrip("/")
+    for suffix in (BEACON_API, "/api"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)].rstrip("/")
+            break
+    return base
+
+
+def _ms_to_s(value: Any) -> int | None:
+    ms = _coerce_int(value)
+    return ms // 1000 if ms is not None else None
+
+
 class LiveFeedClient:
-    """Thin async client for the handful of CoreScope endpoints we read.
+    """Thin async client for the handful of CoreScope / Beacon endpoints we read.
 
     Use it as an async context manager so a whole sync -- up to a hundred
     pages -- rides one connection pool instead of a TCP+TLS handshake per page.
@@ -306,7 +358,7 @@ class LiveFeedClient:
     """
 
     def __init__(self, base_url: str, region: str = "", *, transport: Any = None) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = instance_base_url(base_url)
         self.region = normalize_region(region)
         self._transport = transport if transport is not None else _transport
         self._client: Any = None
@@ -365,6 +417,109 @@ class LiveFeedClient:
                 raise LiveFeedError(f"{url}: response is not JSON") from exc
         raise LiveFeedError(last_error or f"{url}: request failed")
 
+    async def _get_optional_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """Like ``_get_json`` but ``None`` on 404 / non-JSON instead of raising."""
+        url = f"{self.base_url}{path}"
+        try:
+            if self._client is not None:
+                response = await self._client.get(url, params=params or None)
+            else:
+                async with self._new_client() as client:
+                    response = await client.get(url, params=params or None)
+        except Exception as exc:
+            raise LiveFeedError(f"{url}: {exc.__class__.__name__}: {exc}") from exc
+        if response.status_code >= 500:
+            raise LiveFeedError(f"{url}: HTTP {response.status_code}")
+        if response.status_code >= 400:
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            return None
+
+    async def flavor(self) -> str:
+        """``"beacon"`` or ``"corescope"``, probed once per instance and cached."""
+        cached = _flavor_cache.get(self.base_url)
+        if cached and time.monotonic() - cached[0] < FLAVOR_CACHE_SECONDS:
+            return cached[1]
+        payload = await self._get_optional_json(f"{BEACON_API}/channels", {"limit": 1})
+        flavor = (
+            FLAVOR_BEACON
+            if isinstance(payload, dict) and isinstance(payload.get("items"), list)
+            else FLAVOR_CORESCOPE
+        )
+        _flavor_cache[self.base_url] = (time.monotonic(), flavor)
+        return flavor
+
+    @staticmethod
+    def _page(payload: Any, what: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            raise LiveFeedError(f"{what}: missing 'items' list")
+        return [i for i in payload["items"] if isinstance(i, dict)], payload
+
+    async def fetch_beacon_channels(self, hash_byte: int) -> list[dict[str, Any]]:
+        """Every Beacon channel behind one hash byte (``GET /api/v1/channels?hash=``)."""
+        channels: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"hash": f"{hash_byte:02x}", "limit": PAGE_LIMIT}
+        for _page in range(MAX_BEACON_CHANNEL_PAGES):
+            items, payload = self._page(
+                await self._get_json(f"{BEACON_API}/channels", params), "channels"
+            )
+            channels.extend(items)
+            page_cursor = payload.get("nextPageCursor")
+            if not payload.get("hasMore") or not isinstance(page_cursor, str) or not items:
+                break
+            params = {**params, "pageCursor": page_cursor}
+        return channels
+
+    async def fetch_beacon_channel(self, channel_id: int) -> dict[str, Any]:
+        payload = await self._get_json(f"{BEACON_API}/channels/{channel_id}")
+        if not isinstance(payload, dict):
+            raise LiveFeedError("channel detail: unexpected response shape")
+        return payload
+
+    async def fetch_beacon_channel_messages(
+        self, channel_id: int, *, since_ms: int, cursor: int | None = None
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """One page (newest first) of Beacon's decryption of a channel; ``(items, next)``."""
+        params: dict[str, Any] = {"since": since_ms, "limit": PAGE_LIMIT}
+        if cursor:
+            params["cursor"] = cursor
+        if self.region:
+            params["iatas"] = self.region
+        items, payload = self._page(
+            await self._get_json(f"{BEACON_API}/channels/{channel_id}/messages", params),
+            "channel messages",
+        )
+        next_cursor = _coerce_int(payload.get("nextCursor")) if payload.get("hasMore") else None
+        return items, next_cursor
+
+    async def fetch_beacon_packets(
+        self, *, since_ms: int, until_ms: int, cursor: int | None = None
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """One page of GRP_TXT packet summaries first heard in ``[since, until]``."""
+        params: dict[str, Any] = {
+            "payloadType": GROUP_TEXT_PAYLOAD_TYPE,
+            "since": since_ms,
+            "until": until_ms,
+            "limit": PAGE_LIMIT,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        if self.region:
+            params["iatas"] = self.region
+        items, payload = self._page(
+            await self._get_json(f"{BEACON_API}/packets", params), "packets"
+        )
+        next_cursor = _coerce_int(payload.get("nextCursor")) if payload.get("hasMore") else None
+        return items, next_cursor
+
+    async def fetch_beacon_packet(self, packet_hash: str) -> dict[str, Any]:
+        payload = await self._get_json(f"{BEACON_API}/packets/{quote(packet_hash, safe='')}")
+        if not isinstance(payload, dict):
+            raise LiveFeedError("packet detail: unexpected response shape")
+        return payload
+
     async def fetch_channel_messages(
         self, channel_name: str, *, limit: int | None = None, offset: int = 0
     ) -> tuple[list[dict[str, Any]], int | None]:
@@ -415,8 +570,19 @@ class LiveFeedClient:
         return [p for p in packets if isinstance(p, dict)], _coerce_int(payload.get("total"))
 
     async def fetch_regions(self) -> list[dict[str, str]]:
-        payload = await self._get_json("/api/config/regions")
         regions: list[dict[str, str]] = []
+        if await self.flavor() == FLAVOR_BEACON:
+            # Beacon's observer regions are IATA codes, the same values the
+            # ``iatas=`` filter takes.
+            payload = await self._get_json(f"{BEACON_API}/iatas")
+            for item in payload if isinstance(payload, list) else []:
+                if isinstance(item, dict) and isinstance(item.get("iata"), str) and item["iata"]:
+                    code = item["iata"].strip().upper()
+                    label = item.get("displayName")
+                    regions.append({"code": code, "label": f"{label} ({code})" if label else code})
+            regions.sort(key=lambda r: (r["label"].casefold(), r["code"]))
+            return regions
+        payload = await self._get_json("/api/config/regions")
         if isinstance(payload, dict):
             nested = payload.get("regions")
             items: dict[Any, Any] = nested if isinstance(nested, dict) else payload
@@ -803,6 +969,290 @@ async def _sync_channel_messages(
     return fetched, changed
 
 
+# ─── Beacon sync ───────────────────────────────────────────────────────────
+
+
+def _key_fingerprint(key: str) -> str:
+    """Beacon's ``keyFingerprint``: the first 8 bytes of SHA256(key), hex."""
+    return hashlib.sha256(bytes.fromhex(key)).digest()[:8].hex()
+
+
+def _beacon_channel_matches(remote: dict[str, Any], channel: ComparedChannel) -> bool:
+    """Is this keyed Beacon channel the same channel as ``channel``?
+
+    The fingerprint is exact but Beacon publishes it for hashtag channels only;
+    a hashtag name derives the key; anything else (Public, a configured
+    community channel) is matched by name within the same hash byte.
+    """
+    fingerprint = remote.get("keyFingerprint")
+    if isinstance(fingerprint, str) and fingerprint:
+        return fingerprint.lower() == _key_fingerprint(channel.key)
+    hashtag = remote.get("hashtag")
+    if isinstance(hashtag, str) and hashtag:
+        return hashtag_channel_key(f"#{hashtag.lstrip('#')}") == channel.key
+    name = remote.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return False
+    name = name.strip()
+    if channel.key == PUBLIC_CHANNEL_KEY:
+        return is_public_channel_name(name)
+    if remote.get("isHashtag"):
+        return hashtag_channel_key(f"#{name.lstrip('#')}") == channel.key
+    return name.casefold() == channel.name.casefold()
+
+
+async def _match_beacon_channels(
+    client: LiveFeedClient, channels: list[ComparedChannel]
+) -> dict[str, int]:
+    """Local channel key -> Beacon channel id, for channels Beacon decrypts itself."""
+    by_hash: dict[int, list[ComparedChannel]] = defaultdict(list)
+    for channel in channels:
+        by_hash[channel.hash_byte].append(channel)
+    matched: dict[str, int] = {}
+    for hash_byte, group in by_hash.items():
+        remotes = [
+            r
+            for r in await client.fetch_beacon_channels(hash_byte)
+            if r.get("keyKnown") and _coerce_int(r.get("id")) is not None
+        ]
+        for remote in remotes:
+            if remote.get("isHashtag") and not remote.get("keyFingerprint"):
+                # Only the detail carries the fingerprint / hashtag name.
+                with contextlib.suppress(LiveFeedError):
+                    remote.update(await client.fetch_beacon_channel(int(remote["id"])))
+            for channel in group:
+                if channel.key not in matched and _beacon_channel_matches(remote, channel):
+                    matched[channel.key] = int(remote["id"])
+    return matched
+
+
+def normalize_beacon_message(
+    raw: dict[str, Any], channel: ComparedChannel, now: int
+) -> dict[str, Any] | None:
+    """One Beacon ``ChannelMessage`` -> one ``live_feed_messages`` row."""
+    content = raw.get("content")
+    if not isinstance(content, str):
+        return None
+    sender = raw.get("senderName")
+    sender = sender.strip() if isinstance(sender, str) and sender.strip() else None
+    text = normalize_live_text(sender, content)
+    if not text.strip():
+        return None
+    sender_timestamp = _ms_to_s(raw.get("sentAt"))
+    # Beacon's message list carries no reception time; the sender's clock is
+    # the best there is, kept out of the future.
+    seen = min(sender_timestamp, now) if sender_timestamp is not None else now
+    packet_hash = raw.get("packetHash")
+    return {
+        "packet_hash": str(packet_hash)
+        if packet_hash
+        else _synthetic_hash(channel.name, sender_timestamp, text),
+        "channel_name": channel.name,
+        "channel_key": channel.key,
+        "sender": sender,
+        "text": text,
+        "sender_timestamp": sender_timestamp,
+        "first_seen": seen,
+        "last_seen": seen,
+        "repeats": _coerce_int(raw.get("observationCount")) or 1,
+        "observers": [],
+        "hops": None,
+        "snr": None,
+        "scope_name": raw.get("scope") if isinstance(raw.get("scope"), str) else None,
+    }
+
+
+async def _sync_beacon_channel(
+    client: LiveFeedClient, channel: ComparedChannel, channel_id: int, since: int, now: int
+) -> tuple[int, int]:
+    fetched = changed = 0
+    cursor: int | None = None
+    for _page in range(MAX_PAGES_PER_CHANNEL):
+        items, cursor = await client.fetch_beacon_channel_messages(
+            channel_id, since_ms=since * 1000, cursor=cursor
+        )
+        rows = [
+            row
+            for row in (normalize_beacon_message(m, channel, now) for m in items)
+            if row is not None
+        ]
+        inserted, updated = await LiveFeedRepository.upsert_many(rows)
+        fetched += len(rows)
+        changed += inserted + updated
+        if not items or cursor is None:
+            break
+    return fetched, changed
+
+
+def decrypt_beacon_packet(
+    detail: dict[str, Any], channels_by_hash: dict[int, list[ComparedChannel]]
+) -> dict[str, Any] | None:
+    """Decrypt one Beacon packet detail (``rawPayload``) with the compared keys."""
+    raw_payload = detail.get("rawPayload")
+    if not isinstance(raw_payload, str) or not raw_payload:
+        return None
+    try:
+        payload = bytes.fromhex(raw_payload)
+    except ValueError:
+        return None
+    if len(payload) < 3:
+        return None
+    for channel in channels_by_hash.get(payload[0], ()):
+        decrypted = decrypt_group_text(payload, channel.key_bytes)
+        if decrypted is None:
+            continue
+        text = normalize_live_text(decrypted.sender, decrypted.message)
+        if not text.strip():
+            return None
+        observations = [o for o in detail.get("observations") or [] if isinstance(o, dict)]
+        first = _ms_to_s(detail.get("firstHeardAt")) or int(time.time())
+        last = _ms_to_s(detail.get("lastHeardAt")) or first
+        hop_counts = [
+            _coerce_int((o.get("pathLength") or {}).get("hopCount"))
+            for o in observations
+            if isinstance(o.get("pathLength"), dict)
+        ]
+        hop_counts = [h for h in hop_counts if h is not None]
+        snrs = [_coerce_float(o.get("snr")) for o in observations]
+        snrs = [v for v in snrs if v is not None]
+        observers = [
+            str(o.get("observerName") or o.get("observerId"))
+            for o in observations
+            if o.get("observerName") or o.get("observerId")
+        ]
+        return {
+            "packet_hash": str(detail.get("packetHash") or _corescope_hash(payload)),
+            "channel_name": channel.name,
+            "channel_key": channel.key,
+            "sender": decrypted.sender,
+            "text": text,
+            "sender_timestamp": decrypted.timestamp,
+            "first_seen": first,
+            "last_seen": max(first, last),
+            "repeats": _coerce_int(detail.get("observationCount")) or len(observations) or 1,
+            "observers": list(dict.fromkeys(observers)),
+            "hops": min(hop_counts) if hop_counts else None,
+            "snr": max(snrs) if snrs else None,
+            "scope_name": detail.get("scope") if isinstance(detail.get("scope"), str) else None,
+        }
+    return None
+
+
+def _remember_inspected(packet_hash: str, row: dict[str, Any] | None) -> None:
+    _inspected.pop(packet_hash, None)
+    _inspected[packet_hash] = row
+    while len(_inspected) > MAX_INSPECTED_PACKETS:
+        _inspected.pop(next(iter(_inspected)))
+
+
+async def _sync_beacon_private(
+    client: LiveFeedClient, channels: list[ComparedChannel], since: int, until: int
+) -> tuple[int, int, bool, str | None]:
+    """Decrypt the GRP_TXT packets of channels Beacon has no key for.
+
+    Returns ``(fetched, changed, exhausted, failure)``; ``exhausted`` means the
+    detail budget ran out before the walk reached ``since``.
+    """
+    channels_by_hash: dict[int, list[ComparedChannel]] = defaultdict(list)
+    for channel in channels:
+        channels_by_hash[channel.hash_byte].append(channel)
+    fetched = changed = 0
+    budget = MAX_DETAIL_FETCHES_PER_SYNC
+    exhausted = False
+    failure: str | None = None
+    cursor: int | None = None
+    for _page in range(MAX_PACKET_PAGES):
+        try:
+            summaries, cursor = await client.fetch_beacon_packets(
+                since_ms=since * 1000, until_ms=until * 1000, cursor=cursor
+            )
+        except LiveFeedError as exc:
+            failure = str(exc)
+            break
+        rows: list[dict[str, Any]] = []
+        to_fetch: list[str] = []
+        for summary in summaries:
+            packet_hash = summary.get("packetHash")
+            if not isinstance(packet_hash, str) or not packet_hash:
+                continue
+            if packet_hash in _inspected:
+                row = _inspected[packet_hash]
+                if row is not None:
+                    # Ours already: the summary is enough to refresh its counts.
+                    last = _ms_to_s(summary.get("lastHeardAt")) or row["last_seen"]
+                    row = {
+                        **row,
+                        "repeats": _coerce_int(summary.get("observationCount")) or row["repeats"],
+                        "last_seen": max(row["last_seen"], last),
+                    }
+                    _remember_inspected(packet_hash, row)
+                    rows.append(row)
+                continue
+            if len(to_fetch) >= budget:
+                exhausted = True
+                break
+            to_fetch.append(packet_hash)
+        budget -= len(to_fetch)
+        for start in range(0, len(to_fetch), DETAIL_CONCURRENCY):
+            chunk = to_fetch[start : start + DETAIL_CONCURRENCY]
+            details = await asyncio.gather(
+                *(client.fetch_beacon_packet(h) for h in chunk), return_exceptions=True
+            )
+            for packet_hash, detail in zip(chunk, details, strict=True):
+                if isinstance(detail, BaseException):
+                    failure = str(detail)
+                    continue
+                row = decrypt_beacon_packet(detail, channels_by_hash)
+                _remember_inspected(packet_hash, row)
+                if row is not None:
+                    rows.append(row)
+        inserted, updated = await LiveFeedRepository.upsert_many(rows)
+        fetched += len(rows)
+        changed += inserted + updated
+        if exhausted or not summaries or cursor is None:
+            break
+    return fetched, changed, exhausted, failure
+
+
+async def _sync_beacon(
+    client: LiveFeedClient, channels: list[ComparedChannel], since: int, now: int, full_walk: bool
+) -> tuple[int, int, str | None]:
+    """One Beacon sync: its own decryption where it has the key, packets elsewhere."""
+    matched = await _match_beacon_channels(client, channels)
+    fetched = changed = 0
+    message_since = (
+        since if full_walk else max(now - LOOKBACK_SECONDS, since - BEACON_SENT_AT_SLACK_SECONDS)
+    )
+    for channel in channels:
+        channel_id = matched.get(channel.key)
+        if channel_id is None:
+            continue
+        got, moved = await _sync_beacon_channel(client, channel, channel_id, message_since, now)
+        fetched += got
+        changed += moved
+    private = [channel for channel in channels if channel.key not in matched]
+    warning: str | None = None
+    if private:
+        private_since = now - LOOKBACK_SECONDS if _state.private_backlog else since
+        got, moved, exhausted, failure = await _sync_beacon_private(
+            client, private, private_since, now
+        )
+        fetched += got
+        changed += moved
+        _state.private_backlog = exhausted
+        names = ", ".join(channel.name for channel in private)
+        if failure:
+            warning = f"Packet feed partly unavailable for {names} ({failure})"
+        elif exhausted:
+            warning = (
+                f"Still inspecting older packets for {names} "
+                f"({MAX_DETAIL_FETCHES_PER_SYNC} per sync); the rest follows on later syncs"
+            )
+    else:
+        _state.private_backlog = False
+    return fetched, changed, warning
+
+
 def _feed_scope(settings: AppSettings) -> str:
     """Which remote feed the mirror holds: instance and region filter."""
     return f"{settings.live_feed_url.rstrip('/')}|{normalize_region(settings.live_feed_region)}"
@@ -838,9 +1288,14 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
                 # observations; rows fetched under the old one would otherwise
                 # keep showing up as "live" for the new selection.
                 await LiveFeedRepository.clear()
+                _inspected.clear()
+                _state.private_backlog = False
                 _state.cursor = None
                 _log(f"instance/region changed to {feed_scope}: mirror cleared, walking again")
             full_walk = _state.cursor is None or _state.cursor_scope != scope
+            if _state.cursor_scope != scope:
+                # A newly compared key may open packets remembered as "not ours".
+                _inspected.clear()
             since = (
                 now - LOOKBACK_SECONDS
                 if full_walk or _state.cursor is None
@@ -855,7 +1310,12 @@ async def sync_once(settings: AppSettings | None = None, *, force: bool = False)
                 f"{len(channels)} channels, region {normalize_region(settings.live_feed_region) or 'all'})"
             )
             async with LiveFeedClient(settings.live_feed_url, settings.live_feed_region) as client:
-                if channels:
+                if channels and await client.flavor() == FLAVOR_BEACON:
+                    source = "beacon"
+                    fetched, changed, warning = await _sync_beacon(
+                        client, channels, since, now, full_walk
+                    )
+                elif channels:
                     packet_result = await _sync_packets(client, channels, since, now)
                     fetched = packet_result.fetched
                     changed = packet_result.changed
@@ -1017,7 +1477,7 @@ async def get_status(
         **{
             k: v
             for k, v in asdict(_state).items()
-            if k not in ("cursor", "cursor_scope", "feed_scope", "recent_log")
+            if k not in ("cursor", "cursor_scope", "feed_scope", "recent_log", "private_backlog")
         },
         "recent_log": list(_state.recent_log),
     }
@@ -1061,7 +1521,7 @@ async def list_messages(
 
 async def get_regions(settings: AppSettings | None = None) -> dict[str, Any]:
     settings = settings or await AppSettingsRepository.get()
-    url = settings.live_feed_url.rstrip("/")
+    url = instance_base_url(settings.live_feed_url)
     cached = _regions_cache.get(url)
     if cached and time.monotonic() - cached[0] < REGIONS_CACHE_SECONDS:
         return {"url": url, "regions": cached[1]}
@@ -1075,5 +1535,7 @@ def _reset_for_tests() -> None:
     _state = LiveFeedState()
     _transport = None
     _regions_cache.clear()
+    _flavor_cache.clear()
+    _inspected.clear()
     if _wake is not None:
         _wake.clear()

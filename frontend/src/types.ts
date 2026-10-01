@@ -1388,7 +1388,7 @@ export interface LiveFeedStatus {
   /** The last few sync events, timestamped, oldest first. */
   recent_log: string[];
   /** 'packets' = remote packets decrypted locally (any channel with a key); 'channel_messages' = the instance's own decryption. */
-  source: 'packets' | 'channel_messages';
+  source: 'packets' | 'channel_messages' | 'beacon';
 }
 
 export interface LiveCompareCounts {

@@ -502,7 +502,9 @@ export function SettingsLiveFeedSection({
               {' · '}
               {status.source === 'packets'
                 ? 'remote packets decrypted with this node’s keys'
-                : 'the instance’s own decryption (Public and hashtag channels)'}
+                : status.source === 'beacon'
+                  ? 'MeshCore Beacon’s own decryption, plus its packets decrypted with this node’s keys for channels it cannot read'
+                  : 'the instance’s own decryption (Public and hashtag channels)'}
             </div>
             {status.unresolved_channels.length > 0 && (
               <div className="text-warning">
