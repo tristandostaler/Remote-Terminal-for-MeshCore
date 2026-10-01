@@ -169,7 +169,13 @@ operators).
   `tests/test_bots_tinyllm.py` pins sample questions to their sections --
   rerun it after editing any shipped note. `this-node-bots.md` is not shipped:
   the bot writes it on every run from `ctx.get_enabled_bots()` (so private
-  bots never appear), only when it changed, and seeding never touches it. The bot budgets the context by characters (~3/token, no tokenizer
+  bots never appear), only when it changed, and seeding never touches it. Notes are capped by `notes_max_chars`
+  (default 700) well below what the context could hold: the model reads them
+  before answering, and on a Pi that prompt reading -- not the ~1 ms search --
+  is most of the wait. A rendered note carries only its last two heading
+  levels. The engine warms the index at startup (`_warm_tinyllm_notes`) when an
+  enabled tinyllm bot uses notes, and each run logs the notes size, search time
+  and model time. The bot budgets the context by characters (~3/token, no tokenizer
   in the server): what is left after prompt, question and answer goes to
   history (up to half) and notes (the rest), searched with the question plus
   the previous one; overflow retries drop history, then notes. `context_tokens`

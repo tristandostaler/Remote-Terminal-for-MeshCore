@@ -975,11 +975,29 @@ class TestReferenceNotes:
                 monkeypatch,
                 runtime,
                 BotTestRequest(text="ask tx power"),
-                settings={"context_tokens": n_ctx},
+                settings={"context_tokens": n_ctx, "notes_max_chars": 3000},
             )
             sizes[n_ctx] = len(runtime.asked[0][0][0]["content"])
             assert runtime.n_ctx == int(n_ctx)
         assert sizes["2048"] > sizes["512"] * 2
+
+    async def test_notes_are_capped_so_the_model_has_less_to_read(
+        self, test_db, monkeypatch, notes
+    ):
+        (notes / "big.md").write_text(
+            "".join(f"## TX power note {n}\n{'tx power detail ' * 30}\n" for n in range(12))
+        )
+        sent = {}
+        for cap in (None, 1500):
+            runtime = _FakeRuntime()
+            settings = {"context_tokens": "2048"}
+            if cap:
+                settings["notes_max_chars"] = cap
+            await _run(monkeypatch, runtime, BotTestRequest(text="ask tx power"), settings=settings)
+            system = runtime.asked[0][0][0]["content"]
+            sent[cap] = len(system[system.index("Reference notes") :])
+        assert sent[None] <= 700 + 80, "the default cap holds with a big context"
+        assert sent[1500] > sent[None]
 
     async def test_overflow_drops_history_then_notes(self, test_db, monkeypatch, notes):
         class Picky(_FakeRuntime):
@@ -1532,6 +1550,31 @@ class TestReviewFixes:
         assert page.stat().st_mtime == 1
         llm_docs.write_bots_page(tmp_path, [])
         assert "ping" not in page.read_text()
+
+    async def test_engine_start_warms_the_notes_index(self, test_db, monkeypatch, tmp_path):
+        import asyncio
+
+        from app.bots.bots_utils.tinyllm import llm_docs
+        from app.bots.engine import BotEngine
+        from app.repository.bots import BotRepository
+
+        built = []
+        index = llm_docs.DocsIndex(tmp_path / "docs")
+        monkeypatch.setattr(llm_docs, "docs_index", lambda folder=None: built.append(1) or index)
+        entry = get_library_entry("tinyllm")
+        await BotRepository.create(
+            name="tinyllm-warm", code=entry["code"], enabled=True, builtin_key="tinyllm"
+        )
+        engine = BotEngine()
+        await engine.start()
+        try:
+            for _ in range(50):
+                if built:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            await engine.stop()
+        assert built, "the index is built at startup, not on the first question"
 
     def test_settings_are_grouped_and_ordered(self):
         schema = get_library_entry("tinyllm")["settings_schema"]

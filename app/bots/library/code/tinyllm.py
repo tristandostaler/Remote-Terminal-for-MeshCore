@@ -62,6 +62,9 @@ TEMPLATE_OVERHEAD_CHARS = 200
 # that must be left in the run to try it at all (the answer still follows).
 NOTES_CHECK_SECONDS = 2
 NOTES_CHECK_MIN_SECONDS = 4
+# Notes are capped well below what the context could hold: the model reads them
+# before answering, and on a Pi that reading is most of the wait.
+NOTES_MAX_CHARS = 700
 NOTES_HEADER = "\n\nReference notes (use them only if they answer the question):\n"
 _PLACEHOLDER_RE = re.compile(r"\{(radio_name|sender|time|date)\}")
 # A leading command prefix (!, ?, ...) or @[mention], then a trigger word.
@@ -90,7 +93,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.4.1",
+    "version": "1.5.0",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "settings_schema": [
@@ -267,6 +270,21 @@ BOT_META = {
             ),
         },
         {
+            "key": "notes_max_chars",
+            "show_when": {"key": "use_docs", "value": "true"},
+            "label": "Most reference notes per question (characters)",
+            "type": "int",
+            "default": NOTES_MAX_CHARS,
+            "min": 200,
+            "max": 3000,
+            "help": (
+                "The model reads every character of the notes before it starts answering, "
+                "and reading is the slow part on a Pi: each 300 characters is about 100 "
+                "tokens, roughly 1 to 4 extra seconds there. 700 fits the best section or "
+                "two; raise it for fuller answers on faster hardware."
+            ),
+        },
+        {
             "key": "context_tokens",
             "label": "Context size",
             "type": "select",
@@ -353,6 +371,7 @@ BOT_META = {
         "history_messages": 10,
         "use_docs": True,
         "check_notes_with_model": False,
+        "notes_max_chars": NOTES_MAX_CHARS,
         "context_tokens": str(CONTEXT_TOKENS),
         "temperature": 0.7,
         "time_limit_seconds": 6,
@@ -622,7 +641,14 @@ async def ask(ctx, msg):
         earlier = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
         history_chars = sum(len(m["content"]) for m in history)
         room = free_chars - min(history_chars, free_chars // 2)
+        room = min(room, int(_number(ctx, "notes_max_chars", NOTES_MAX_CHARS, 200, 3000)))
+        searched = time.monotonic()
         notes, titles = await asyncio.to_thread(reference_notes, f"{question} {earlier}", room)
+        ctx.log(
+            f"notes: {len(notes)} chars from {len(titles)} section(s) "
+            f"in {(time.monotonic() - searched) * 1000:.0f} ms"
+            + (f": {'; '.join(titles)}" if titles else "")
+        )
         if notes:
             history = _trimmed(history, len(history), free_chars - len(notes))
         # Optional second opinion: the keyword gate matches words, not meaning
@@ -674,6 +700,7 @@ async def ask(ctx, msg):
     for attempt in ((history, bool(notes)), ([], bool(notes)), ([], False)):
         if attempt not in attempts:
             attempts.append(attempt)
+    asked = time.monotonic()
     try:
         for n, (earlier, with_notes) in enumerate(attempts):
             try:
@@ -699,6 +726,10 @@ async def ask(ctx, msg):
             await ctx.reply("🤖 Sorry, the model failed to answer.")
         return
 
+    ctx.log(
+        f"model answered in {time.monotonic() - asked:.1f} s "
+        f"(whole run {time.monotonic() - started:.1f} s)"
+    )
     answer = " ".join(answer.split()) or "(no answer)"
     if not msg.is_dm and msg.sender_name:
         # @[name] is the mention syntax mesh clients highlight.

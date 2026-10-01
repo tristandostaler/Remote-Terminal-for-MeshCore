@@ -152,9 +152,29 @@ class BotEngine:
             self.log("WARN", "engine", "Bots disabled by MESHCORE_DISABLE_BOTS — engine idle")
         await self.reload_all()
         await self._prime_known_contacts()
+        self._warm_tinyllm_notes()
         self._ticker_task = asyncio.create_task(self._ticker())
         self._started = True
         self.log("INFO", "engine", f"Bot engine started with {len(self.bots)} bots")
+
+    def _warm_tinyllm_notes(self) -> None:
+        """Seed and index the tinyllm notes in the background at startup, so the
+        first question does not wait for it (about a second on a Pi)."""
+        if self.disabled or not any(
+            b.record.enabled
+            and b.record.builtin_key == "tinyllm"
+            and b.record.settings.get("use_docs", True)
+            for b in self.bots.values()
+        ):
+            return
+        from app.bots.bots_utils.tinyllm.llm_docs import docs_index
+
+        async def warm() -> None:
+            index = await asyncio.to_thread(docs_index)
+            await asyncio.to_thread(index.search, "warm", 1)
+
+        # Fire-and-forget, like other background work: a failure is logged.
+        asyncio.create_task(warm())
 
     async def stop(self) -> None:
         self._started = False

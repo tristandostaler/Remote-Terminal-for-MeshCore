@@ -229,7 +229,10 @@ class Section:
     source: str
 
     def render(self) -> str:
-        return f"[{self.title}] {self.text}"
+        # The last two heading levels say enough ("Regions > Add a region");
+        # the full path repeats a file's top heading in every note the model
+        # has to read.
+        return f"[{' > '.join(self.title.split(' > ')[-2:])}] {self.text}"
 
 
 def _fold(word: str) -> str:
@@ -331,7 +334,8 @@ class DocsIndex:
 
     def _refresh(self) -> None:
         files = self._files()
-        signature = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in files)
+        stats = [(p, p.stat()) for p in files]
+        signature = tuple((str(p), st.st_mtime_ns, st.st_size) for p, st in stats)
         if signature == self._signature:
             return
         sections: list[Section] = []

@@ -444,6 +444,11 @@ server**: no Ollama, no cloud API, no GPU. It ships disabled.
    matches enough of the question's words -- one shared word such as "power"
    in "what is the power of love?" is not enough -- so notes stay out of
    unrelated questions. The notes can be about anything, not just MeshCore.
+   The notes are capped at about 700 characters per question by default (**Most
+   reference notes per question**): the model reads them before answering, and
+   on a Pi that reading is most of the wait, so a bigger cap means fuller but
+   slower answers. The Test tab's logs show the notes size, search time and
+   model time for each question.
    **Ask the model whether the notes fit** adds a quick yes/no from the model
    before using them, to filter matches that share words but not meaning; it
    costs a short extra model pass and suits Qwen2.5 1.5B / Llama 3.2 1B best.
