@@ -154,7 +154,10 @@ operators).
   (`check_notes_with_model`): `LlmRuntime.choose` asks a generic yes/no ("do
   these notes help?", with the section headings) and the model process forces
   the reply to exactly "yes"/"no" with a llama.cpp grammar at temperature 0;
-  only when there are notes and >= 4 s left; a failed check keeps the notes;
+  only when there are notes; it gets `notes_check_seconds` (default 8) capped
+  to the run's deadline minus 3 s kept for the answer, and the same stuck
+  grace as the answer, and is skipped (notes kept) below 1 s; a failed check
+  keeps the notes;
   it never triggers the unload-after-every-answer unload. The folder is synced
   from `library/docs/` on the bot's first run after each start: shipped files
   are rewritten whenever they differ (edits are lost, deletions come back), a

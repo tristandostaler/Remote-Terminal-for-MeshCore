@@ -97,6 +97,7 @@ class _FakeRuntime:
 
     def choose(self, messages, choices, deadline_seconds, grace_seconds=None):
         self.checked = messages
+        self.check_time = (deadline_seconds, grace_seconds)
         if isinstance(self.verdict, Exception):
             raise self.verdict
         return self.verdict
@@ -1457,6 +1458,30 @@ class TestModelCheck:
         assert "Reference notes" not in system
         runtime = _FakeRuntime()
         system = await self._ask(monkeypatch, runtime, check_notes_with_model=True)
+        assert "Reference notes" in system
+
+    async def test_the_check_gets_its_setting_within_the_runs_deadline(
+        self, test_db, monkeypatch, notes
+    ):
+        # The test bot has the stock 10 s Time limit and a 3 s margin: 7 s for
+        # the run, of which the answer keeps at least 3.
+        runtime = _FakeRuntime()
+        await self._ask(monkeypatch, runtime, check_notes_with_model=True, notes_check_seconds=2)
+        assert runtime.check_time == (2, 2)
+        runtime = _FakeRuntime()
+        await self._ask(monkeypatch, runtime, check_notes_with_model=True, notes_check_seconds=30)
+        deadline, grace = runtime.check_time
+        assert 3.5 < deadline <= 10 - 3 - 3, "capped to leave the answer its time"
+
+    async def test_no_time_left_skips_the_check_and_keeps_the_notes(
+        self, test_db, monkeypatch, notes
+    ):
+        runtime = _FakeRuntime()
+        runtime.verdict = "no"
+        system = await self._ask(
+            monkeypatch, runtime, check_notes_with_model=True, stop_before_limit_seconds=7
+        )
+        assert runtime.checked is None
         assert "Reference notes" in system
 
     async def test_the_check_is_generic_and_shows_the_headings(self, test_db, monkeypatch, notes):

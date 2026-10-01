@@ -70,10 +70,11 @@ ANSWER_WINDOW_SECONDS = 150
 # then without notes.
 CHARS_PER_TOKEN = 3
 TEMPLATE_OVERHEAD_CHARS = 200
-# The optional model check of the notes: its own time cap, and the least time
-# that must be left in the run to try it at all (the answer still follows).
-NOTES_CHECK_SECONDS = 2
-NOTES_CHECK_MIN_SECONDS = 4
+# The optional model check of the notes: the most it may take (a setting), the
+# least worth trying, and what it must leave of the run for the answer.
+NOTES_CHECK_SECONDS = 8
+NOTES_CHECK_MIN_SECONDS = 1
+ANSWER_MIN_SECONDS = 3
 # Notes are capped well below what the context could hold: the model reads them
 # before answering, and on a Pi that reading is most of the wait.
 NOTES_MAX_CHARS = 700
@@ -105,7 +106,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.5.1",
+    "version": "1.6.0",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "timeout_seconds": TIME_LIMIT_SECONDS,
@@ -288,6 +289,21 @@ BOT_META = {
             ),
         },
         {
+            "key": "notes_check_seconds",
+            "show_when": {"key": "check_notes_with_model", "value": "true"},
+            "label": "Most seconds for the notes check",
+            "type": "float",
+            "default": NOTES_CHECK_SECONDS,
+            "min": 1,
+            "max": 60,
+            "help": (
+                "How long the yes/no check may take. It runs on the same clock as the "
+                "answer: it never goes past the Finish-answering margin before the Time "
+                "limit, and always leaves the answer at least 3 s, so on a slow model it "
+                "gets less, or is skipped and the notes are kept."
+            ),
+        },
+        {
             "key": "notes_max_chars",
             "show_when": {"key": "use_docs", "value": "true"},
             "label": "Most reference notes per question (characters)",
@@ -389,6 +405,7 @@ BOT_META = {
         "history_messages": 10,
         "use_docs": True,
         "check_notes_with_model": False,
+        "notes_check_seconds": NOTES_CHECK_SECONDS,
         "notes_max_chars": NOTES_MAX_CHARS,
         "context_tokens": str(CONTEXT_TOKENS),
         "temperature": 0.7,
@@ -732,27 +749,36 @@ async def ask(ctx, msg):
         # ("what time is it" matches a Clock section). A quick yes/no from the
         # model itself filters those -- only when there are notes to judge,
         # and only with time to spare.
-        time_left = run_budget(ctx) - (time.monotonic() - started)
-        if (
-            notes
-            and ctx.settings.get("check_notes_with_model")
-            and time_left >= NOTES_CHECK_MIN_SECONDS
-        ):
-            try:
-                verdict = await asyncio.to_thread(
-                    llm_runtime.choose,
-                    notes_check_messages(question, titles),
-                    ("yes", "no"),
-                    NOTES_CHECK_SECONDS,
-                    stuck_grace(ctx),
-                )
-                if verdict != "yes":
-                    notes = ""
-            except LlmWorkerDiedError as exc:
-                await ctx.reply_split(f"🤖 Sorry, {exc}. Try again, or pick a smaller model.")
-                return
-            except Exception as exc:  # noqa: BLE001 - a failed check keeps the notes
-                ctx.log(f"notes check skipped: {exc}", "WARNING")
+        # Same clock as the answer: inside the run's deadline, leaving the
+        # answer its minimum.
+        check_seconds = min(
+            _number(ctx, "notes_check_seconds", NOTES_CHECK_SECONDS, 1, 60),
+            run_budget(ctx) - (time.monotonic() - started) - ANSWER_MIN_SECONDS,
+        )
+        if notes and ctx.settings.get("check_notes_with_model"):
+            if check_seconds < NOTES_CHECK_MIN_SECONDS:
+                ctx.log("notes check skipped: not enough time left; notes kept")
+            else:
+                checked = time.monotonic()
+                try:
+                    verdict = await asyncio.to_thread(
+                        llm_runtime.choose,
+                        notes_check_messages(question, titles),
+                        ("yes", "no"),
+                        check_seconds,
+                        stuck_grace(ctx),
+                    )
+                    ctx.log(
+                        f"notes check: {verdict} in {time.monotonic() - checked:.1f} s "
+                        f"(allowed {check_seconds:.1f} s)"
+                    )
+                    if verdict != "yes":
+                        notes = ""
+                except LlmWorkerDiedError as exc:
+                    await ctx.reply_split(f"🤖 Sorry, {exc}. Try again, or pick a smaller model.")
+                    return
+                except Exception as exc:  # noqa: BLE001 - a failed check keeps the notes
+                    ctx.log(f"notes check skipped: {exc}", "WARNING")
 
     def ask_model(earlier, with_notes):
         system = {"role": "system", "content": prompt + (notes if with_notes else "")}
