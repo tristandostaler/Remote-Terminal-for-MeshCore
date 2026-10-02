@@ -102,6 +102,7 @@ reads like a protocol fault rather than a codec this build has no decoder for.""
 
 MCO_APP_SUBTYPE_MCO_IMAGE = 0x01
 MCO_APP_SUBTYPE_MCMP = 0x02
+MCO_APP_SUBTYPE_MCOTXT = 0x03
 
 BLOB_BYTES = 163
 HEADER_BYTES = 4

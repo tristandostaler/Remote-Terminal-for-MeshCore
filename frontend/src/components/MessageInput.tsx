@@ -65,10 +65,10 @@ interface MessageInputProps {
   /** Sender name (radio name) for channel message limit calculation */
   senderName?: string;
   voiceConversation?: { type: 'PRIV' | 'CHAN'; key: string };
-  /** When the conversation compresses outbound messages (MCMP), the counter
+  /** When the conversation compresses outbound messages (MCMP/MCOtxt), the counter
    *  reflects the compressed wire size instead of the raw byte length. */
   mcmpEnabled?: boolean;
-  /** MCMP transport version (2 or 3) the estimate should size for. */
+  /** Compression transport the estimate should size for (2/3 = MCMP, 4 = MCOtxt). */
   mcmpVersion?: number;
   /** Which codec an attached photo uses. 'aeic' replaces the AVIF/JPEG fragment
    *  transport with the neural codec: ~150 bytes as one or two text messages. */

@@ -77,10 +77,10 @@ describe('ChatHeader conversation-features modal', () => {
     );
 
     // The toggle is not shown until the modal is opened.
-    expect(screen.queryByRole('switch', { name: /MCMP compression/ })).toBeNull();
+    expect(screen.queryByRole('switch', { name: /message compression/ })).toBeNull();
     fireEvent.click(screen.getByRole('button', FEATURES_BUTTON));
 
-    fireEvent.click(screen.getByRole('switch', { name: 'Enable MCMP compression' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable message compression' }));
     expect(onSetMcmpEnabled).toHaveBeenCalledWith('channel', key, true, 2);
   });
 
@@ -100,7 +100,7 @@ describe('ChatHeader conversation-features modal', () => {
     );
 
     fireEvent.click(screen.getByRole('button', FEATURES_BUTTON));
-    const toggle = screen.getByRole('switch', { name: 'Disable MCMP compression' });
+    const toggle = screen.getByRole('switch', { name: 'Disable message compression' });
     expect(toggle).toHaveAttribute('aria-checked', 'true');
     fireEvent.click(toggle);
     expect(onSetMcmpEnabled).toHaveBeenCalledWith('channel', key, false, 2);
@@ -129,6 +129,28 @@ describe('ChatHeader conversation-features modal', () => {
     expect(onSetMcmpEnabled).toHaveBeenCalledWith('channel', key, true, 3);
   });
 
+  it('selects MCOtxt as the compression scheme', () => {
+    const key = 'EF'.repeat(16);
+    const channel = { ...makeChannel(key, '#general', true), mcmp_version: 2 };
+    const conversation: Conversation = { type: 'channel', id: key, name: '#general' };
+    const onSetMcmpEnabled = vi.fn();
+
+    render(
+      <ChatHeader
+        {...baseProps}
+        conversation={conversation}
+        channels={[channel]}
+        onSetMcmpEnabled={onSetMcmpEnabled}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', FEATURES_BUTTON));
+    const mcotxt = screen.getByRole('radio', { name: 'MCOtxt' });
+    expect(mcotxt).toHaveAttribute('aria-checked', 'false');
+    fireEvent.click(mcotxt);
+    expect(onSetMcmpEnabled).toHaveBeenCalledWith('channel', key, true, 4);
+  });
+
   it('opens the modal for a regular contact', () => {
     const key = 'ab'.repeat(32);
     const contact: Contact = { ...makeRoomContact(key, 'Alice'), type: 1 };
@@ -145,7 +167,7 @@ describe('ChatHeader conversation-features modal', () => {
     );
 
     fireEvent.click(screen.getByRole('button', FEATURES_BUTTON));
-    fireEvent.click(screen.getByRole('switch', { name: 'Enable MCMP compression' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable message compression' }));
     expect(onSetMcmpEnabled).toHaveBeenCalledWith('contact', key, true, 2);
   });
 

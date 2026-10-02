@@ -155,7 +155,7 @@ export function ChatHeader({
       : conversation.type === 'channel'
         ? (activeChannel?.favorite ?? false)
         : false;
-  // Per-conversation MeshCore Open features (MCMP compression today) live in a
+  // Per-conversation MeshCore Open features (MCMP/MCOtxt compression today) live in a
   // modal opened from the header. Offered for regular DMs and channels; not for
   // room servers (posts route through the room server, tighter budget) or
   // repeaters (handled by a separate console).

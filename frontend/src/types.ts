@@ -576,7 +576,7 @@ export interface DecryptSweepStatus {
 }
 
 /** Compression codecs a message body can arrive or leave under. */
-export type MessageCompression = 'mcmp2' | 'mcmp3';
+export type MessageCompression = 'mcmp2' | 'mcmp3' | 'mcotxt';
 
 /**
  * Where an outgoing message's send got to. Delivery is deliberately absent:

@@ -302,11 +302,11 @@ replayed, matching the firmware, which never hands the host its own sends.
   for a picture and it is the inbound one, a compressed message because it is
   written by the same ingest. It carries the sender name the app put in the
   envelope, which is this node's name. The alternative was not storing it at all.
-- An MCMP message an app sends as *text* (with MCO Advanced's binary setting
-  turned off, or in a DM) is stored as the basE91 body rather than as its words:
-  the send services compress on the way out and nothing decodes on the way in
-  for an outgoing row. It goes out correctly and peers read it; RemoteTerm's own
-  conversation, search, bots and fanout see `mcmp2:...`.
+- An MCMP or MCOtxt message an app sends as *text* (with MCO Advanced's binary
+  setting turned off, or in a DM) is stored as the basE91 body rather than as its
+  words: the send services compress on the way out and nothing decodes on the way
+  in for an outgoing row. It goes out correctly and peers read it; RemoteTerm's
+  own conversation, search, bots and fanout see `mcmp2:...` / `mct:...`.
 - An app cannot choose the flood scope or path hash mode for its own send:
   both are acknowledged and dropped, and the message goes out under
   RemoteTerm's scope for that channel. Per-channel overrides live in

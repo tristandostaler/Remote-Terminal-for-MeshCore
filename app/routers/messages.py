@@ -1,9 +1,10 @@
+import asyncio
 import logging
 import time
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.compression import encode_outbound
+from app.compression import TRANSPORT_MCOTXT, encode_outbound
 from app.event_handlers import track_pending_ack
 from app.models import (
     CONTACT_TYPE_ROOM,
@@ -50,8 +51,15 @@ async def estimate_mcmp(request: McmpEstimateRequest) -> McmpEstimateResponse:
     no radio involved.
     """
     # Timestamp only affects v3 (fixed 4 bytes), so a placeholder is fine for the
-    # size estimate.
-    encoded = encode_outbound(request.text, version=request.version, timestamp=0)
+    # size estimate. MCOtxt's planner is pure Python at ~0.07 ms/char -- harmless
+    # for a real message, but a maximal draft would stall the event loop, so it
+    # runs on a worker thread (the codec is stateless once its tables load).
+    if request.version == TRANSPORT_MCOTXT:
+        encoded = await asyncio.to_thread(
+            encode_outbound, request.text, version=request.version, timestamp=0
+        )
+    else:
+        encoded = encode_outbound(request.text, version=request.version, timestamp=0)
     return McmpEstimateResponse(
         wire_bytes=len(encoded.encode("utf-8")),
         compressed=encoded != request.text,

@@ -345,6 +345,7 @@ Every message carries one small row under its text — time, hop badge, region, 
 
 - Send status derives `delivered` from `acked > 0` **before** looking at `send_state`, so a late ACK on a `failed` message shows as delivered. `send_state: null` on an outgoing message means "stored before send tracking existed" and renders `?` — the pre-existing display for an unechoed message — not a false `✓`.
 - The attempt counter appears only once `send_attempts > 1`. "1 of 3" on every message would be noise.
+- The compression badge names the codec (`mcmp2`, `mcmp3`, `mcotxt`); the scheme itself is picked per conversation in the chat header's Conversation features dialog, where `mcmp_version` 4 means MCOtxt.
 - The compression percentage is computed from `payload_bytes` (the compressed-text segment) to match MCO Advanced. `wire_bytes` — the true on-air size, which for v3 can *exceed* v2's for the same text — goes in the tooltip only. Do not swap them: the badge is the cross-client-comparable number, the tooltip is the honest airtime.
 - Actions are a **centred dialog**, not an inline popover: the list is virtualized, so anything anchored inside a row gets clipped by the scroll container. Right-click on the bubble opens the same dialog for the desktop habit; the `⋯` button covers touch and keyboard.
 - Cancel is offered only while `send_state === 'sending'`. Delete is always offered and cancels as a side effect — otherwise we would keep transmitting a message the user just removed.

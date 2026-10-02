@@ -235,6 +235,15 @@ The retry deliberately does not re-run `_ensure_on_radio` — re-adding the cont
   - The **ratio** is measured over `payload_bytes`, the compressed-text segment, which for v3 *excludes* the container header. That matches meshcore-open (`lib/models/message_compression.dart`) so both clients quote the same percentage for one message. `wire_bytes` separately records what actually went on air, because a v3 container can be *larger* on air than v2 for the same text — quoting only the ratio would misrepresent the airtime, so the UI puts `wire_bytes` in the tooltip.
   - The ratio is measured against the message **body**, not the stored text: the firmware prepends `"<name>: "` to channel messages outside the compressed payload, so counting the prefix would understate the saving.
 
+### MCOtxt text compression
+
+- MCOtxt (`app/compression/mcotxt.py`) is a Python port of MeshCore Open Advanced's MCOtxt v1 codec (HDDen/meshcore-open, MIT; wire spec `docs/MCOTXT_V1_PROTOCOL.md` there). Instead of MCMP's arithmetic coder it predicts each next letter from a frozen TOP-4 table per language and spends a 2-9 bit token per character (~5.2-5.5 bits/char), with case, language-switch and raw-UTF-8 escapes. Seven tables ship in `models/mcotxt-v1.json` (EN RU FR DE IT UK BE, generation 0), exported from the Dart registry; each is checked against upstream's frozen SHA-256 wire hash on load and refuses to load on a mismatch. Over the `mct:` text transport it saves ~15% on English and ~50% on Russian chat, against MCMP's 55-75%, so its point is interop with MCO Advanced users who chose it (and node-side decoding by South Edition / Luchik firmware), not size. Text it would normalise (CR, decomposed accents) is sent plain so the stored row, the peer's copy and our own channel echo stay identical -- exact-text echo dedup depends on it. Bot `reply_split` sizes MCOtxt parts on a worker thread (async handlers share the event loop).
+- **Wire:** `mct:` + basE91(`0x31` + container); the container (flags, optional timestamp / sender name / reply anchor, text string) holds a length-prefixed frame of the bitstream. Channel and DM sends set flag `0x04` (timestamp inherited from the packet) and carry no name, exactly as MCO Advanced sends chat, so the encoding is deterministic without a timestamp.
+- **Selection:** stored in the same `mcmp_version` column as MCMP, value `4` (`TRANSPORT_MCOTXT`); the schemes are mutually exclusive, as in MCO Advanced's one picker. `encode_outbound(version=4)` applies MCO Advanced's default "send plain when it is smaller" gate (plain wins a tie). Decode is automatic in `try_decode_incoming` regardless of the conversation's setting, and over GRP_DATA (`0x0120` subtype 3 revision 1, where the container carries the sender name and its own timestamp) in `channel_data_text.py`.
+- **Language pair:** a stream declares languages A and B and may switch to any of the seven mid-message. The reference encoder searches all 49 pairs, which is ~0.5 s per message in Python; MCO Advanced itself never does that and declares its UI language + EN. RemoteTerm has no UI language, so `_default_pair` picks A as the table that knows most of the text's letters and B as EN (RU when A is EN). `encode_stream(search_all_pairs=True)` keeps the reference search for conformance tests. The compose-counter estimate runs MCOtxt on a worker thread so a maximal draft cannot stall the event loop.
+- **Conformance:** `tests/fixtures/mcotxt_reference_vectors.json` was produced by the Dart reference itself (default-pair and full-search streams, `mct:` transport, a room container with sender + reply); `tests/test_mcotxt.py` requires byte-identical output and decodes every vector. Unlike MCMP the decoder is strict: a malformed stream, unknown generation or unsupported container revision is rejected, and the body is stored as received.
+- **Not implemented:** sending reply anchors (none of RemoteTerm's senders produce one) and the "update the app" placeholder for a newer revision — such a body is kept as its raw `mct:` text instead.
+
 ### Emoji reactions (MCO Advanced compatible)
 
 - `app/reactions.py` owns the whole feature: the wire format, the hash, the emoji table, and target matching. A reaction rides the mesh as an ordinary text message `r:HHHH:II` — `HHHH` is a 4-hex hash of the target message, `II` a 2-hex index into a fixed 184-emoji table (order is the wire contract; `frontend/src/utils/meshcoreOpenPayloads.ts` mirrors it). All of it is ported from meshcore-open branch `rename-mco-advanced` (`lib/helpers/reaction_helper.dart`, `lib/widgets/emoji_picker.dart`, connector matching rules).
@@ -526,7 +535,7 @@ Verified against the meshcore firmware (`examples/simple_room_server/MyMesh.cpp`
 - `POST /messages/{message_id}/retry` — retransmit an outgoing message. DMs reuse the original timestamp (byte-identical, so the recipient dedups it as a retry) and restart their retry run under the current cap; channel messages route to the resend machinery, where `?new_timestamp=true` creates a new row
 - `POST /messages/{message_id}/cancel` — stop the attempts not yet made; `stopped_pending_sends` says whether anything was still scheduled (either way the message ends up `canceled`)
 - `DELETE /messages/{message_id}` — cancel then drop our copy, broadcasting `message_deleted`. Local only
-- `POST /messages/mcmp-estimate` — compressed wire size of a draft (`{text, version}` → `{wire_bytes, compressed}`) for the live compose counter; pure computation, `text` capped at 4096 chars
+- `POST /messages/mcmp-estimate` — compressed wire size of a draft (`{text, version}` → `{wire_bytes, compressed}`; `version` 2/3 = MCMP, 4 = MCOtxt) for the live compose counter; pure computation, `text` capped at 4096 chars
 
 ### Packets
 - `GET /packets/undecrypted/count`
@@ -557,7 +566,7 @@ Verified against the meshcore firmware (`examples/simple_room_server/MyMesh.cpp`
 - `POST /settings/tracked-telemetry-contacts/toggle` — toggle tracked LPP telemetry for any contact (max 8)
 - `GET /settings/tracked-telemetry-contacts/schedule` — contact telemetry scheduling (shared ceiling with repeaters)
 - `POST /settings/muted-channels/toggle`
-- `POST /settings/mcmp/set` — configure MCMP for a conversation (`{type: "contact"|"channel", id, enabled, version?}`; `version` 2 or 3, omit to leave unchanged); broadcasts a `contact`/`channel` event
+- `POST /settings/mcmp/set` — configure MCMP for a conversation (`{type: "contact"|"channel", id, enabled, version?}`; `version` 2 or 3 for MCMP, 4 for MCOtxt, omit to leave unchanged); broadcasts a `contact`/`channel` event
 
 ### Fanout
 - `GET /fanout` — list all fanout configs

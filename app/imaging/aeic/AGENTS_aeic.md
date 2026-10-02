@@ -267,8 +267,8 @@ secret as the author.
 
 MCO Advanced ships **AEIC** (`0xAE1C`) *and* **MCOimg** (`0xFFF0`), plus MCMP
 text (`0xFFF1`), plus its own official application type **`0x0120`** which
-supersedes the two `0xFFF*` developer types and carries MCOimg (subtype 1) or
-MCMP (subtype 2) inside a `nameLen | name | subtypeVersion | body` envelope. Only
+supersedes the two `0xFFF*` developer types and carries MCOimg (subtype 1),
+MCMP (subtype 2) or MCOtxt (subtype 3) inside a `nameLen | name | subtypeVersion | body` envelope. Only
 AEIC is the image codec RemoteTerm has. `channel_data_ingest` recognises the
 others by type — reading `0x0120`'s subtype nibble to name it — and reports them
 as unsupported rather than handing them to the AEIC decoder, which would turn
@@ -283,10 +283,13 @@ not a corner: `channelsSendAsBinary` is **on by default** in MCO Advanced, so
 until this landed every compressed channel message from a current build was
 named in a log line and dropped. The arithmetic decoder is not self-checking, so
 a body that decodes to something that is not prose is refused and the blob falls
-back to being kept as unsupported media.
+back to being kept as unsupported media. MCOtxt (subtype 3, revision 1) goes the
+same way through `app.compression.mcotxt.decode_container`; its decoder *is*
+strict, and its container carries the sender name and timestamp itself (the
+envelope name is left empty).
 
 **AEIC did not move into `0x0120`.** Upstream's `channel_app_data_helper.dart`
-defines subtypes for MCOimg and MCMP only, and `image_chunk_transport.dart` still
+defines subtypes for MCOimg, MCMP and MCOtxt only, and `image_chunk_transport.dart` still
 puts AEIC on the air as a bare `0xAE1C`. Worth re-checking on an upstream bump: if
 AEIC ever did move, every inbound AEIC image would be dropped as an unknown type,
 and the symptom would be indistinguishable from the codec mismatch below.
@@ -451,7 +454,7 @@ message, whereas a GRP_DATA blob is fire-and-forget.
 gate and leaves them alone by luck, but **v3 always wraps** — which would inflate
 a chunk sized exactly to the 156-byte radio budget and get it truncated,
 corrupting the image with nothing raised. `encode_outbound` therefore skips any
-already-framed payload (`is_framed_payload`: `aei1`, `IE4:`, `mcmp2:`, `mcmp3:`).
+already-framed payload (`is_framed_payload`: `aei1`, `IE4:`, `mcmp2:`, `mcmp3:`, `mct:`).
 
 The bot engine's **profanity filter** needs the same guard, for the same reason.
 Its word list is `\b`-anchored and basE91 is full of non-word characters, so a
