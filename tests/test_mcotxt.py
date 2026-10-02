@@ -217,6 +217,15 @@ class TestTransportIntegration:
     def test_encode_outbound_keeps_short_text_plain(self):
         assert encode_outbound("ok", version=TRANSPORT_MCOTXT) == "ok"
 
+    @pytest.mark.parametrize(
+        "text",
+        [LONG_TEXT.replace("power", "power\r\n"), LONG_TEXT.replace("five", "cafe\u0301")],
+    )
+    def test_text_the_codec_would_normalise_goes_out_plain(self, text):
+        """What a peer (and our own echo) reads must equal what we stored."""
+        assert mcotxt.normalize_text(text) != text
+        assert encode_outbound(text, version=TRANSPORT_MCOTXT) == text
+
     def test_framed_payloads_are_never_wrapped(self):
         wire = encode_outbound(LONG_TEXT, version=TRANSPORT_MCOTXT)
         assert is_framed_payload(wire)
@@ -307,6 +316,33 @@ class TestApi:
 
 
 class TestIngest:
+    @pytest.mark.asyncio
+    async def test_our_own_channel_echo_folds_onto_the_sent_row(self, test_db):
+        """The repeat of a sent MCOtxt message decodes to the stored text, so it
+        dedups onto the outgoing row and counts as a repeat."""
+        from app.packet_processor import create_message_from_decrypted
+
+        key = "ABC123DEF456ABC123DEF456ABC12345"
+        sent_id = await MessageRepository.create(
+            msg_type="CHAN",
+            text=f"Me: {LONG_TEXT}",
+            conversation_key=key,
+            sender_timestamp=1_700_000_100,
+            received_at=1_700_000_100,
+            outgoing=True,
+        )
+        packet_id, _ = await RawPacketRepository.create(b"chan_mcotxt_echo", 1_700_000_101)
+        await create_message_from_decrypted(
+            packet_id=packet_id,
+            channel_key=key,
+            sender="Me",
+            message_text=encode_outbound(LONG_TEXT, version=TRANSPORT_MCOTXT),
+            timestamp=1_700_000_100,
+        )
+        rows = await MessageRepository.get_all(msg_type="CHAN", conversation_key=key, limit=10)
+        assert [row.id for row in rows] == [sent_id]
+        assert rows[0].acked == 1
+
     @pytest.mark.asyncio
     async def test_channel_body_is_decoded_and_recorded(self, test_db):
         from app.packet_processor import create_message_from_decrypted

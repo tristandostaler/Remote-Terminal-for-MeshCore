@@ -383,8 +383,9 @@ export function ConversationFeaturesModal({
                 </div>
                 <p className="mt-2 text-xs leading-snug text-muted-foreground">
                   MCMP v2 packs the most text per packet. v3 adds a metadata container (a timestamp
-                  now; signing/replies later) and is slightly larger. MCOtxt compresses a little
-                  less but covers English, Russian, French, German, Italian, Ukrainian and
+                  now; signing/replies later) and is slightly larger. MCOtxt saves noticeably less
+                  (about 15% on English, half on Russian) and is for talking to MCO Advanced users
+                  who chose it; it covers English, Russian, French, German, Italian, Ukrainian and
                   Belarusian, and is small enough for firmware to decode on the node itself.
                   Messages arriving in any of the three are decoded automatically.
                 </p>

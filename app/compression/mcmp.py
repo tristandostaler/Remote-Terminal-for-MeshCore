@@ -1077,7 +1077,9 @@ def encode_outbound(text: str, *, version: int = 2, timestamp: int = 0) -> str:
     - **MCOtxt** uses the same "only if smaller" gate, which is MCO Advanced's
       default ("Send a plain message when it is smaller"; plain wins a tie). Its
       container inherits the packet timestamp, so ``timestamp`` is unused and
-      the encoding is deterministic on its own.
+      the encoding is deterministic on its own. Text the codec would normalise
+      (CR line endings, decomposed accents) is sent plain so it reads back
+      exactly.
 
     Text that is already a framed transport payload (an AEIC image chunk, an IE4
     envelope, or an already-encoded MCMP body) is returned unchanged — see
@@ -1095,6 +1097,12 @@ def encode_outbound(text: str, *, version: int = 2, timestamp: int = 0) -> str:
     if version == TRANSPORT_MCOTXT:
         from . import mcotxt
 
+        # MCOtxt normalises CR/CRLF and a few decomposed accents, so a peer (and
+        # our own channel echo) would read a slightly different string from the
+        # one we store -- breaking exact-text echo dedup and repeat counting.
+        # Such text goes out plain instead: the transport must be lossless.
+        if mcotxt.normalize_text(text) != text:
+            return text
         try:
             encoded = mcotxt.encode_text(text)
         except Exception:

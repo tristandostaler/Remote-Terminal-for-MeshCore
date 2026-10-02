@@ -658,17 +658,22 @@ class BotContext:
         ``"<name>: "`` framing for a channel, since the firmware prepends that
         outside what we hand it. Pass an explicit value to override.
 
-        When the reply target has MCMP compression enabled, parts are sized by
+        When the reply target has compression (MCMP/MCOtxt) enabled, parts are sized by
         their *compressed* wire length, so more text fits per message (fewer,
         larger parts) — otherwise by the raw byte length.
         """
         budget = await self._resolve_split_budget() if max_bytes is _UNSET else int(max_bytes)
         version = await self._origin_mcmp_version()
-        parts = (
-            split_text_compressed(text, budget, version)
-            if version is not None
-            else self.split_text(text, budget)
-        )
+        from app.compression import TRANSPORT_MCOTXT
+
+        if version is None:
+            parts = self.split_text(text, budget)
+        elif version == TRANSPORT_MCOTXT:
+            # Async bot handlers run on the event loop, and sizing parts means
+            # many MCOtxt encodes (~1 s for a 1 KB reply in pure Python).
+            parts = await asyncio.to_thread(split_text_compressed, text, budget, version)
+        else:
+            parts = split_text_compressed(text, budget, version)
         for part in parts:
             await self.reply(part, region=region)
 

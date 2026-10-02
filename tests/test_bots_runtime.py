@@ -279,6 +279,23 @@ class TestSplitReplies:
         # Compression packs more per message -> strictly fewer parts than raw.
         assert 1 <= len(compressed_parts) < len(raw_parts)
 
+    async def test_reply_split_sizes_mcotxt_parts_off_the_event_loop(self, test_db):
+        from app.compression import TRANSPORT_MCOTXT, encode_outbound
+        from app.repository import ContactRepository
+
+        key = "ce" * 32
+        await ContactRepository.upsert({"public_key": key, "name": "Bob"})
+        assert await ContactRepository.set_mcmp_enabled(key, True)
+        assert await ContactRepository.set_mcmp_version(key, TRANSPORT_MCOTXT)
+
+        ctx = make_ctx(origin_is_dm=True, origin_sender_key=key)
+        text = " ".join(["the repeater on the hill is back online"] * 12)
+        await ctx.reply_split(text, max_bytes=100)
+
+        parts = [s["text"] for s in ctx.captured_sends]
+        assert 1 < len(parts) < len(ctx.split_text(text, max_bytes=100))
+        assert all(len(encode_outbound(p, version=TRANSPORT_MCOTXT).encode()) <= 100 for p in parts)
+
     async def test_reply_split_dm_budget_is_a_whole_frame(self, test_db):
         """A DM has no sender prefix, so it gets the full frame."""
         from app.imaging.aeic.text_transport import DEFAULT_MESSAGE_BUDGET

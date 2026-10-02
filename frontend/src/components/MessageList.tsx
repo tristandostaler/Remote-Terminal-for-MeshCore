@@ -1074,7 +1074,8 @@ const COMPRESSION_NAMES: Record<MessageCompression, string> = {
 
 function compressionTitle(msg: Message): string | undefined {
   if (!msg.compression) return undefined;
-  const scheme = COMPRESSION_NAMES[msg.compression];
+  // A codec this build does not know (a newer server) is named as stored.
+  const scheme = COMPRESSION_NAMES[msg.compression] ?? msg.compression;
   const parts = [`Compressed with ${scheme}`];
   if (msg.plain_bytes != null && msg.wire_bytes != null) {
     parts.push(`${msg.plain_bytes} B of text went out as ${msg.wire_bytes} B on air`);
