@@ -11,6 +11,7 @@ import type {
   Channel,
   Contact,
   Message,
+  MessageCompression,
   MessagePath,
   RadioConfig,
   RawPacket,
@@ -1046,10 +1047,10 @@ const SEND_STATUS_GLYPHS: Record<DisplaySendStatus, string> = {
 
 /**
  * The compression badge, e.g. "53% mcmp3". Null when the body rode as plain text
- * (MCMP off for the conversation, or v2's "only if smaller" gate declined).
+ * (compression off for the conversation, or an "only if smaller" gate declined).
  *
  * The percentage is measured the way MCO Advanced measures it -- over the
- * compressed-text segment, which for v3 excludes the container header -- so the
+ * compressed-text segment, which for v3 and MCOtxt excludes the container -- so the
  * two clients quote the same number for the same message. The true on-air size
  * lives in the tooltip, where it cannot be mistaken for the ratio.
  */
@@ -1065,21 +1066,27 @@ function compressionLabel(msg: Message): string | null {
   return `${saved}% ${msg.compression}`;
 }
 
+const COMPRESSION_NAMES: Record<MessageCompression, string> = {
+  mcmp2: 'MCMP v2',
+  mcmp3: 'MCMP v3',
+  mcotxt: 'MCOtxt',
+};
+
 function compressionTitle(msg: Message): string | undefined {
   if (!msg.compression) return undefined;
-  const version = msg.compression === 'mcmp3' ? 'v3' : 'v2';
-  const parts = [`Compressed with MCMP ${version}`];
+  const scheme = COMPRESSION_NAMES[msg.compression];
+  const parts = [`Compressed with ${scheme}`];
   if (msg.plain_bytes != null && msg.wire_bytes != null) {
     parts.push(`${msg.plain_bytes} B of text went out as ${msg.wire_bytes} B on air`);
   }
   if (
-    msg.compression === 'mcmp3' &&
+    msg.compression !== 'mcmp2' &&
     msg.payload_bytes != null &&
     msg.wire_bytes != null &&
     msg.payload_bytes !== msg.wire_bytes
   ) {
     parts.push(
-      `the percentage covers the ${msg.payload_bytes} B of compressed text, excluding the v3 container`
+      `the percentage covers the ${msg.payload_bytes} B of compressed text, excluding the ${msg.compression === 'mcmp3' ? 'v3' : 'MCOtxt'} container`
     );
   }
   return parts.join(' — ');

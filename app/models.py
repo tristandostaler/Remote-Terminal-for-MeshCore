@@ -129,7 +129,9 @@ class Contact(BaseModel):
     on_radio: bool = False
     favorite: bool = False
     mcmp_enabled: bool = False  # Opt-in: MCMP-compress outbound messages to this contact
-    mcmp_version: int = 2  # MCMP transport when enabled: 2 = mcmp2:, 3 = mcmp3: container
+    # Compression transport when enabled: 2 = mcmp2:, 3 = mcmp3: container,
+    # 4 = MCOtxt (mct:). One column because the schemes are mutually exclusive.
+    mcmp_version: int = 2
     # Which codec an outbound photo uses: "ie4" (AVIF/JPEG fragments) or "aeic"
     # (the neural codec, carried as aei1: basE91 text). See app/imaging/aeic/.
     image_codec: str = "ie4"
@@ -473,7 +475,9 @@ class Channel(BaseModel):
     favorite: bool = False
     muted: bool = False
     mcmp_enabled: bool = False  # Opt-in: MCMP-compress outbound messages to this channel
-    mcmp_version: int = 2  # MCMP transport when enabled: 2 = mcmp2:, 3 = mcmp3: container
+    # Compression transport when enabled: 2 = mcmp2:, 3 = mcmp3: container,
+    # 4 = MCOtxt (mct:). One column because the schemes are mutually exclusive.
+    mcmp_version: int = 2
     # Which codec an outbound photo uses: "ie4" (AVIF/JPEG fragments) or "aeic"
     # (the neural codec, carried as aei1: basE91 text). See app/imaging/aeic/.
     image_codec: str = "ie4"
@@ -581,7 +585,7 @@ class Message(BaseModel):
     compression: str | None = Field(
         default=None,
         description=(
-            "Codec the body rode under ('mcmp2'/'mcmp3'), or None when it went as plain "
+            "Codec the body rode under ('mcmp2'/'mcmp3'/'mcotxt'), or None when it went as plain "
             "text. Always None for messages stored before compression tracking existed."
         ),
     )
@@ -783,14 +787,16 @@ class McmpEstimateRequest(BaseModel):
     # messages are a few hundred bytes. The cap keeps a hostile/oversized body
     # from stalling the server (~1.3 us/char).
     text: str = Field(default="", max_length=4096)
-    version: int = Field(default=2, ge=2, le=3, description="MCMP transport: 2 or 3")
+    version: int = Field(
+        default=2, ge=2, le=4, description="Transport: 2/3 = MCMP v2/v3, 4 = MCOtxt"
+    )
 
 
 class McmpEstimateResponse(BaseModel):
     """Compressed wire size of a draft, for the live compose counter."""
 
     wire_bytes: int = Field(description="UTF-8 byte length the text occupies on the wire")
-    compressed: bool = Field(description="True if MCMP actually shrank the text")
+    compressed: bool = Field(description="True if compression actually shrank the text")
 
 
 class McmpEnabledRequest(BaseModel):
@@ -800,8 +806,8 @@ class McmpEnabledRequest(BaseModel):
     id: str
     enabled: bool
     # Optional so the toggle can be flipped without touching the version; when
-    # provided, sets the transport (2 = mcmp2:, 3 = mcmp3: container).
-    version: int | None = Field(default=None, ge=2, le=3)
+    # provided, sets the transport (2 = mcmp2:, 3 = mcmp3: container, 4 = MCOtxt mct:).
+    version: int | None = Field(default=None, ge=2, le=4)
 
 
 class McmpEnabledResponse(BaseModel):

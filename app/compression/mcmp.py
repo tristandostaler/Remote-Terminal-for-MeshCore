@@ -42,6 +42,10 @@ import math
 import os
 import re
 import threading
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .mcotxt import DecodedMCOtxtMessage
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,7 @@ _DECODE_HARD_LIMIT = 4096
 
 _PREFIX_V2 = "mcmp2:"
 _PREFIX_V3 = "mcmp3:"
+_MCOTXT_PREFIX = "mct:"  # app.compression.mcotxt.PREFIX, decoded alongside MCMP
 
 _TEXT_EMPTY_MARKER = "!"
 _TEXT_COMPRESSED_NO_ESC_MARKER = '"'
@@ -1034,7 +1039,7 @@ def _log_model_load_failure() -> None:
 # high-entropy bytes) and, for v3, actively harmful: v3 has no "only if smaller"
 # gate, so it would inflate a chunk sized exactly to the radio budget and the
 # radio would TRUNCATE it. A truncated basE91 chunk corrupts the whole image.
-_FRAMED_PREFIXES = ("mcmp2:", "mcmp3:", "aei1", "IE4:", "VE3:", "rmt1:")
+_FRAMED_PREFIXES = ("mcmp2:", "mcmp3:", "mct:", "aei1", "IE4:", "VE3:", "rmt1:")
 
 # MeshCore Open Advanced reaction payloads (r:HHHH:II). MCO Advanced sends
 # these plain on both the channel and DM paths -- wrapping one in MCMP would be
@@ -1052,8 +1057,15 @@ def is_framed_payload(text: str) -> bool:
     return text.startswith(_FRAMED_PREFIXES) or _REACTION_PAYLOAD_RE.match(text) is not None
 
 
+TRANSPORT_MCOTXT = 4
+"""Transport selector for MCOtxt (``mct:``), stored in the same per-conversation
+``mcmp_version`` column as MCMP's 2 and 3: the schemes are mutually exclusive,
+exactly as in MCO Advanced's one compression picker."""
+
+
 def encode_outbound(text: str, *, version: int = 2, timestamp: int = 0) -> str:
-    """Compress ``text`` for sending, as MCMP v2 (``mcmp2:``) or v3 (``mcmp3:``).
+    """Compress ``text`` for sending: MCMP v2 (``mcmp2:``), v3 (``mcmp3:``) or
+    MCOtxt (``mct:``, ``version=TRANSPORT_MCOTXT``).
 
     - **v2** uses the "only if smaller" gate: returns the text unchanged when
       compression would not shrink it, so short/incompressible messages stay
@@ -1062,6 +1074,10 @@ def encode_outbound(text: str, *, version: int = 2, timestamp: int = 0) -> str:
       ``timestamp``), matching meshcore-open; it is slightly larger than v2 for
       the same text (container + basE91). ``timestamp`` should be the message's
       sender timestamp so a retry/resend produces identical bytes.
+    - **MCOtxt** uses the same "only if smaller" gate, which is MCO Advanced's
+      default ("Send a plain message when it is smaller"; plain wins a tie). Its
+      container inherits the packet timestamp, so ``timestamp`` is unused and
+      the encoding is deterministic on its own.
 
     Text that is already a framed transport payload (an AEIC image chunk, an IE4
     envelope, or an already-encoded MCMP body) is returned unchanged — see
@@ -1076,6 +1092,15 @@ def encode_outbound(text: str, *, version: int = 2, timestamp: int = 0) -> str:
         return text
     if is_framed_payload(text):
         return text
+    if version == TRANSPORT_MCOTXT:
+        from . import mcotxt
+
+        try:
+            encoded = mcotxt.encode_text(text)
+        except Exception:
+            logger.exception("MCOtxt encoding failed; sending the text uncompressed")
+            return text
+        return encoded if len(encoded.encode("utf-8")) < len(text.encode("utf-8")) else text
     try:
         compressor = get_compressor()
         if version == 3:
@@ -1089,16 +1114,23 @@ def encode_outbound(text: str, *, version: int = 2, timestamp: int = 0) -> str:
 class DecodedIncoming:
     """Result of :func:`try_decode_incoming`."""
 
-    __slots__ = ("text", "version", "v3")
+    __slots__ = ("text", "version", "v3", "mcotxt")
 
-    def __init__(self, text: str, version: str, v3: DecodedV3Message | None) -> None:
+    def __init__(
+        self,
+        text: str,
+        version: str,
+        v3: DecodedV3Message | None,
+        mcotxt: DecodedMCOtxtMessage | None = None,
+    ) -> None:
         self.text = text
-        self.version = version  # "v2" or "v3"
+        self.version = version  # "v2", "v3" or "mcotxt"
         self.v3 = v3
+        self.mcotxt = mcotxt
 
 
 def try_decode_incoming(text: str) -> DecodedIncoming | None:
-    """Decode an incoming message body if it is MCMP (v3 first, then v2).
+    """Decode an incoming message body if it is MCMP (v3, then v2) or MCOtxt.
 
     Returns ``None`` for plain text, for a body that only looks like MCMP (an
     unknown marker, invalid basE91, an out-of-range escape codepoint, or a
@@ -1116,6 +1148,16 @@ def try_decode_incoming(text: str) -> DecodedIncoming | None:
     if not text:
         return None
     stripped = text.lstrip()
+    if stripped.startswith(_MCOTXT_PREFIX):
+        from . import mcotxt
+
+        # MCOtxt's decoder is strict and needs no model load that can fail.
+        decoded_mcotxt = mcotxt.try_decode_text(text)
+        if decoded_mcotxt is None:
+            return None
+        return DecodedIncoming(
+            text=decoded_mcotxt.text, version="mcotxt", v3=None, mcotxt=decoded_mcotxt
+        )
     if not (stripped.startswith(_PREFIX_V3) or stripped.startswith(_PREFIX_V2)):
         return None
 
@@ -1137,7 +1179,7 @@ def try_decode_incoming(text: str) -> DecodedIncoming | None:
 
 
 def decode_incoming_body(text: str) -> str:
-    """Decode an inbound MCMP body to plaintext for storage, else return as-is.
+    """Decode an inbound MCMP/MCOtxt body to plaintext for storage, else return as-is.
 
     The single decode entry point for every message ingest route (channel and
     DM, raw-RF and get_msg fallback). Using it everywhere keeps decoding — and
@@ -1148,8 +1190,8 @@ def decode_incoming_body(text: str) -> str:
     if decoded is None:
         return text
     logger.debug(
-        "Decoded MCMP %s message body (%d -> %d chars)",
-        decoded.version,
+        "Decoded %s message body (%d -> %d chars)",
+        "MCOtxt" if decoded.version == "mcotxt" else f"MCMP {decoded.version}",
         len(text),
         len(decoded.text),
     )

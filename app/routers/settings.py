@@ -527,11 +527,11 @@ async def toggle_favorite(request: FavoriteRequest) -> FavoriteToggleResponse:
 
 @router.post("/mcmp/set", response_model=McmpEnabledResponse)
 async def set_mcmp_enabled(request: McmpEnabledRequest) -> McmpEnabledResponse:
-    """Configure MCMP compression for a conversation (contact or channel).
+    """Configure text compression for a conversation (contact or channel).
 
     Sets the enabled flag and, when ``version`` is provided, the transport (2 =
-    mcmp2:, 3 = mcmp3: container). Off by default: the receiver must understand
-    MCMP to read it.
+    mcmp2:, 3 = mcmp3: container, 4 = MCOtxt mct:). Off by default: the receiver
+    must understand the chosen scheme to read it.
     """
     from app.websocket import broadcast_event
 
@@ -557,7 +557,7 @@ async def set_mcmp_enabled(request: McmpEnabledRequest) -> McmpEnabledResponse:
             broadcast_event("channel", refreshed.model_dump())
 
     logger.info(
-        "Set %s MCMP compression %s (v%d): %s",
+        "Set %s text compression %s (transport %d): %s",
         request.type,
         "on" if request.enabled else "off",
         version,

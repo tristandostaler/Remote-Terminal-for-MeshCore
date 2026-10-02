@@ -258,7 +258,7 @@ export function ConversationPane({
   const activeMcmpEnabled =
     (!activeContactIsRoom && (activeContact?.mcmp_enabled ?? false)) ||
     (activeChannel?.mcmp_enabled ?? false);
-  // MCMP transport version (2 or 3) so the counter estimates the right size.
+  // Compression transport (2/3 = MCMP, 4 = MCOtxt) so the counter estimates the right size.
   const activeMcmpVersion =
     activeConversation?.type === 'contact'
       ? (activeContact?.mcmp_version ?? 2)

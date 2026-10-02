@@ -49,6 +49,7 @@ from app.imaging.aeic.channel_data import (
     DATA_TYPE_MCO_IMAGE,
     MCO_APP_SUBTYPE_MCMP,
     MCO_APP_SUBTYPE_MCO_IMAGE,
+    MCO_APP_SUBTYPE_MCOTXT,
     ParsedChannelData,
     PendingImage,
     assemble,
@@ -277,6 +278,8 @@ def describe_data_type(data_type: int, payload: bytes = b"") -> str:
             return f"MCOimg v{version} image (codec not supported here)"
         if kind == MCO_APP_SUBTYPE_MCMP:
             return f"MCMP v{version} text over GRP_DATA"
+        if kind == MCO_APP_SUBTYPE_MCOTXT:
+            return f"MCOtxt revision {version} text over GRP_DATA"
         return f"MCO Advanced app data, subtype {kind} v{version}"
     return f"unknown data type 0x{data_type:04X}"
 
@@ -489,11 +492,11 @@ async def _store_text_message(
     from app.services.messages import create_fallback_channel_message
 
     channel = await ChannelRepository.get_by_key(conversation_key.upper())
-    # The v3 container carries the sender's own clock; v2 carries nothing, so
-    # arrival time is the best available -- and it is what the dedup index keys
-    # on, which is why the same blob is remembered above rather than relying on
-    # two arrivals landing in the same second.
-    sender_timestamp = decoded.v3.timestamp if decoded.v3 is not None else now
+    # The v3 and MCOtxt containers carry the sender's own clock; v2 carries
+    # nothing, so arrival time is the best available -- and it is what the dedup
+    # index keys on, which is why the same blob is remembered above rather than
+    # relying on two arrivals landing in the same second.
+    sender_timestamp = decoded.timestamp if decoded.timestamp is not None else now
     await create_fallback_channel_message(
         conversation_key=conversation_key,
         message_text=decoded.text,
@@ -507,8 +510,8 @@ async def _store_text_message(
         broadcast_fn=broadcast_fn if broadcast_fn is not None else _ignore_broadcast,
     )
     logger.info(
-        "Stored an MCMP %s message from GRP_DATA on %s (%d payload bytes)",
-        decoded.version,
+        "Stored an %s message from GRP_DATA on %s (%d payload bytes)",
+        "MCOtxt" if decoded.version == "mcotxt" else f"MCMP {decoded.version}",
         conversation_key[:12],
         decoded.payload_bytes,
     )

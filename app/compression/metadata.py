@@ -14,10 +14,12 @@ the two clients would disagree about the same message.
 
 from dataclasses import dataclass
 
+from . import mcotxt
 from .mcmp import is_v3_text_payload, try_decode_incoming, v3_compressed_text_bytes
 
 CODEC_MCMP_V2 = "mcmp2"
 CODEC_MCMP_V3 = "mcmp3"
+CODEC_MCOTXT = "mcotxt"
 
 _PREFIX_V2 = "mcmp2:"
 
@@ -48,7 +50,7 @@ def describe_compression(*, plain_text: str, wire_text: str) -> CompressionInfo 
 
     Returns ``None`` when nothing was compressed -- the two are identical (v2's
     "only if smaller" gate declined, or the conversation has MCMP off), or the
-    payload is not an MCMP body at all. Callers store ``None`` as "rode as plain
+    payload is not an MCMP or MCOtxt body at all. Callers store ``None`` as "rode as plain
     text", which the meta line renders by simply omitting the codec badge.
     """
     if not wire_text or wire_text == plain_text:
@@ -57,6 +59,19 @@ def describe_compression(*, plain_text: str, wire_text: str) -> CompressionInfo 
     stripped = wire_text.lstrip()
     plain_bytes = len(plain_text.encode("utf-8"))
     wire_bytes = len(wire_text.encode("utf-8"))
+
+    if mcotxt.is_text_payload(wire_text):
+        # Like v3, measured over the text string's stream bytes alone: MCO
+        # Advanced excludes container and envelope overhead from the ratio.
+        segment_bytes = mcotxt.text_payload_bytes(wire_text)
+        if segment_bytes is None:
+            return None
+        return CompressionInfo(
+            codec=CODEC_MCOTXT,
+            plain_bytes=plain_bytes,
+            wire_bytes=wire_bytes,
+            payload_bytes=segment_bytes,
+        )
 
     if is_v3_text_payload(wire_text):
         segment_bytes = v3_compressed_text_bytes(wire_text)

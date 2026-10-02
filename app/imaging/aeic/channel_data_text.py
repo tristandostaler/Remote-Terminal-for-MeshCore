@@ -9,6 +9,9 @@ as ``mcmp2:``/``mcmp3:`` text::
     0x0120  app:    senderNameLen(varuint) senderName subtypeVersion(u8) <body>
             subtype 2 (MCMP), version 0 -> the same v3 container the ``mcmp3:``
             text transport carries, minus the basE91 wrapper
+            subtype 3 (MCOtxt), revision 1 -> the MCOtxt app container the
+            ``mct:`` transport carries; on GRP_DATA it holds the sender name
+            and its own timestamp, and the envelope name is left empty
 
 Both bodies are already understood by :mod:`app.compression.mcmp` -- v2 by
 :meth:`MeshCompressor.decompress_bytes`, v3 by :func:`decode_v3_body`, which is
@@ -28,11 +31,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from app.compression import mcotxt
 from app.compression.mcmp import DecodedV3Message, decode_v3_body, get_compressor
 from app.imaging.aeic.channel_data import (
     DATA_TYPE_MCMP,
     DATA_TYPE_MCO_APP,
     MCO_APP_SUBTYPE_MCMP,
+    MCO_APP_SUBTYPE_MCOTXT,
     parse_envelope,
 )
 
@@ -77,12 +82,15 @@ class DecodedChannelDataText:
     sender_name: str
     text: str
     version: str
-    """``"v2"`` or ``"v3"``, matching :class:`app.compression.DecodedIncoming`."""
+    """``"v2"``, ``"v3"`` or ``"mcotxt"``, as in :class:`app.compression.DecodedIncoming`."""
 
     payload_bytes: int
     """Size of the whole GRP_DATA payload, for the compression ratio."""
 
     v3: DecodedV3Message | None = None
+
+    timestamp: int | None = None
+    """The sender's clock from the container (v3, MCOtxt); None for v2."""
 
 
 def carries_text(data_type: int, payload: bytes = b"") -> bool:
@@ -96,11 +104,14 @@ def carries_text(data_type: int, payload: bytes = b"") -> bool:
     if data_type != DATA_TYPE_MCO_APP:
         return False
     envelope = parse_envelope(payload, with_subtype=True)
-    return envelope is not None and envelope.subtype == MCO_APP_SUBTYPE_MCMP
+    return envelope is not None and envelope.subtype in (
+        MCO_APP_SUBTYPE_MCMP,
+        MCO_APP_SUBTYPE_MCOTXT,
+    )
 
 
 def decode_channel_data_text(data_type: int, payload: bytes) -> DecodedChannelDataText | None:
-    """Decode one GRP_DATA blob as MCMP text, or None if it is not that.
+    """Decode one GRP_DATA blob as MCMP or MCOtxt text, or None if it is not that.
 
     Never raises. A body that does not decode -- a truncated blob, a model this
     build could not load, a version nibble from a newer app -- returns None, and
@@ -129,6 +140,8 @@ def decode_channel_data_text(data_type: int, payload: bytes) -> DecodedChannelDa
     if data_type != DATA_TYPE_MCO_APP:
         return None
     envelope = parse_envelope(payload, with_subtype=True)
+    if envelope is not None and envelope.subtype == MCO_APP_SUBTYPE_MCOTXT:
+        return _decode_mcotxt(envelope.sender_name, envelope.version, envelope.body, len(payload))
     if envelope is None or envelope.subtype != MCO_APP_SUBTYPE_MCMP:
         return None
     if envelope.version != MCMP_V3_WIRE_VERSION:
@@ -154,4 +167,38 @@ def decode_channel_data_text(data_type: int, payload: bytes) -> DecodedChannelDa
         version="v3",
         payload_bytes=len(payload),
         v3=decoded,
+        timestamp=decoded.timestamp,
+    )
+
+
+def _decode_mcotxt(
+    envelope_name: str, revision: int | None, body: bytes, payload_bytes: int
+) -> DecodedChannelDataText | None:
+    """Decode an MCOtxt container from a GRP_DATA envelope, or None.
+
+    MCOtxt's decoder is strict -- a blob that is not its stream is rejected
+    rather than decoded to noise -- so no plausibility filter is needed here.
+    """
+    if revision != mcotxt.WIRE_REVISION:
+        logger.info(
+            "Ignoring an MCOtxt GRP_DATA body with revision %s; this build reads %d",
+            revision,
+            mcotxt.WIRE_REVISION,
+        )
+        return None
+    try:
+        decoded = mcotxt.decode_container(body)
+    except Exception as exc:  # noqa: BLE001 - see decode_channel_data_text
+        logger.info("Could not decode an MCOtxt GRP_DATA body: %s", exc)
+        return None
+    if not decoded.text:
+        return None
+    return DecodedChannelDataText(
+        # The name rides inside the container (flag 0x02) and the envelope's is
+        # left empty; fall back to the envelope only when the container has none.
+        sender_name=decoded.sender_name or envelope_name,
+        text=decoded.text,
+        version="mcotxt",
+        payload_bytes=payload_bytes,
+        timestamp=decoded.timestamp,
     )

@@ -1,6 +1,6 @@
 # RemoteTerm for MeshCore Advanced
 
-A fork of [RemoteTerm for MeshCore](https://github.com/jkingsman/Remote-Terminal-for-MeshCore) by Jack Kingsman, adding MCMP text compression, AEIC image transfer, and further interoperability work with other MeshCore clients.
+A fork of [RemoteTerm for MeshCore](https://github.com/jkingsman/Remote-Terminal-for-MeshCore) by Jack Kingsman, adding MCMP and MCOtxt text compression, AEIC image transfer, and further interoperability work with other MeshCore clients.
 
 Backend server + browser interface for MeshCore mesh radio networks, providing a rich, web-based power-user management and messaging system through a companion radio.
 

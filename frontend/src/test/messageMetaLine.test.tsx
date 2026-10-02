@@ -120,6 +120,27 @@ describe('message meta line: compression', () => {
     expect(badge.getAttribute('title')).toContain('excluding the v3 container');
   });
 
+  it('labels an MCOtxt message and explains its container in the tooltip', () => {
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            compression: 'mcotxt',
+            plain_bytes: 61,
+            wire_bytes: 53,
+            payload_bytes: 35,
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    const badge = screen.getByText('43% mcotxt');
+    expect(badge.getAttribute('title')).toContain('Compressed with MCOtxt');
+    expect(badge.getAttribute('title')).toContain('excluding the MCOtxt container');
+  });
+
   it('shows no badge when the body rode as plain text', () => {
     render(
       <MessageList

@@ -10,7 +10,7 @@ import { toast } from './ui/sonner';
 /**
  * Per-conversation MeshCore Open feature toggles. Opened from the chat header.
  *
- * Three features today: MCMP text compression, which codec photos use, and
+ * Three features today: text compression (MCMP or MCOtxt), which codec photos use, and
  * whether media fragments may fall back to text. Each is one bordered block;
  * changes apply immediately. To add a feature, add a prop pair (state + setter)
  * and render another block.
@@ -41,9 +41,15 @@ function FeatureRow({ title, description, checked, onCheckedChange, ariaLabel }:
   );
 }
 
-const MCMP_VERSIONS: { value: number; label: string; description: string }[] = [
-  { value: 2, label: 'v2', description: 'Smaller; widely compatible' },
-  { value: 3, label: 'v3', description: 'Container (timestamp); matches the advanced fork' },
+/** Compression schemes, keyed by the backend's transport number (`mcmp_version`). */
+const COMPRESSION_SCHEMES: { value: number; label: string; description: string }[] = [
+  { value: 2, label: 'MCMP v2', description: 'Smallest; meshcore-open and RemoteTerm' },
+  { value: 3, label: 'MCMP v3', description: 'Container (timestamp); matches the advanced fork' },
+  {
+    value: 4,
+    label: 'MCOtxt',
+    description: 'Seven languages; MCO Advanced and nodes that decode it on-device',
+  },
 ];
 
 const IMAGE_CODECS: {
@@ -331,24 +337,24 @@ export function ConversationFeaturesModal({
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain">
           <div className="rounded-md border border-border p-3">
             <FeatureRow
-              title="Compress messages (MCMP)"
-              description="Pack more text into a single packet with MCMP compression. The recipient must also support MCMP (meshcore-open / RemoteTerm) to read it; the compose counter then shows the compressed size."
+              title="Compress messages"
+              description="Pack more text into a single packet. The recipient must support the chosen scheme to read it; the compose counter then shows the compressed size."
               checked={mcmpEnabled}
               onCheckedChange={(next) =>
                 onSetMcmpEnabled(conversationType, conversationId, next, mcmpVersion)
               }
-              ariaLabel={mcmpEnabled ? 'Disable MCMP compression' : 'Enable MCMP compression'}
+              ariaLabel={mcmpEnabled ? 'Disable message compression' : 'Enable message compression'}
             />
 
             {mcmpEnabled && (
               <div className="mt-3 border-t border-border pt-3">
-                <div className="mb-1.5 text-xs font-medium text-foreground">Version</div>
+                <div className="mb-1.5 text-xs font-medium text-foreground">Scheme</div>
                 <div
-                  className="grid grid-cols-2 gap-1.5"
+                  className="grid grid-cols-1 gap-1.5 sm:grid-cols-3"
                   role="radiogroup"
-                  aria-label="MCMP version"
+                  aria-label="Compression scheme"
                 >
-                  {MCMP_VERSIONS.map((opt) => {
+                  {COMPRESSION_SCHEMES.map((opt) => {
                     const selected = mcmpVersion === opt.value;
                     return (
                       <button
@@ -356,7 +362,7 @@ export function ConversationFeaturesModal({
                         type="button"
                         role="radio"
                         aria-checked={selected}
-                        aria-label={`MCMP ${opt.label}`}
+                        aria-label={opt.label}
                         onClick={() =>
                           onSetMcmpEnabled(conversationType, conversationId, true, opt.value)
                         }
@@ -367,7 +373,7 @@ export function ConversationFeaturesModal({
                             : 'border-border hover:bg-accent'
                         )}
                       >
-                        <div className="font-medium">MCMP {opt.label}</div>
+                        <div className="font-medium">{opt.label}</div>
                         <div className="text-xs leading-snug text-muted-foreground">
                           {opt.description}
                         </div>
@@ -376,9 +382,11 @@ export function ConversationFeaturesModal({
                   })}
                 </div>
                 <p className="mt-2 text-xs leading-snug text-muted-foreground">
-                  v2 is smallest and universally readable. v3 adds a metadata container (a timestamp
-                  now; signing/replies later) and is slightly larger. Both are decoded automatically
-                  on the way in.
+                  MCMP v2 packs the most text per packet. v3 adds a metadata container (a timestamp
+                  now; signing/replies later) and is slightly larger. MCOtxt compresses a little
+                  less but covers English, Russian, French, German, Italian, Ukrainian and
+                  Belarusian, and is small enough for firmware to decode on the node itself.
+                  Messages arriving in any of the three are decoded automatically.
                 </p>
               </div>
             )}
