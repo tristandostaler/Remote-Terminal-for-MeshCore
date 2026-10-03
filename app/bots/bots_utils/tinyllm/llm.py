@@ -41,6 +41,7 @@ import importlib.util
 import json
 import logging
 import os
+import platform
 import select
 import shutil
 import subprocess
@@ -151,6 +152,9 @@ class ModelSpec:
     # "Custom". Sized to what the model can follow: the smallest ones repeat
     # whatever the prompt says about them, so theirs says almost nothing.
     system_prompt: str
+    # Too slow for a Pi or other ARM board: the dropdown only offers it on an
+    # x86 server (:func:`model_options`). A bot already set to it keeps working.
+    x86_only: bool = False
 
     @property
     def url(self) -> str:
@@ -190,7 +194,7 @@ def _fmt_mb(mb: int) -> str:
 # answer length is capped in code anyway. The 0.5B+ models can use context:
 # who they are, where they run, and to admit what they don't know rather than
 # make up MeshCore facts. Placeholders ({radio_name}, {sender}, {time},
-# {date}) are filled in by the bot; see PROMPT_PLACEHOLDERS.
+# {date}, {max_chars}) are filled in by the bot; see PROMPT_PLACEHOLDERS.
 TINY_PROMPT = "You are a friendly chatbot. Reply with one short sentence."
 GEMMA_PROMPT = "Reply with one short, friendly sentence."
 SMALL_PROMPT = (
@@ -201,7 +205,7 @@ SMALL_PROMPT = (
 LARGE_PROMPT = (
     "You are {radio_name}, a helpful bot on a MeshCore mesh radio network, talking "
     "with {sender}. People message you from small radios over LoRa, so answer in one "
-    "or two short sentences of plain text, under 140 characters. If you don't know "
+    "or two short sentences of plain text, under {max_chars} characters. If you don't know "
     "something, say so instead of guessing."
 )
 CUSTOM_MODEL_PROMPT = "You are a friendly chatbot. Reply with one or two short sentences."
@@ -211,6 +215,7 @@ PROMPT_PLACEHOLDERS = {
     "sender": "the name of the person asking",
     "time": "the current time (HH:MM)",
     "date": "today's date (YYYY-MM-DD)",
+    "max_chars": "the answer length in characters, from the bot's max answer tokens",
 }
 
 CATALOG: tuple[ModelSpec, ...] = (
@@ -260,6 +265,20 @@ CATALOG: tuple[ModelSpec, ...] = (
         system_prompt=GEMMA_PROMPT,
     ),
     ModelSpec(
+        key="lfm2-350m",
+        name="LFM2 350M",
+        repo="LiquidAI/LFM2-350M-GGUF",
+        filename="LFM2-350M-Q4_K_M.gguf",
+        params="354M",
+        quant="Q4_K_M",
+        download_mb=229,
+        ram_mb=350,
+        speed="very fast (~35 tok/s Pi 5, 90 tok/s x86)",
+        quality="Basic: short chat, better than its size suggests",
+        notes="Liquid AI's edge model, built to run fast on phone and Pi CPUs.",
+        system_prompt=TINY_PROMPT,
+    ),
+    ModelSpec(
         key="smollm2-360m",
         name="SmolLM2 360M",
         repo="HuggingFaceTB/SmolLM2-360M-Instruct-GGUF",
@@ -274,6 +293,20 @@ CATALOG: tuple[ModelSpec, ...] = (
         system_prompt=TINY_PROMPT,
     ),
     ModelSpec(
+        key="lfm2-700m",
+        name="LFM2 700M",
+        repo="LiquidAI/LFM2-700M-GGUF",
+        filename="LFM2-700M-Q4_K_M.gguf",
+        params="742M",
+        quant="Q4_K_M",
+        download_mb=469,
+        ram_mb=600,
+        speed="fast (~20 tok/s Pi 5, 60 tok/s x86)",
+        quality="Fair: quick, sensible short answers",
+        notes="Liquid AI's edge model, built to run fast on phone and Pi CPUs. Multilingual.",
+        system_prompt=SMALL_PROMPT,
+    ),
+    ModelSpec(
         key="qwen2.5-0.5b",
         name="Qwen2.5 0.5B",
         repo="Qwen/Qwen2.5-0.5B-Instruct-GGUF",
@@ -285,6 +318,62 @@ CATALOG: tuple[ModelSpec, ...] = (
         speed="good (~15 tok/s Pi 5, 50 tok/s x86)",
         quality="Recommended: best of the tiny tier, simple facts and instructions",
         notes="Multilingual. The default: the best answers that still fit a Pi 4.",
+        system_prompt=SMALL_PROMPT,
+    ),
+    ModelSpec(
+        key="tinyllama-1.1b",
+        name="TinyLlama 1.1B Chat",
+        repo="TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+        filename="tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+        params="1.1B",
+        quant="Q4_K_M",
+        download_mb=669,
+        ram_mb=800,
+        speed="moderate (~10 tok/s Pi 5, 35 tok/s x86)",
+        quality="Basic: chatty, often confidently wrong",
+        notes="An older Llama-architecture model; English only.",
+        system_prompt=SMALL_PROMPT,
+    ),
+    ModelSpec(
+        key="qwen2.5-0.5b-q8",
+        name="Qwen2.5 0.5B (Q8)",
+        repo="Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+        filename="qwen2.5-0.5b-instruct-q8_0.gguf",
+        params="494M",
+        quant="Q8_0",
+        download_mb=676,
+        ram_mb=850,
+        speed="good (~12 tok/s Pi 5, 45 tok/s x86)",
+        quality="Fair: the default model, slightly sharper",
+        notes="The default model at higher precision: a little more accurate, a little slower.",
+        system_prompt=SMALL_PROMPT,
+    ),
+    ModelSpec(
+        key="lfm2-1.2b",
+        name="LFM2 1.2B",
+        repo="LiquidAI/LFM2-1.2B-GGUF",
+        filename="LFM2-1.2B-Q4_K_M.gguf",
+        params="1.2B",
+        quant="Q4_K_M",
+        download_mb=731,
+        ram_mb=900,
+        speed="good (~12 tok/s Pi 5, 40 tok/s x86)",
+        quality="Good: a 1B-class model at nearly 0.5B speed",
+        notes="Liquid AI's edge model, built to run fast on phone and Pi CPUs. Multilingual; a strong pick for a Pi 5.",
+        system_prompt=SMALL_PROMPT,
+    ),
+    ModelSpec(
+        key="gemma3-1b",
+        name="Gemma 3 1B",
+        repo="unsloth/gemma-3-1b-it-GGUF",
+        filename="gemma-3-1b-it-Q4_K_M.gguf",
+        params="1B",
+        quant="Q4_K_M",
+        download_mb=806,
+        ram_mb=1000,
+        speed="moderate (~9 tok/s Pi 5, 30 tok/s x86)",
+        quality="Good: fluent, friendly answers",
+        notes="Google's small model; multilingual.",
         system_prompt=SMALL_PROMPT,
     ),
     ModelSpec(
@@ -302,6 +391,34 @@ CATALOG: tuple[ModelSpec, ...] = (
         system_prompt=SMALL_PROMPT,
     ),
     ModelSpec(
+        key="granite3.1-1b-a400m",
+        name="Granite 3.1 1B-A400M (MoE)",
+        repo="bartowski/granite-3.1-1b-a400m-instruct-GGUF",
+        filename="granite-3.1-1b-a400m-instruct-Q4_K_M.gguf",
+        params="1.3B (400M active)",
+        quant="Q4_K_M",
+        download_mb=822,
+        ram_mb=1000,
+        speed="fast (~20 tok/s Pi 5, 60 tok/s x86)",
+        quality="Fair: plain, to-the-point answers",
+        notes="IBM's mixture-of-experts model: only ~400M parameters work per token, so it answers about as fast as a 0.5B model.",
+        system_prompt=SMALL_PROMPT,
+    ),
+    ModelSpec(
+        key="smollm2-1.7b",
+        name="SmolLM2 1.7B",
+        repo="HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF",
+        filename="smollm2-1.7b-instruct-q4_k_m.gguf",
+        params="1.7B",
+        quant="Q4_K_M",
+        download_mb=1060,
+        ram_mb=1300,
+        speed="slow on a Pi (~5 tok/s Pi 5, 20 tok/s x86)",
+        quality="Good: solid small talk and simple facts",
+        notes="English only. The largest SmolLM2.",
+        system_prompt=SMALL_PROMPT,
+    ),
+    ModelSpec(
         key="qwen2.5-1.5b",
         name="Qwen2.5 1.5B",
         repo="Qwen/Qwen2.5-1.5B-Instruct-GGUF",
@@ -311,9 +428,57 @@ CATALOG: tuple[ModelSpec, ...] = (
         download_mb=1120,
         ram_mb=1500,
         speed="slow on a Pi (~5 tok/s Pi 5, 20 tok/s x86)",
-        quality="Best: the most capable option here",
+        quality="Very good: the most capable option that still runs on a Pi",
         notes="Best on an x86 host; on a Pi replies are cut short by the time limit.",
         system_prompt=LARGE_PROMPT,
+    ),
+    ModelSpec(
+        key="llama3.2-3b",
+        name="Llama 3.2 3B",
+        repo="bartowski/Llama-3.2-3B-Instruct-GGUF",
+        filename="Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        params="3.2B",
+        quant="Q4_K_M",
+        download_mb=2020,
+        ram_mb=2300,
+        speed="~10 tok/s x86 (too slow for a Pi)",
+        quality="Very good: broad general knowledge",
+        notes="Offered on x86 servers only; needs 4 GB+ free. Raise the bot's Time limit.",
+        system_prompt=LARGE_PROMPT,
+        x86_only=True,
+    ),
+    ModelSpec(
+        key="qwen2.5-3b",
+        name="Qwen2.5 3B",
+        repo="Qwen/Qwen2.5-3B-Instruct-GGUF",
+        filename="qwen2.5-3b-instruct-q4_k_m.gguf",
+        params="3.1B",
+        quant="Q4_K_M",
+        download_mb=2100,
+        ram_mb=2400,
+        speed="~10 tok/s x86 (too slow for a Pi)",
+        quality="Very good: strong facts and instructions, multilingual",
+        notes="Offered on x86 servers only; needs 4 GB+ free. Raise the bot's Time limit.",
+        system_prompt=LARGE_PROMPT,
+        x86_only=True,
+    ),
+    ModelSpec(
+        key="phi4-mini",
+        name="Phi-4 mini",
+        repo="bartowski/microsoft_Phi-4-mini-instruct-GGUF",
+        filename="microsoft_Phi-4-mini-instruct-Q4_K_M.gguf",
+        params="3.8B",
+        quant="Q4_K_M",
+        download_mb=2490,
+        ram_mb=2900,
+        speed="~8 tok/s x86 (too slow for a Pi)",
+        quality="Best: the most capable option here, good at reasoning",
+        notes=(
+            "Microsoft's small model. Offered on x86 servers only; needs 4 GB+ free. "
+            "Raise the bot's Time limit."
+        ),
+        system_prompt=LARGE_PROMPT,
+        x86_only=True,
     ),
 )
 
@@ -322,11 +487,20 @@ DEFAULT_MODEL = "qwen2.5-0.5b"
 CUSTOM_MODEL = "custom"
 
 
-def model_options() -> list[dict[str, str]]:
-    """Settings dropdown options: every catalog model plus "custom"."""
+def is_x86(machine: str | None = None) -> bool:
+    """Whether this server is x86 (``platform.machine()`` unless given)."""
+    arch = (platform.machine() if machine is None else machine).lower()
+    return arch in {"x86_64", "amd64", "x64", "i386", "i486", "i586", "i686", "x86"}
+
+
+def model_options(x86: bool | None = None) -> list[dict[str, str]]:
+    """Settings dropdown options: the catalog models this server can run, plus
+    "custom". The x86-only ones are left out on a Pi or other ARM board."""
+    x86 = is_x86() if x86 is None else x86
     options = [
         {"value": spec.key, "label": spec.option_label, "description": spec.option_description}
         for spec in CATALOG
+        if x86 or not spec.x86_only
     ]
     options.append(
         {

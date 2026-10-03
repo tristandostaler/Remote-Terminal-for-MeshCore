@@ -360,10 +360,23 @@ server: no Ollama, no cloud API, no GPU. It ships disabled.
    | SmolLM2 135M (Q4, smallest) | 105 MB | ~180 MB | Toy, lightest; for 1 GB Pis |
    | SmolLM2 135M | 145 MB | ~210 MB | Toy, very fast |
    | Gemma 3 270M | 292 MB | ~450 MB | Short friendly chat |
+   | LFM2 350M | 229 MB | ~350 MB | Very fast; better than its size |
    | SmolLM2 360M | 386 MB | ~550 MB | Decent small talk |
+   | LFM2 700M | 469 MB | ~600 MB | Quick, sensible short answers |
    | Qwen2.5 0.5B (default) | 491 MB | ~650 MB | Best of the tiny tier |
+   | TinyLlama 1.1B Chat | 669 MB | ~800 MB | Chatty, often wrong |
+   | Qwen2.5 0.5B (Q8) | 676 MB | ~850 MB | The default, slightly sharper |
+   | LFM2 1.2B | 731 MB | ~900 MB | 1B-class at near-0.5B speed; good Pi 5 pick |
+   | Gemma 3 1B | 806 MB | ~1.0 GB | Fluent and friendly |
    | Llama 3.2 1B | 808 MB | ~1.1 GB | Smarter; Pi 5 or better |
-   | Qwen2.5 1.5B | 1.1 GB | ~1.5 GB | Most capable; best on x86 |
+   | Granite 3.1 1B-A400M | 822 MB | ~1.0 GB | Mixture-of-experts: 0.5B-like speed |
+   | SmolLM2 1.7B | 1.1 GB | ~1.3 GB | Solid small talk; English only |
+   | Qwen2.5 1.5B | 1.1 GB | ~1.5 GB | Most capable that runs on a Pi |
+   | Llama 3.2 3B | 2.0 GB | ~2.3 GB | Broad knowledge; x86 only |
+   | Qwen2.5 3B | 2.1 GB | ~2.4 GB | Strong, multilingual; x86 only |
+   | Phi-4 mini | 2.5 GB | ~2.9 GB | Most capable; x86 only |
+
+   The three x86-only models are not offered on a Pi or other ARM server.
 
    A Custom option takes any GGUF chat model from Hugging Face.
 

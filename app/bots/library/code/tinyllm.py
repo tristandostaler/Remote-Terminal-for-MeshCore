@@ -88,7 +88,12 @@ ANSWER_MIN_SECONDS = 3
 # before answering, and on a Pi that reading is most of the wait.
 NOTES_MAX_CHARS = 700
 NOTES_HEADER = "\n\nReference notes (use them only if they answer the question):\n"
-_PLACEHOLDER_RE = re.compile(r"\{(radio_name|sender|time|date)\}")
+_PLACEHOLDER_RE = re.compile(r"\{(radio_name|sender|time|date|max_chars)\}")
+# {max_chars} tells the model how long its answer may be, from the "Max answer
+# length (tokens)" setting, rounded down to a tidy number. English runs about 4
+# characters a token, but the prompt counts 3 so the model aims a bit under the
+# token cap and finishes its sentence instead of being cut off mid-word.
+ANSWER_CHARS_PER_TOKEN = 3
 # A leading command prefix (!, ?, ...) or @[mention], then a trigger word.
 _COMMAND_RE = re.compile(
     r"^\W*(?:@\[[^\]]*\]\s*)?(" + "|".join(KEYWORDS) + r")\b\s*(.*)$",
@@ -115,7 +120,7 @@ BOT_META = {
         "`uv sync --extra llm` on the server. Small models are chatty and often wrong: treat "
         "answers as entertainment, not facts."
     ),
-    "version": "1.7.1",
+    "version": "1.8.0",
     "cooldown_seconds": 3,
     "per_user_cooldown_seconds": 20,
     "timeout_seconds": TIME_LIMIT_SECONDS,
@@ -192,7 +197,8 @@ BOT_META = {
                 "The bot's personality and rules. Keep it short and plain: the smallest "
                 "models repeat what the prompt says about them rather than follow it. "
                 "Placeholders filled in for each question: {radio_name} (this radio's "
-                "name), {sender}, {time}, {date}."
+                "name), {sender}, {time}, {date}, {max_chars} (the answer length in "
+                "characters, from Max answer length below)."
             ),
             "show_when": {"key": "prompt_mode", "value": PROMPT_CUSTOM},
         },
@@ -208,7 +214,11 @@ BOT_META = {
             "default": 40,
             "min": 16,
             "max": 160,
-            "help": "About 4 characters per token. Shorter is also faster.",
+            "help": (
+                "About 4 characters per token. Shorter is also faster. The prompt's "
+                "{max_chars} (used by the larger models' default prompts) asks the model "
+                "for a little less, 3 characters per token, so it finishes before the cap."
+            ),
         },
         {
             "key": "max_messages",
@@ -443,7 +453,8 @@ BOT_META = {
 
 def system_prompt_for(settings, spec, values=None):
     """The prompt in effect -- the operator's custom text, or the model's own --
-    with its placeholders ({radio_name}, {sender}, {time}, {date}) filled in.
+    with its placeholders ({radio_name}, {sender}, {time}, {date}, {max_chars})
+    filled in.
     A plain substitution, so any other braces in a custom prompt are left be."""
     custom = str(settings.get("system_prompt") or "").strip()
     text = custom if settings.get("prompt_mode") == PROMPT_CUSTOM and custom else spec.system_prompt
@@ -462,13 +473,21 @@ def _radio_name():
         return ""
 
 
-def prompt_values(sender_name):
+def answer_chars(max_tokens):
+    """The answer length the prompt asks for with ``max_tokens``: 3 characters
+    a token (a little under the ~4 the cap allows), rounded down to a multiple
+    of 10."""
+    return max(10, int(max_tokens) * ANSWER_CHARS_PER_TOKEN // 10 * 10)
+
+
+def prompt_values(sender_name, max_tokens=40):
     now = time.localtime()
     return {
         "radio_name": _radio_name() or "tinyllm",
         "sender": sender_name or "someone",
         "time": time.strftime("%H:%M", now),
         "date": time.strftime("%Y-%m-%d", now),
+        "max_chars": answer_chars(max_tokens),
     }
 
 
@@ -744,7 +763,7 @@ async def ask(ctx, msg):
     session = msg.sender_key if (msg.is_dm and msg.sender_key) else None
     history_limit = int(_number(ctx, "history_messages", 10, 0, 20))
     max_tokens = int(_number(ctx, "max_tokens", 40, 16, 160))
-    prompt = system_prompt_for(ctx.settings, spec, prompt_values(msg.sender_name))
+    prompt = system_prompt_for(ctx.settings, spec, prompt_values(msg.sender_name, max_tokens))
     # What the context has room for once the prompt, question and answer are in.
     free_chars = (
         n_ctx * CHARS_PER_TOKEN
