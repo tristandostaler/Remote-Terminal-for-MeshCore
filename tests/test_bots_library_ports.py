@@ -153,7 +153,7 @@ class TestMentionPattern:
             assert len(response.replies) == 1, word
             text = response.replies[0]["text"]
             assert text.startswith("🤖 Copy, @[K0PHX] @ "), word
-            assert "Direct (no path)" in text, word
+            assert "Direct (0 hops)" in text, word
 
     async def test_roll_names_the_roller_as_a_mention(self, test_db):
         """`roll` was merged into `dice` and keeps its own 1..N output."""
@@ -169,6 +169,61 @@ class TestMentionPattern:
         )
         assert response.error is None
         assert "@[" not in response.replies[0]["text"]
+
+
+class TestDirectRoutedArrival:
+    """An empty path is only "0 hops" when the packet was flooded.
+
+    A direct-routed packet loses each hop as a repeater forwards it, so it
+    arrives with an empty path after crossing any number of repeaters.
+    """
+
+    @staticmethod
+    def _packet(route_type: int) -> bytes:
+        # header: route type | TXT_MSG (0x02) << 2; path length 0; dummy payload
+        return bytes([route_type | (0x02 << 2), 0x00]) + os.urandom(20)
+
+    async def _build(self, data: dict):
+        return await BotEngine()._build_message(
+            {"type": "PRIV", "conversation_key": "ab" * 32, "text": "ping", **data}
+        )
+
+    async def test_direct_routed_packet_is_flagged(self, test_db):
+        from app.repository import RawPacketRepository
+
+        packet_id, _ = await RawPacketRepository.create(self._packet(0x02))
+        msg, _ = await self._build({"packet_id": packet_id, "paths": [{"path": "", "path_len": 0}]})
+        assert msg.direct_routed is True
+
+    async def test_flooded_zero_hop_packet_is_not_flagged(self, test_db):
+        from app.repository import RawPacketRepository
+
+        packet_id, _ = await RawPacketRepository.create(self._packet(0x01))
+        msg, _ = await self._build({"packet_id": packet_id, "paths": [{"path": "", "path_len": 0}]})
+        assert msg.direct_routed is False
+
+    async def test_companion_ff_path_len_is_direct_with_unknown_hops(self, test_db):
+        msg, hops = await self._build({"paths": [{"path": "", "path_len": 0xFF}]})
+        assert msg.direct_routed is True
+        assert hops is None
+
+    async def test_flooded_path_is_never_direct_routed(self, test_db):
+        msg, hops = await self._build({"paths": [{"path": "a1b2", "path_len": 2}]})
+        assert msg.direct_routed is False
+        assert hops == 2
+
+    async def test_ping_says_hops_are_unknown_for_direct_routed(self):
+        entry = get_library_entry("ping")
+        loaded = load_bot_code(entry["code"])
+        replies: list[str] = []
+
+        class _Ctx:
+            async def reply_split(self, text):
+                replies.append(text)
+
+        handler = loaded.namespace["signal_report"]
+        await handler(_Ctx(), BotMessage(text="ping", sender_name="K0PHX", direct_routed=True))
+        assert "Direct-routed" in replies[0]
 
 
 class TestMultitest:

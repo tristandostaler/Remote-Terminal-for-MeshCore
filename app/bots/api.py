@@ -317,6 +317,10 @@ class BotMessage:
     region: str | None = None
     scoped: bool = False
     is_outgoing: bool = False
+    # Arrived on a learned direct route. Repeaters strip their hop from such a
+    # packet, so ``path`` is empty even when it crossed several hops; an empty
+    # ``path`` with this False is a genuine zero-hop neighbour.
+    direct_routed: bool = False
 
     @property
     def arg_text(self) -> str:
