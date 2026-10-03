@@ -80,6 +80,25 @@ UNIVERSAL_COMMAND_RE = re.compile(r"!(?:bots|author)(?:\s|$)", re.IGNORECASE)
 
 _bot_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="botws_")
 
+# path_len the companion protocol reports for a direct-routed packet.
+DIRECT_ROUTED_PATH_LEN = 0xFF
+
+
+async def _arrived_direct_routed(packet_id: Any) -> bool:
+    """Whether the stored raw packet behind a message came on a direct route."""
+    if not isinstance(packet_id, int):
+        return False
+    try:
+        from app.decoder import RouteType, parse_packet
+        from app.repository import RawPacketRepository
+
+        row = await RawPacketRepository.get_by_id(packet_id)
+        info = parse_packet(row[1]) if row else None
+    except Exception:
+        logger.debug("Could not read route type of packet %s", packet_id, exc_info=True)
+        return False
+    return info is not None and info.route_type in (RouteType.DIRECT, RouteType.TRANSPORT_DIRECT)
+
 
 @dataclass
 class LoadedBot:
@@ -444,6 +463,20 @@ class BotEngine:
             if isinstance(raw_len, int):
                 path_hops = raw_len
 
+        direct_routed = False
+        if not path_value:
+            # A packet sent on a learned direct route loses each hop as a
+            # repeater forwards it (firmware strips its own hash), so it lands
+            # with an empty path exactly like a zero-hop neighbour. Only the
+            # route type tells the two apart.
+            if path_hops == DIRECT_ROUTED_PATH_LEN:
+                # Companion CONTACT_MSG_RECV marks a direct-routed packet with
+                # path_len 0xFF; its hop count is unknown, not 255.
+                direct_routed = True
+                path_hops = None
+            else:
+                direct_routed = await _arrived_direct_routed(data.get("packet_id"))
+
         path_bytes_per_hop: int | None = None
         if isinstance(path_value, str) and path_value and path_hops:
             path_bytes = len(path_value) // 2
@@ -466,6 +499,7 @@ class BotEngine:
             region=data.get("region"),
             scoped=data.get("transport_code") is not None,
             is_outgoing=is_outgoing,
+            direct_routed=direct_routed,
         )
         return message, path_hops
 
