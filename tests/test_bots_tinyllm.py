@@ -44,6 +44,22 @@ class TestCatalog:
             assert "download" in option["label"] and "RAM" in option["label"], option
             assert "RAM" in option["description"] and "huggingface.co/" in option["description"]
 
+    def test_x86_only_models_are_hidden_off_x86(self):
+        x86_only = {spec.key for spec in llm.CATALOG if spec.x86_only}
+        assert x86_only == {"llama3.2-3b", "qwen2.5-3b", "phi4-mini"}
+        on_x86 = {o["value"] for o in llm.model_options(x86=True)}
+        on_arm = {o["value"] for o in llm.model_options(x86=False)}
+        assert x86_only <= on_x86 and not (x86_only & on_arm)
+        assert on_x86 - on_arm == x86_only and llm.CUSTOM_MODEL in on_arm
+        # A bot already set to one keeps working on any server.
+        assert llm.resolve_spec({"model": "phi4-mini"}).key == "phi4-mini"
+
+    def test_is_x86(self):
+        for arch in ("x86_64", "AMD64", "i686"):
+            assert llm.is_x86(arch), arch
+        for arch in ("aarch64", "armv7l", "arm64", "riscv64", ""):
+            assert not llm.is_x86(arch), arch
+
     def test_urls_point_at_gguf_files(self):
         for spec in llm.CATALOG:
             assert spec.filename.endswith(".gguf")
@@ -891,9 +907,14 @@ class TestConversationTurns:
         assert [m["content"] for m in self._turns(rows, now=103)] == ["a", "A."]
 
 
-def _filled(prompt, sender="TestUser"):
-    """A prompt as the bot sends it in tests: no radio, so "tinyllm"."""
-    return prompt.replace("{radio_name}", "tinyllm").replace("{sender}", sender)
+def _filled(prompt, sender="TestUser", max_chars=120):
+    """A prompt as the bot sends it in tests: no radio, so "tinyllm"; the
+    default 40 answer tokens ask for 120 characters."""
+    return (
+        prompt.replace("{radio_name}", "tinyllm")
+        .replace("{sender}", sender)
+        .replace("{max_chars}", str(max_chars))
+    )
 
 
 class TestPromptPlaceholders:
@@ -918,12 +939,37 @@ class TestPromptPlaceholders:
         )
 
     def test_the_bigger_models_get_context_and_the_tiny_ones_do_not(self):
-        for key in ("qwen2.5-0.5b", "llama3.2-1b", "qwen2.5-1.5b"):
+        small = [k for k, s in llm.CATALOG_BY_KEY.items() if s.system_prompt == llm.TINY_PROMPT]
+        assert set(small) == {"smollm2-135m-q4", "smollm2-135m", "smollm2-360m", "lfm2-350m"}
+        for key in ("qwen2.5-0.5b", "llama3.2-1b", "qwen2.5-1.5b", "gemma3-1b", "qwen2.5-3b"):
             prompt = llm.CATALOG_BY_KEY[key].system_prompt
             assert "{radio_name}" in prompt and "MeshCore" in prompt, key
         for key in ("smollm2-135m-q4", "smollm2-135m", "smollm2-360m", "gemma3-270m"):
             prompt = llm.CATALOG_BY_KEY[key].system_prompt
             assert "{" not in prompt and "MeshCore" not in prompt, key
+
+    def test_max_chars_follows_the_answer_tokens(self):
+        ns = _bot_namespace()
+        assert ns["answer_chars"](40) == 120
+        assert ns["answer_chars"](35) == 100
+        assert ns["answer_chars"](16) == 40
+        assert self._fill("under {max_chars} chars", max_chars=ns["answer_chars"](80)) == (
+            "under 240 chars"
+        )
+        # A little under what the token cap allows (~4 chars a token).
+        assert all(ns["answer_chars"](n) < n * 4 for n in range(16, 161))
+        assert "{max_chars}" in llm.LARGE_PROMPT and "140" not in llm.LARGE_PROMPT
+
+    async def test_the_prompt_states_the_configured_answer_length(self, test_db, monkeypatch):
+        runtime = _FakeRuntime()
+        await _run(
+            monkeypatch,
+            runtime,
+            BotTestRequest(text="ask hi"),
+            settings={"model": "qwen2.5-1.5b", "max_tokens": 25},
+        )
+        system = runtime.asked[0][0][0]["content"]
+        assert "under 70 characters" in system and "{max_chars}" not in system
 
     async def test_the_radio_name_and_sender_reach_the_model(self, test_db, monkeypatch):
         from types import SimpleNamespace

@@ -104,7 +104,9 @@ operators).
 - `llm.py` — the `tinyllm` bot's tiny on-device LLM runtime (optional `llm` extra,
   `llama-cpp-python`). Owns the model catalog the bot's Settings dropdown is
   generated from (label + per-option `description` with download size and RAM;
-  the editor shows the chosen option's `description` under any `select`), and
+  the editor shows the chosen option's `description` under any `select`;
+  `ModelSpec.x86_only` models are left out of the dropdown unless
+  `platform.machine()` is x86, though a bot already set to one still resolves), and
   the process-wide `llm_runtime` singleton — bot code is re-exec'd on every
   settings save, so a model held in the bot's namespace would be reloaded each
   time. Download + load always run in a background thread (a first download
@@ -216,7 +218,9 @@ operators).
   (512/1024/2048) is a load parameter like threads/repack (part of the load
   key; the memory check adds `CONTEXT_MB_PER_1K_TOKENS`). Prompts take
   `{radio_name}` (lock-free `radio_manager.meshcore.self_info`), `{sender}`,
-  `{time}`, `{date}`, substituted by regex so other braces survive.
+  `{time}`, `{date}`, `{max_chars}` (`max_tokens` x 3, rounded down to a
+  multiple of 10: the prompt asks for a bit under the ~4 chars/token the cap
+  allows, so answers finish instead of being cut off), substituted by regex so other braces survive.
   Weight **repacking is off** (`_weight_repacking` wraps
   `llama_model_default_params` during the load to set `use_extra_bufts=False`;
   `Llama()` has no argument for it): on ARM with dotprod (Pi 5) llama.cpp
