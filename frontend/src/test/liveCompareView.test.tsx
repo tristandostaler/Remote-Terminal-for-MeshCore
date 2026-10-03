@@ -262,6 +262,69 @@ describe('LiveCompareView', () => {
     expect(String(traceCall?.[0])).toContain('packet_hash=b2c3d4e5f6071829');
   });
 
+  it('shows on every row which channel the message was sent in', async () => {
+    mockApi(stats, page);
+    render(<LiveCompareView channels={[]} />);
+    const rows = await screen.findAllByTestId('live-compare-row');
+    for (const row of rows) {
+      expect(within(row).getByTestId('live-compare-channel')).toHaveTextContent('Public');
+    }
+  });
+
+  it('hides the channel buttons when only one channel is compared', async () => {
+    mockApi(stats, page);
+    render(<LiveCompareView channels={[]} />);
+    await screen.findAllByTestId('live-compare-row');
+    expect(screen.queryByTestId('live-compare-channel-filter')).not.toBeInTheDocument();
+  });
+
+  it('filters the list and the tiles by channel, defaulting to all', async () => {
+    const hashKey = 'BB'.repeat(16);
+    const fetchSpy = mockApi(
+      {
+        ...stats,
+        both: 5,
+        node_only: 1,
+        live_only: 1,
+        channels: [
+          ...stats.channels,
+          { channel_key: hashKey, channel_name: '#test', both: 4, node_only: 0, live_only: 0 },
+        ],
+      },
+      page
+    );
+    const user = userEvent.setup();
+    render(<LiveCompareView channels={[]} />);
+
+    const group = await screen.findByTestId('live-compare-channel-filter');
+    const all = within(group).getByRole('button', { name: /All channels/ });
+    expect(all).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('5')).toBeInTheDocument();
+
+    await user.click(within(group).getByRole('button', { name: /#test/ }));
+
+    expect(within(group).getByRole('button', { name: /#test/ })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+    expect(all).toHaveAttribute('aria-pressed', 'false');
+    await waitFor(() => {
+      const listCalls = fetchSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('/live-feed/messages')
+      );
+      expect(String(listCalls[listCalls.length - 1]?.[0])).toContain(`channel_key=${hashKey}`);
+    });
+    expect(screen.getByText('100%')).toBeInTheDocument();
+
+    await user.click(all);
+    await waitFor(() => {
+      const listCalls = fetchSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('/live-feed/messages')
+      );
+      expect(String(listCalls[listCalls.length - 1]?.[0])).not.toContain('channel_key');
+    });
+  });
+
   it('surfaces a failed sync in the status line', async () => {
     mockApi(
       { ...stats, status: { ...status, last_error: 'HTTP 503', last_success_at: null } },

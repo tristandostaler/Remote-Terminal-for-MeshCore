@@ -3,9 +3,9 @@
  * CoreScope instance (live.meshcore.ca) observed, one row per message, each
  * marked with who heard it.
  *
- * The page owns one window, one channel filter, one source filter and a
- * search box; the summary tiles and the list always describe the same
- * selection. Two requests back it: `/live-feed/stats` (status + tiles) and
+ * The page owns one window, one channel filter (buttons, "All" by default),
+ * one source filter and a search box; the summary tiles and the list always
+ * describe the same channel selection. Two requests back it: `/live-feed/stats` (status + tiles) and
  * `/live-feed/messages` (the page). Only the cheap `/live-feed/status` is
  * re-polled every `STATUS_POLL_MS`; the stats query and the list are reloaded
  * when it reports a newer completed sync, so the page follows the sync loop
@@ -73,11 +73,12 @@ function splitText(message: LiveCompareMessage): { sender: string | null; body: 
 
 function MessageRow({
   message,
-  showChannel,
+  channelName,
   onInspect,
 }: {
   message: LiveCompareMessage;
-  showChannel: boolean;
+  /** The channel the message was sent in, shown on every row. */
+  channelName: string | null;
   onInspect: (message: LiveCompareMessage) => void;
 }) {
   const meta = SOURCE_META[message.source];
@@ -119,9 +120,13 @@ function MessageRow({
           {formatTime(message.seen_at)}
         </span>
         <SourceBadge source={message.source} compact />
-        {showChannel && message.channel_name && (
-          <span className="rounded bg-muted px-1.5 py-0.5 text-[0.625rem]">
-            {message.channel_name}
+        {channelName && (
+          <span
+            className="rounded bg-muted px-1.5 py-0.5 text-[0.625rem]"
+            title={`Sent in ${channelName}`}
+            data-testid="live-compare-channel"
+          >
+            {channelName}
           </span>
         )}
         {message.outgoing && (
@@ -308,15 +313,44 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
 
   // Channels worth filtering on: the ones the comparison actually covers.
   const channelOptions = useMemo(() => {
-    const byKey = new Map<string, string>();
+    const byKey = new Map<string, { name: string; total: number }>();
     for (const c of stats?.channels ?? []) {
-      if (c.channel_key) byKey.set(c.channel_key, c.channel_name);
+      if (c.channel_key) {
+        byKey.set(c.channel_key, {
+          name: c.channel_name,
+          total: c.both + c.node_only + c.live_only,
+        });
+      }
     }
     for (const c of channels) {
-      if (byKey.has(c.key.toUpperCase()) && c.name) byKey.set(c.key.toUpperCase(), c.name);
+      const entry = byKey.get(c.key.toUpperCase());
+      if (entry && c.name) entry.name = c.name;
     }
-    return [...byKey.entries()].map(([key, name]) => ({ key, name }));
+    return [...byKey.entries()].map(([key, { name, total }]) => ({ key, name, total }));
   }, [stats, channels]);
+
+  // A selection whose channel dropped out of the window (or out of the
+  // compared set) falls back to all channels rather than an empty page.
+  useEffect(() => {
+    if (stats && channelKey && !channelOptions.some((c) => c.key === channelKey)) {
+      setChannelKey('');
+    }
+  }, [stats, channelKey, channelOptions]);
+
+  // The tiles follow the channel selection, from the per-channel counts the
+  // stats query already carries.
+  const tiles = useMemo(() => {
+    if (!stats) return null;
+    const entry = channelKey ? stats.channels.find((c) => c.channel_key === channelKey) : null;
+    if (!entry) return stats;
+    const liveTotal = entry.both + entry.live_only;
+    return {
+      both: entry.both,
+      node_only: entry.node_only,
+      live_only: entry.live_only,
+      node_coverage_pct: liveTotal ? Math.round((1000 * entry.both) / liveTotal) / 10 : null,
+    };
+  }, [stats, channelKey]);
 
   // The remote instance names only Public and hashtag channels; a private
   // channel's local name means nothing there, so the link falls back to Public.
@@ -446,21 +480,60 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
             </div>
           ) : (
             <>
-              {stats && (
+              {channelOptions.length > 1 && (
+                <div
+                  role="group"
+                  aria-label="Channel"
+                  className="flex flex-wrap gap-1"
+                  data-testid="live-compare-channel-filter"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={channelKey === ''}
+                    onClick={() => setChannelKey('')}
+                    className={cn(
+                      'rounded-md border px-2 py-1 text-xs font-medium transition-colors',
+                      channelKey === ''
+                        ? 'border-primary bg-primary text-primary-foreground'
+                        : 'border-border text-muted-foreground hover:bg-muted'
+                    )}
+                  >
+                    All channels
+                  </button>
+                  {channelOptions.map((c) => (
+                    <button
+                      key={c.key}
+                      type="button"
+                      aria-pressed={channelKey === c.key}
+                      onClick={() => setChannelKey(channelKey === c.key ? '' : c.key)}
+                      className={cn(
+                        'rounded-md border px-2 py-1 text-xs font-medium transition-colors',
+                        channelKey === c.key
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-border text-muted-foreground hover:bg-muted'
+                      )}
+                    >
+                      {c.name} <span className="tabular-nums opacity-70">{c.total}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {tiles && (
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                  <StatTile value={stats.both} label={SOURCE_META.both.label} tone="text-success" />
+                  <StatTile value={tiles.both} label={SOURCE_META.both.label} tone="text-success" />
                   <StatTile
-                    value={stats.node_only}
+                    value={tiles.node_only}
                     label={SOURCE_META.node.label}
                     tone="text-info"
                   />
                   <StatTile
-                    value={stats.live_only}
+                    value={tiles.live_only}
                     label={SOURCE_META.live.label}
                     tone="text-warning"
                   />
                   <StatTile
-                    value={formatPercent(stats.node_coverage_pct)}
+                    value={formatPercent(tiles.node_coverage_pct)}
                     label="Node heard of live feed"
                   />
                 </div>
@@ -504,21 +577,6 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
                     </button>
                   ))}
                 </div>
-                {channelOptions.length > 1 && (
-                  <select
-                    aria-label="Channel"
-                    value={channelKey}
-                    onChange={(e) => setChannelKey(e.target.value)}
-                    className="h-8 rounded-md border border-input bg-background px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-                  >
-                    <option value="">All channels</option>
-                    {channelOptions.map((c) => (
-                      <option key={c.key} value={c.key}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                )}
                 <Input
                   type="search"
                   placeholder="Filter text…"
@@ -547,7 +605,11 @@ export function LiveCompareView({ channels, onOpenSettings }: LiveCompareViewPro
                     <MessageRow
                       key={message.key}
                       message={message}
-                      showChannel={!channelKey && channelOptions.length > 1}
+                      channelName={
+                        message.channel_name ??
+                        channelOptions.find((c) => c.key === message.channel_key)?.name ??
+                        null
+                      }
                       onInspect={setInspecting}
                     />
                   ))}
