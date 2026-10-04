@@ -321,6 +321,11 @@ class BotMessage:
     # packet, so ``path`` is empty even when it crossed several hops; an empty
     # ``path`` with this False is a genuine zero-hop neighbour.
     direct_routed: bool = False
+    # Hop count when known: 0 for a neighbour, None when no copy carrying the
+    # route has been heard (e.g. only the radio's own decrypted copy).
+    hops: int | None = None
+    # Stored message row, so the route can be re-read once every copy landed.
+    message_id: int | None = None
 
     @property
     def arg_text(self) -> str:

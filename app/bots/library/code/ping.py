@@ -26,7 +26,7 @@ BOT_META = {
         "message was scoped; and your clock offset when it is far enough off to matter. One frame "
         "in, one frame out, which makes it the standard first check from a new spot."
     ),
-    "version": "1.3.2",
+    "version": "1.3.3",
 }
 
 # Below this the two clocks are close enough that reporting the delta is noise.
@@ -48,8 +48,14 @@ async def signal_report(ctx, msg):
         # Repeaters strip their hop from a direct-routed packet, so the hops
         # are unknown here -- it is not necessarily a neighbour.
         parts.append("Direct-routed (hops not visible)")
-    else:
+    elif msg.hops == 0:
         parts.append("Direct (0 hops)")
+    elif msg.hops:
+        noun = "hop" if msg.hops == 1 else "hops"
+        parts.append(f"Via {msg.hops} {noun} (path not visible)")
+    else:
+        # Only the radio's own decrypted copy was heard; it carries no route.
+        parts.append("Path unknown")
     if msg.scoped and msg.region:
         parts.append(f"region {msg.region}")
     if msg.sender_timestamp:
