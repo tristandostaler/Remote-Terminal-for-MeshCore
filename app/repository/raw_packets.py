@@ -176,6 +176,17 @@ class RawPacketRepository:
         return row["message_id"]
 
     @staticmethod
+    async def get_data_by_message_id(message_id: int) -> list[bytes]:
+        """Raw bytes of every packet linked to a decrypted message, oldest first."""
+        async with db.readonly() as conn:
+            async with conn.execute(
+                "SELECT data FROM raw_packets WHERE message_id = ? ORDER BY id",
+                (message_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [bytes(row["data"]) for row in rows]
+
+    @staticmethod
     async def get_by_id(packet_id: int) -> tuple[int, bytes, int, int | None] | None:
         """Return a raw packet row as (id, data, timestamp, message_id)."""
         async with db.readonly() as conn:

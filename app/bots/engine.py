@@ -84,20 +84,90 @@ _bot_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="botws_")
 DIRECT_ROUTED_PATH_LEN = 0xFF
 
 
-async def _arrived_direct_routed(packet_id: Any) -> bool:
-    """Whether the stored raw packet behind a message came on a direct route."""
-    if not isinstance(packet_id, int):
-        return False
-    try:
-        from app.decoder import RouteType, parse_packet
-        from app.repository import RawPacketRepository
+@dataclass
+class _Route:
+    """How a message reached us, as far as the stored copies can tell."""
 
-        row = await RawPacketRepository.get_by_id(packet_id)
-        info = parse_packet(row[1]) if row else None
-    except Exception:
-        logger.debug("Could not read route type of packet %s", packet_id, exc_info=True)
-        return False
+    path: str | None = None
+    hops: int | None = None
+    bytes_per_hop: int | None = None
+    direct_routed: bool = False
+
+
+def _is_direct_routed_packet(raw: bytes) -> bool:
+    from app.decoder import RouteType, parse_packet
+
+    info = parse_packet(raw)
     return info is not None and info.route_type in (RouteType.DIRECT, RouteType.TRANSPORT_DIRECT)
+
+
+def _resolve_route(paths: Any, raw_packets: list[bytes]) -> _Route:
+    """Work out the route from a message's stored paths and raw packets.
+
+    Three kinds of copy reach the store, and only the first carries the route:
+    - the raw RX-log packet: path bytes for a flood, an empty path for a
+      zero-hop neighbour *and* for a direct-routed packet (each repeater strips
+      its own hash as it forwards), told apart only by the packet's route type;
+    - the radio's own decrypted copy (CONTACT_MSG_RECV / CHANNEL_MSG_RECV):
+      no path at all, so no paths entry;
+    - a companion 0xFF path_len: direct-routed, hop count unknown.
+    """
+    entries = [p for p in paths or [] if isinstance(p, dict)]
+    for entry in entries:
+        hex_path = entry.get("path")
+        if isinstance(hex_path, str) and hex_path:
+            raw_len = entry.get("path_len")
+            hops = raw_len if isinstance(raw_len, int) and raw_len > 0 else len(hex_path) // 2
+            path_bytes = len(hex_path) // 2
+            per_hop = path_bytes // hops if hops and path_bytes % hops == 0 else None
+            return _Route(
+                path=hex_path,
+                hops=hops,
+                bytes_per_hop=per_hop if per_hop in (1, 2, 3) else None,
+            )
+    if any(entry.get("path_len") == DIRECT_ROUTED_PATH_LEN for entry in entries):
+        return _Route(path="", direct_routed=True)
+    try:
+        if any(_is_direct_routed_packet(raw) for raw in raw_packets):
+            return _Route(path="", direct_routed=True)
+    except Exception:
+        logger.debug("Could not read a raw packet's route type", exc_info=True)
+    if entries:
+        # A heard copy with an empty path that was not direct-routed.
+        raw_len = entries[0].get("path_len")
+        return _Route(path="", hops=raw_len if isinstance(raw_len, int) else 0)
+    # Only the radio's decrypted copy so far: the route is unknown, not direct.
+    return _Route()
+
+
+async def _refresh_route(msg: BotMessage) -> None:
+    """Re-read the route once the other copies of the message have landed.
+
+    The radio's decrypted copy often reaches the store before the raw RX-log
+    packet; the bot event fires on that first copy, so it carries no path.
+    By the time the settle delay ends the raw copy has been folded onto the
+    stored message, adding its path and linking its raw packet.
+    """
+    if msg.message_id is None:
+        return
+    try:
+        from app.repository import MessageRepository, RawPacketRepository
+
+        stored = await MessageRepository.get_by_id(msg.message_id)
+        if stored is None:
+            return
+        paths = [p.model_dump() for p in stored.paths or []]
+        raw_packets = await RawPacketRepository.get_data_by_message_id(msg.message_id)
+    except Exception:
+        logger.debug("Could not refresh route of message %s", msg.message_id, exc_info=True)
+        return
+    route = _resolve_route(paths, raw_packets)
+    if route.path is None and msg.path is not None:
+        return  # nothing new; keep what the event carried
+    msg.path = route.path
+    msg.hops = route.hops
+    msg.path_bytes_per_hop = route.bytes_per_hop
+    msg.direct_routed = route.direct_routed
 
 
 @dataclass
@@ -454,34 +524,18 @@ class BotEngine:
                 text = text[len(f"{sender_name}: ") :]
 
         paths = data.get("paths")
-        path_value = data.get("path")
-        path_hops: int | None = None
-        if isinstance(paths, list) and paths and isinstance(paths[0], dict):
-            if path_value is None:
-                path_value = paths[0].get("path")
-            raw_len = paths[0].get("path_len")
-            if isinstance(raw_len, int):
-                path_hops = raw_len
+        if data.get("path") and not paths:
+            paths = [{"path": data.get("path"), "path_len": None}]
+        raw_packets: list[bytes] = []
+        packet_id = data.get("packet_id")
+        if isinstance(packet_id, int) and not is_outgoing:
+            from app.repository import RawPacketRepository
 
-        direct_routed = False
-        if not path_value:
-            # A packet sent on a learned direct route loses each hop as a
-            # repeater forwards it (firmware strips its own hash), so it lands
-            # with an empty path exactly like a zero-hop neighbour. Only the
-            # route type tells the two apart.
-            if path_hops == DIRECT_ROUTED_PATH_LEN:
-                # Companion CONTACT_MSG_RECV marks a direct-routed packet with
-                # path_len 0xFF; its hop count is unknown, not 255.
-                direct_routed = True
-                path_hops = None
-            else:
-                direct_routed = await _arrived_direct_routed(data.get("packet_id"))
-
-        path_bytes_per_hop: int | None = None
-        if isinstance(path_value, str) and path_value and path_hops:
-            path_bytes = len(path_value) // 2
-            if path_bytes % path_hops == 0 and path_bytes // path_hops in (1, 2, 3):
-                path_bytes_per_hop = path_bytes // path_hops
+            row = await RawPacketRepository.get_by_id(packet_id)
+            if row:
+                raw_packets.append(row[1])
+        route = _resolve_route(paths, raw_packets)
+        message_id = data.get("id")
 
         message = BotMessage(
             text=text,
@@ -494,14 +548,16 @@ class BotEngine:
             room_key=room_key,
             room_name=room_name,
             sender_timestamp=data.get("sender_timestamp"),
-            path=path_value if isinstance(path_value, str) else None,
-            path_bytes_per_hop=path_bytes_per_hop,
+            path=route.path,
+            path_bytes_per_hop=route.bytes_per_hop,
+            hops=route.hops,
+            message_id=message_id if isinstance(message_id, int) else None,
             region=data.get("region"),
             scoped=data.get("transport_code") is not None,
             is_outgoing=is_outgoing,
-            direct_routed=direct_routed,
+            direct_routed=route.direct_routed,
         )
-        return message, path_hops
+        return message, route.hops
 
     def _node_name(self) -> str | None:
         try:
@@ -903,6 +959,8 @@ class BotEngine:
             await asyncio.sleep(SETTLE_DELAY_SECONDS)
         elif legacy:
             await asyncio.sleep(SETTLE_DELAY_SECONDS)
+        if msg is not None and not msg.is_outgoing:
+            await _refresh_route(msg)
 
         started_at = int(time.time())
         start = time.monotonic()
@@ -1179,6 +1237,7 @@ class BotEngine:
             if is_room
             else None,
             room_name=(request.room_name or "#test room") if is_room else None,
+            hops=0,  # a test message is treated as heard from a neighbour
         )
 
         loaded = LoadedBot(record=record, code=code)

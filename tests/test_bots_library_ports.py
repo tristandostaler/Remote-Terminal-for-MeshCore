@@ -212,6 +212,66 @@ class TestDirectRoutedArrival:
         assert msg.direct_routed is False
         assert hops == 2
 
+    async def test_radio_copy_alone_is_unknown_not_direct(self, test_db):
+        """The radio's decrypted copy has no paths entry: route unknown."""
+        msg, hops = await self._build({"paths": None})
+        assert msg.direct_routed is False
+        assert msg.hops is None
+        assert hops is None
+
+    async def _stored_radio_copy(self) -> int:
+        from app.repository import MessageRepository
+
+        msg_id = await MessageRepository.create(
+            msg_type="PRIV",
+            text="ping",
+            conversation_key="ab" * 32,
+            sender_timestamp=int(time.time()),
+            received_at=int(time.time()),
+        )
+        assert msg_id is not None
+        return msg_id
+
+    async def test_refresh_picks_up_raw_flood_path_added_after_radio_copy(self, test_db):
+        from app.bots.engine import _refresh_route
+        from app.repository import MessageRepository
+
+        msg_id = await self._stored_radio_copy()
+        msg, _ = await self._build({"id": msg_id, "paths": None})
+        assert msg.path is None
+        await MessageRepository.add_path(msg_id, "a1b2c3", int(time.time()), 3)
+        await _refresh_route(msg)
+        assert msg.path == "a1b2c3"
+        assert msg.hops == 3
+        assert msg.path_bytes_per_hop == 1
+        assert msg.direct_routed is False
+
+    async def test_refresh_flags_direct_routed_raw_copy(self, test_db):
+        from app.bots.engine import _refresh_route
+        from app.repository import MessageRepository, RawPacketRepository
+
+        msg_id = await self._stored_radio_copy()
+        msg, _ = await self._build({"id": msg_id, "paths": None})
+        packet_id, _ = await RawPacketRepository.create(self._packet(0x02))
+        await MessageRepository.add_path(msg_id, "", int(time.time()), 0)
+        await RawPacketRepository.mark_decrypted(packet_id, msg_id)
+        await _refresh_route(msg)
+        assert msg.direct_routed is True
+        assert msg.hops is None
+
+    async def test_refresh_keeps_zero_hop_flood_as_neighbour(self, test_db):
+        from app.bots.engine import _refresh_route
+        from app.repository import MessageRepository, RawPacketRepository
+
+        msg_id = await self._stored_radio_copy()
+        msg, _ = await self._build({"id": msg_id, "paths": None})
+        packet_id, _ = await RawPacketRepository.create(self._packet(0x01))
+        await MessageRepository.add_path(msg_id, "", int(time.time()), 0)
+        await RawPacketRepository.mark_decrypted(packet_id, msg_id)
+        await _refresh_route(msg)
+        assert msg.direct_routed is False
+        assert msg.hops == 0
+
     async def test_ping_says_hops_are_unknown_for_direct_routed(self):
         entry = get_library_entry("ping")
         loaded = load_bot_code(entry["code"])
@@ -223,7 +283,11 @@ class TestDirectRoutedArrival:
 
         handler = loaded.namespace["signal_report"]
         await handler(_Ctx(), BotMessage(text="ping", sender_name="K0PHX", direct_routed=True))
-        assert "Direct-routed" in replies[0]
+        assert "Direct-routed" in replies[-1]
+        await handler(_Ctx(), BotMessage(text="ping", sender_name="K0PHX"))
+        assert "Path unknown" in replies[-1]
+        await handler(_Ctx(), BotMessage(text="ping", sender_name="K0PHX", hops=0))
+        assert "Direct (0 hops)" in replies[-1]
 
 
 class TestMultitest:
