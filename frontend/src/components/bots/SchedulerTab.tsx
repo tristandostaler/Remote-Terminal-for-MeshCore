@@ -23,6 +23,8 @@ export function SchedulerTab({ channels }: { channels: Channel[] }) {
   const [message, setMessage] = useState('');
   const [region, setRegion] = useState('');
   const [creating, setCreating] = useState(false);
+  // Non-null while the form is editing an existing schedule instead of creating one.
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const targetChannels = useMemo(() => channels.filter((c) => c.key), [channels]);
 
@@ -77,28 +79,57 @@ export function SchedulerTab({ channels }: { channels: Channel[] }) {
     setChannelKey('');
     setMessage('');
     setRegion('');
+    setEditingId(null);
   };
 
-  const handleCreate = async () => {
+  const openNewForm = () => {
+    if (showForm && editingId === null) {
+      setShowForm(false);
+      return;
+    }
+    resetForm();
+    setShowForm(true);
+  };
+
+  const handleEdit = (schedule: BotSchedule) => {
+    setEditingId(schedule.id);
+    setLabel(schedule.label);
+    setCron(schedule.cron);
+    setCronPreview(null);
+    setChannelKey(schedule.channel_key);
+    setMessage(schedule.message);
+    setRegion(schedule.flood_scope ?? '');
+    setConfirmDeleteId(null);
+    setShowForm(true);
+  };
+
+  const handleSubmit = async () => {
     if (!label.trim() || !cron.trim() || !channelKey || !message.trim()) {
       toast.error('Label, cron, channel and message are required');
       return;
     }
+    const payload = {
+      label: label.trim(),
+      cron: cron.trim(),
+      channel_key: channelKey,
+      message: message.trim(),
+      flood_scope: region.trim() ? region.trim() : null,
+    };
     setCreating(true);
     try {
-      const created = await api.createBotSchedule({
-        label: label.trim(),
-        cron: cron.trim(),
-        channel_key: channelKey,
-        message: message.trim(),
-        flood_scope: region.trim() ? region.trim() : null,
-      });
-      setSchedules((prev) => [...prev, created]);
+      if (editingId) {
+        const updated = await api.updateBotSchedule(editingId, payload);
+        setSchedules((prev) => prev.map((s) => (s.id === editingId ? updated : s)));
+        toast.success(`${updated.label} updated`);
+      } else {
+        const created = await api.createBotSchedule(payload);
+        setSchedules((prev) => [...prev, created]);
+        toast.success(`${created.label} scheduled`);
+      }
       resetForm();
       setShowForm(false);
-      toast.success(`${created.label} scheduled`);
     } catch (err) {
-      toast.error('Failed to create schedule', {
+      toast.error(`Failed to ${editingId ? 'update' : 'create'} schedule`, {
         description: err instanceof Error ? err.message : undefined,
       });
     } finally {
@@ -125,6 +156,10 @@ export function SchedulerTab({ channels }: { channels: Channel[] }) {
     try {
       await api.deleteBotSchedule(schedule.id);
       setSchedules((prev) => prev.filter((s) => s.id !== schedule.id));
+      if (editingId === schedule.id) {
+        resetForm();
+        setShowForm(false);
+      }
       toast.success(`${schedule.label} deleted`);
     } catch (err) {
       toast.error('Delete failed', {
@@ -145,7 +180,7 @@ export function SchedulerTab({ channels }: { channels: Channel[] }) {
           like <span className="font-mono text-foreground">{'{total_contacts}'}</span>,{' '}
           <span className="font-mono text-foreground">{'{messages_24h}'}</span>
         </div>
-        <Button size="sm" className="flex-shrink-0" onClick={() => setShowForm((v) => !v)}>
+        <Button size="sm" className="flex-shrink-0" onClick={openNewForm}>
           <Plus className="h-3.5 w-3.5 mr-1" aria-hidden="true" />
           New schedule
         </Button>
@@ -153,6 +188,7 @@ export function SchedulerTab({ channels }: { channels: Channel[] }) {
 
       {showForm && (
         <div className="border border-border rounded-lg p-3.5 flex flex-col gap-3 max-w-2xl">
+          <div className="text-xs font-medium">{editingId ? 'Edit schedule' : 'New schedule'}</div>
           <div className="flex gap-3">
             <div className="flex-1">
               <div className="text-xs text-muted-foreground mb-1">Label</div>
@@ -222,8 +258,8 @@ export function SchedulerTab({ channels }: { channels: Channel[] }) {
               />
             </div>
             <div className="flex-1" />
-            <Button size="sm" onClick={() => void handleCreate()} disabled={creating}>
-              {creating ? 'Creating…' : 'Create'}
+            <Button size="sm" onClick={() => void handleSubmit()} disabled={creating}>
+              {editingId ? (creating ? 'Saving…' : 'Save') : creating ? 'Creating…' : 'Create'}
             </Button>
             <Button
               variant="ghost"
@@ -239,92 +275,106 @@ export function SchedulerTab({ channels }: { channels: Channel[] }) {
         </div>
       )}
 
-      <div className="border border-border rounded-lg overflow-hidden max-w-5xl">
-        <div className="flex items-center gap-2.5 px-3 py-2 bg-muted text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium">
-          <span className="w-6" />
-          <span className="w-32">Label</span>
-          <span className="w-28">Cron</span>
-          <span className="w-28">Target</span>
-          <span className="flex-1">Message</span>
-          <span className="w-36">Next run</span>
-          <span className="w-24">Last result</span>
-          <span className="w-16" />
-        </div>
-        {loading && (
-          <div className="px-3 py-4 text-xs text-muted-foreground">Loading schedules…</div>
-        )}
-        {!loading && schedules.length === 0 && (
-          <div className="px-3 py-4 text-xs text-muted-foreground">No scheduled messages yet.</div>
-        )}
-        {schedules.map((schedule) => (
-          <div
-            key={schedule.id}
-            className="flex items-center gap-2.5 px-3 py-1.5 border-t border-border/50 text-xs"
-          >
-            <label className="w-6 flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={schedule.enabled}
-                onChange={() => void handleToggleEnabled(schedule)}
-                className="w-4 h-4 rounded border-input accent-primary"
-                aria-label={`Enable ${schedule.label}`}
-              />
-            </label>
-            <span
-              className={cn(
-                'w-32 text-[0.8125rem] font-medium truncate',
-                !schedule.enabled && 'text-muted-foreground'
-              )}
-            >
-              {schedule.label}
-            </span>
-            <span className="w-28 flex-shrink-0">
-              <span className="font-mono text-[0.6875rem] bg-info/15 text-info rounded px-1.5 py-0.5">
-                {schedule.cron}
-              </span>
-            </span>
-            <span className="w-28 flex-shrink-0 truncate">
-              <span className="text-[0.6875rem] bg-primary/10 text-primary rounded px-1.5 py-0.5 whitespace-nowrap">
-                → {schedule.channel_name ?? `${schedule.channel_key.slice(0, 8)}…`}
-              </span>
-            </span>
-            <span className="flex-1 min-w-0 text-muted-foreground truncate">
-              {schedule.message}
-            </span>
-            <span className="w-36 flex-shrink-0 text-[0.6875rem] text-muted-foreground">
-              {schedule.enabled && schedule.next_run_at
-                ? new Date(schedule.next_run_at * 1000).toLocaleString([], {
-                    month: 'short',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })
-                : 'paused'}
-            </span>
-            <span
-              className={cn(
-                'w-24 flex-shrink-0 text-[0.6875rem] truncate',
-                schedule.last_result?.startsWith('error')
-                  ? 'text-destructive'
-                  : 'text-muted-foreground'
-              )}
-              title={schedule.last_result ?? undefined}
-            >
-              {schedule.last_result ?? '—'}
-            </span>
-            <span className="w-16 flex-shrink-0 flex justify-end">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-6 px-2 text-xs text-destructive hover:bg-destructive/10"
-                onClick={() => void handleDelete(schedule)}
-                onBlur={() => setConfirmDeleteId(null)}
-              >
-                {confirmDeleteId === schedule.id ? 'Confirm' : 'Delete'}
-              </Button>
-            </span>
+      {/* Scrolls sideways on narrow screens; the Edit/Delete column stays pinned on the right. */}
+      <div className="border border-border rounded-lg overflow-x-auto max-w-5xl">
+        <div className="min-w-[56rem]">
+          <div className="flex items-center gap-2.5 px-3 py-2 bg-muted text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium">
+            <span className="w-6" />
+            <span className="w-32">Label</span>
+            <span className="w-28">Cron</span>
+            <span className="w-28">Target</span>
+            <span className="flex-1">Message</span>
+            <span className="w-36">Next run</span>
+            <span className="w-24">Last result</span>
+            <span className="w-32 flex-shrink-0 sticky right-0 self-stretch bg-muted" />
           </div>
-        ))}
+          {loading && (
+            <div className="px-3 py-4 text-xs text-muted-foreground">Loading schedules…</div>
+          )}
+          {!loading && schedules.length === 0 && (
+            <div className="px-3 py-4 text-xs text-muted-foreground">
+              No scheduled messages yet.
+            </div>
+          )}
+          {schedules.map((schedule) => (
+            <div
+              key={schedule.id}
+              className="flex items-center gap-2.5 px-3 py-1.5 border-t border-border/50 text-xs"
+            >
+              <label className="w-6 flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={schedule.enabled}
+                  onChange={() => void handleToggleEnabled(schedule)}
+                  className="w-4 h-4 rounded border-input accent-primary"
+                  aria-label={`Enable ${schedule.label}`}
+                />
+              </label>
+              <span
+                className={cn(
+                  'w-32 text-[0.8125rem] font-medium truncate',
+                  !schedule.enabled && 'text-muted-foreground'
+                )}
+              >
+                {schedule.label}
+              </span>
+              <span className="w-28 flex-shrink-0">
+                <span className="font-mono text-[0.6875rem] bg-info/15 text-info rounded px-1.5 py-0.5">
+                  {schedule.cron}
+                </span>
+              </span>
+              <span className="w-28 flex-shrink-0 truncate">
+                <span className="text-[0.6875rem] bg-primary/10 text-primary rounded px-1.5 py-0.5 whitespace-nowrap">
+                  → {schedule.channel_name ?? `${schedule.channel_key.slice(0, 8)}…`}
+                </span>
+              </span>
+              <span className="flex-1 min-w-0 text-muted-foreground truncate">
+                {schedule.message}
+              </span>
+              <span className="w-36 flex-shrink-0 text-[0.6875rem] text-muted-foreground">
+                {schedule.enabled && schedule.next_run_at
+                  ? new Date(schedule.next_run_at * 1000).toLocaleString([], {
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })
+                  : 'paused'}
+              </span>
+              <span
+                className={cn(
+                  'w-24 flex-shrink-0 text-[0.6875rem] truncate',
+                  schedule.last_result?.startsWith('error')
+                    ? 'text-destructive'
+                    : 'text-muted-foreground'
+                )}
+                title={schedule.last_result ?? undefined}
+              >
+                {schedule.last_result ?? '—'}
+              </span>
+              <span className="w-32 flex-shrink-0 flex justify-end gap-1 sticky right-0 bg-background">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={() => handleEdit(schedule)}
+                  aria-label={`Edit ${schedule.label}`}
+                >
+                  Edit
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs text-destructive hover:bg-destructive/10"
+                  onClick={() => void handleDelete(schedule)}
+                  onBlur={() => setConfirmDeleteId(null)}
+                >
+                  {confirmDeleteId === schedule.id ? 'Confirm' : 'Delete'}
+                </Button>
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
 
       <p className="text-[0.6875rem] text-muted-foreground">
